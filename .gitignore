@@ -1,0 +1,25 @@
+# Diretórios de compilação
+/build/
+/debug/
+/release/
+
+# Arquivos gerados pelo CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# Arquivos de saída do compilador e linker
+*.o
+*.a
+*.elf
+*.hex
+*.bin
+*.map
+*.list
+
+# Configurações de IDE (STM32CubeIDE, VSCode, etc.)
+.project
+.cproject
+.settings/
+.vscode/
