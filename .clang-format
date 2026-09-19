@@ -1,0 +1,21 @@
+# Reflete o estilo ja usado no codigo hand-written deste projeto
+# (Core/Bsp, Core/Services, Core/App, Core/Common). Nao aplicado
+# retroativamente aos arquivos gerados pelo CubeMX (Core/Src/main.c,
+# stm32h7xx_*.c, etc.) nem ao LVGL vendorizado (Core/ThirdParty) — rode
+# clang-format so' nos arquivos que voce escreve/edita manualmente.
+Language: Cpp
+BasedOnStyle: LLVM
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 100
+BreakBeforeBraces: Attach
+AllowShortIfStatementsOnASingleLine: false
+AllowShortLoopsOnASingleLine: false
+AllowShortFunctionsOnASingleLine: Empty
+IndentCaseLabels: true
+PointerAlignment: Right
+SpaceAfterCStyleCast: false
+AlignConsecutiveDeclarations: false
+AlignConsecutiveAssignments: false
+SortIncludes: false

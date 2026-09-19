@@ -230,6 +230,22 @@ SECTIONS
   PROVIDE( __bss_start = __tbss_start );
   PROVIDE( __bss_size = __bss_end - __bss_start );
 
+  /* Buffers usados como origem/destino de transferencias DMA (DMA1/DMA2).
+   * DTCMRAM (onde .bss/.data caem por padrao neste script) e' ligada
+   * apenas ao core Cortex-M7 e NAO e' alcancavel pelos controladores DMA
+   * do STM32H7 — um buffer la' faria o DMA ler/escrever lixo. RAM_D1 (AXI
+   * SRAM) esta' na matriz de barramento e e' alcancavel por DMA1/DMA2.
+   * NOLOAD: nao e' zerada no boot (a startup so' zera _sbss.._ebss); os
+   * usos atuais sempre escrevem o buffer antes de le-lo (LVGL renderiza
+   * antes do flush, ADC recebe amostra nova antes da leitura). */
+  .dma_buffer (NOLOAD) : ALIGN(32)
+  {
+    . = ALIGN(32);
+    *(.dma_buffer)
+    *(.dma_buffer*)
+    . = ALIGN(32);
+  } >RAM_D1
+
   /* User_heap_stack section, used to check that there is enough RAM left */
   ._user_heap_stack (NOLOAD) :
   {

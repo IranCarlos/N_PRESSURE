@@ -42,14 +42,44 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined library search paths
 )
 
-# Add sources to executable
+# Add sources to executable — arquitetura em camadas (portados de
+# STM32L476/Core/Controller): Bsp (drivers de hardware desta placa),
+# Services (logica de negocio), App (orquestracao/UI). Dependencia:
+# App -> Services -> Bsp -> Drivers(HAL). Common (Core/Common) nao tem
+# .c, so' headers de tipos compartilhados.
+file(GLOB_RECURSE CORE_SRC
+    "Core/Bsp/*/Src/*.c"
+    "Core/Services/*/Src/*.c"
+    "Core/App/*/Src/*.c"
+)
+
 target_sources(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user sources here
+    ${CORE_SRC}
+)
+
+# --- LVGL Sources (vendored, third-party) ---
+file(GLOB_RECURSE LVGL_CORE_SOURCES
+    "Core/ThirdParty/lvgl/src/*.c"
+)
+
+target_sources(${CMAKE_PROJECT_NAME} PRIVATE
+    ${LVGL_CORE_SOURCES}
 )
 
 # Add include paths
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
-    # Add user defined include paths
+    Core/Common/Inc
+    Core/Bsp/ST7789/Inc
+    Core/Bsp/Encoder/Inc
+    Core/Bsp/Buzzer/Inc
+    Core/Bsp/Pedal/Inc
+    Core/Bsp/LvglPort/Inc
+    Core/Services/ADC_Acq/Inc
+    Core/Services/Control_Loop/Inc
+    Core/Services/EEPROM/Inc
+    Core/App/HMI_UI/Inc
+    # LVGL includes
+    Core/ThirdParty/lvgl
 )
 
 # Add project symbols (macros)
