@@ -89,7 +89,8 @@ void PressureCore_ProcessBlock(PressureCore_t *pc, const uint16_t *raw,
         if (pc->atmospheric_valid == 0u) {
             pc->atmospheric_kpa = pc->raw_kpa;
             pc->atmospheric_valid = 1u;
-        } else {
+        } else if (fabsf(pc->raw_kpa - pc->atmospheric_kpa) <=
+                   PRESSURE_ATM_TRACK_WINDOW_KPA) {
             pc->atmospheric_kpa +=
                 (pc->raw_kpa - pc->atmospheric_kpa) * PRESSURE_ATM_ALPHA;
         }

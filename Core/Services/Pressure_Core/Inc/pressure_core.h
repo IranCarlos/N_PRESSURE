@@ -41,7 +41,11 @@ extern "C" {
  * Com ADC de 16 bits + oversampling o ruido real nunca e' zero. */
 #define PRESSURE_STUCK_BLOCKS        (500u)
 
-#define PRESSURE_ATM_ALPHA           (0.02f)
+/* Rastreio do zero atmosferico: chamado a cada bloco (1 ms), entao alpha
+ * 0.0002 = constante de tempo ~5 s (so' deriva termica). Alem disso so'
+ * acompanha desvios pequenos: pressao aplicada (> janela) nunca vira "zero". */
+#define PRESSURE_ATM_ALPHA           (0.0002f)
+#define PRESSURE_ATM_TRACK_WINDOW_KPA (0.5f)
 
 typedef enum {
     PRESSURE_FLAG_NONE       = 0u,

@@ -43,6 +43,31 @@ static void test_baseline_and_diff(void)
     NEAR(pc.pressure_kpa, 1.0f, 0.01f);
 }
 
+static void test_baseline_ignores_applied_pressure(void)
+{
+    PressureCore_t pc; uint16_t b[16];
+    PressureCore_Init(&pc, NULL);
+    fill(b, 16, counts_for_sensor_v(2.50f));
+    PressureCore_ProcessBlock(&pc, b, 16, 1);
+    /* +2 kPa aplicados durante 10 s COM tracking ligado (estado IDLE):
+     * fora da janela, o zero nao pode acompanhar. */
+    fill(b, 16, counts_for_sensor_v(2.50f + 0.18f));
+    for (int i = 0; i < 10000; i++) { PressureCore_ProcessBlock(&pc, b, 16, 1); }
+    NEAR(pc.pressure_kpa, 2.0f, 0.02f);
+}
+
+static void test_baseline_follows_slow_drift(void)
+{
+    PressureCore_t pc; uint16_t b[16];
+    PressureCore_Init(&pc, NULL);
+    fill(b, 16, counts_for_sensor_v(2.50f));
+    PressureCore_ProcessBlock(&pc, b, 16, 1);
+    /* deriva de +0.2 kPa (dentro da janela): apos ~30 s (6 constantes) some. */
+    fill(b, 16, counts_for_sensor_v(2.50f + 0.018f));
+    for (int i = 0; i < 30000; i++) { PressureCore_ProcessBlock(&pc, b, 16, 1); }
+    NEAR(pc.pressure_kpa, 0.0f, 0.01f);
+}
+
 static void test_calibration_applied(void)
 {
     PressureCore_t pc; uint16_t b[16];
@@ -109,6 +134,8 @@ int main(void)
 {
     test_curve_endpoints();
     test_baseline_and_diff();
+    test_baseline_ignores_applied_pressure();
+    test_baseline_follows_slow_drift();
     test_calibration_applied();
     test_two_point();
     test_out_of_range();
