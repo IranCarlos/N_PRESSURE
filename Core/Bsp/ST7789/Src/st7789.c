@@ -39,16 +39,16 @@ void ST7789_SendData(uint8_t data) {
 
 void ST7789_SetWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1) {
     ST7789_SendCmd(0x2A); // Column Address Set
-    ST7789_SendData(x0 >> 8);
-    ST7789_SendData(x0 & 0xFF);
-    ST7789_SendData(x1 >> 8);
-    ST7789_SendData(x1 & 0xFF);
+    ST7789_SendData((uint8_t)(x0 >> 8));
+    ST7789_SendData((uint8_t)(x0 & 0xFFu));
+    ST7789_SendData((uint8_t)(x1 >> 8));
+    ST7789_SendData((uint8_t)(x1 & 0xFFu));
 
     ST7789_SendCmd(0x2B); // Row Address Set
-    ST7789_SendData(y0 >> 8);
-    ST7789_SendData(y0 & 0xFF);
-    ST7789_SendData(y1 >> 8);
-    ST7789_SendData(y1 & 0xFF);
+    ST7789_SendData((uint8_t)(y0 >> 8));
+    ST7789_SendData((uint8_t)(y0 & 0xFFu));
+    ST7789_SendData((uint8_t)(y1 >> 8));
+    ST7789_SendData((uint8_t)(y1 & 0xFFu));
 
     ST7789_SendCmd(0x2C); // Memory Write
 }

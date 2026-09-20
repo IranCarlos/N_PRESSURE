@@ -22,9 +22,9 @@ static lv_display_t * s_pending_flush_disp;
 static void disp_flush(lv_display_t * disp, const lv_area_t * area, uint8_t * px_map)
 {
     HAL_StatusTypeDef hal_status;
-    ST7789_SetWindow(area->x1, area->y1, area->x2, area->y2);
+    ST7789_SetWindow((uint16_t)area->x1, (uint16_t)area->y1, (uint16_t)area->x2, (uint16_t)area->y2);
 
-    uint32_t pixel_count = (area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1);
+    uint32_t pixel_count = (uint32_t)((area->x2 - area->x1 + 1) * (area->y2 - area->y1 + 1));
     uint32_t size_in_bytes = pixel_count * 2;
 
     // --- SWAP DE BYTES POR SOFTWARE ---

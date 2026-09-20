@@ -105,6 +105,19 @@ void ControlLoop_EnterConfigMode(void);
 void ControlLoop_ExitConfigMode(void);
 
 /**
+ * @brief Forca o sistema para o estado seguro (SYSTEM_STATE_FAULT).
+ *
+ * Estado seguro conforme definido em CLAUDE.md: motor OFF (PWM=0) e as 3
+ * valvulas (V1+V2+V3) abertas, aplicado imediatamente (nao espera o proximo
+ * ControlLoop_Update()). Chamar de qualquer ponto de deteccao de falha
+ * (sobrepressao, sensor invalido, timeout de fase, watchdog, perda de
+ * heartbeat em modo manual) em vez de manipular valvulas/bomba diretamente.
+ * O sistema so sai de SYSTEM_STATE_FAULT por intervencao explicita (ainda
+ * nao implementada — depende do fluxo de reconhecimento de erro da IHM/DEV).
+ */
+void ControlLoop_EnterFaultState(void);
+
+/**
  * @brief Inicia a rotina de teste de vazamento.
  */
 void ControlLoop_StartLeakTest(void);

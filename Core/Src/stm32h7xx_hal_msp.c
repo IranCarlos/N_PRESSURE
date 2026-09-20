@@ -61,7 +61,7 @@ extern DMA_HandleTypeDef hdma_spi1_tx;
 /* USER CODE END 0 */
 
 void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
-                    /**
+                                        /**
   * Initializes the Global MSP.
   */
 void HAL_MspInit(void)
@@ -74,6 +74,8 @@ void HAL_MspInit(void)
   __HAL_RCC_SYSCFG_CLK_ENABLE();
 
   /* System interrupt init*/
+  /* PendSV_IRQn interrupt configuration */
+  HAL_NVIC_SetPriority(PendSV_IRQn, 15, 0);
 
   /* USER CODE BEGIN MspInit 1 */
 
@@ -137,7 +139,7 @@ void HAL_ADC_MspInit(ADC_HandleTypeDef* hadc)
     __HAL_LINKDMA(hadc,DMA_Handle,hdma_adc2);
 
     /* ADC2 interrupt Init */
-    HAL_NVIC_SetPriority(ADC_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(ADC_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(ADC_IRQn);
     /* USER CODE BEGIN ADC2_MspInit 1 */
 
@@ -220,9 +222,9 @@ void HAL_I2C_MspInit(I2C_HandleTypeDef* hi2c)
     /* Peripheral clock enable */
     __HAL_RCC_I2C1_CLK_ENABLE();
     /* I2C1 interrupt Init */
-    HAL_NVIC_SetPriority(I2C1_EV_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(I2C1_EV_IRQn, 10, 0);
     HAL_NVIC_EnableIRQ(I2C1_EV_IRQn);
-    HAL_NVIC_SetPriority(I2C1_ER_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(I2C1_ER_IRQn, 10, 0);
     HAL_NVIC_EnableIRQ(I2C1_ER_IRQn);
     /* USER CODE BEGIN I2C1_MspInit 1 */
 
@@ -262,6 +264,62 @@ void HAL_I2C_MspDeInit(I2C_HandleTypeDef* hi2c)
     /* USER CODE BEGIN I2C1_MspDeInit 1 */
 
     /* USER CODE END I2C1_MspDeInit 1 */
+  }
+
+}
+
+/**
+  * @brief RTC MSP Initialization
+  * This function configures the hardware resources used in this example
+  * @param hrtc: RTC handle pointer
+  * @retval None
+  */
+void HAL_RTC_MspInit(RTC_HandleTypeDef* hrtc)
+{
+  RCC_PeriphCLKInitTypeDef PeriphClkInitStruct = {0};
+  if(hrtc->Instance==RTC)
+  {
+    /* USER CODE BEGIN RTC_MspInit 0 */
+
+    /* USER CODE END RTC_MspInit 0 */
+
+  /** Initializes the peripherals clock
+  */
+    PeriphClkInitStruct.PeriphClockSelection = RCC_PERIPHCLK_RTC;
+    PeriphClkInitStruct.RTCClockSelection = RCC_RTCCLKSOURCE_LSI;
+    if (HAL_RCCEx_PeriphCLKConfig(&PeriphClkInitStruct) != HAL_OK)
+    {
+      Error_Handler();
+    }
+
+    /* Peripheral clock enable */
+    __HAL_RCC_RTC_ENABLE();
+    /* USER CODE BEGIN RTC_MspInit 1 */
+
+    /* USER CODE END RTC_MspInit 1 */
+
+  }
+
+}
+
+/**
+  * @brief RTC MSP De-Initialization
+  * This function freeze the hardware resources used in this example
+  * @param hrtc: RTC handle pointer
+  * @retval None
+  */
+void HAL_RTC_MspDeInit(RTC_HandleTypeDef* hrtc)
+{
+  if(hrtc->Instance==RTC)
+  {
+    /* USER CODE BEGIN RTC_MspDeInit 0 */
+
+    /* USER CODE END RTC_MspDeInit 0 */
+    /* Peripheral clock disable */
+    __HAL_RCC_RTC_DISABLE();
+    /* USER CODE BEGIN RTC_MspDeInit 1 */
+
+    /* USER CODE END RTC_MspDeInit 1 */
   }
 
 }
@@ -320,7 +378,7 @@ void HAL_SD_MspInit(SD_HandleTypeDef* hsd)
     HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
 
     /* SDMMC1 interrupt Init */
-    HAL_NVIC_SetPriority(SDMMC1_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(SDMMC1_IRQn, 10, 0);
     HAL_NVIC_EnableIRQ(SDMMC1_IRQn);
     /* USER CODE BEGIN SDMMC1_MspInit 1 */
 
@@ -428,7 +486,7 @@ void HAL_SPI_MspInit(SPI_HandleTypeDef* hspi)
     __HAL_LINKDMA(hspi,hdmatx,hdma_spi1_tx);
 
     /* SPI1 interrupt Init */
-    HAL_NVIC_SetPriority(SPI1_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(SPI1_IRQn, 10, 0);
     HAL_NVIC_EnableIRQ(SPI1_IRQn);
     /* USER CODE BEGIN SPI1_MspInit 1 */
 
@@ -524,6 +582,9 @@ void HAL_TIM_PWM_MspInit(TIM_HandleTypeDef* htim_pwm)
     /* USER CODE END TIM3_MspInit 0 */
     /* Peripheral clock enable */
     __HAL_RCC_TIM3_CLK_ENABLE();
+    /* TIM3 interrupt Init */
+    HAL_NVIC_SetPriority(TIM3_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(TIM3_IRQn);
     /* USER CODE BEGIN TIM3_MspInit 1 */
 
     /* USER CODE END TIM3_MspInit 1 */
@@ -555,17 +616,40 @@ void HAL_TIM_IC_MspInit(TIM_HandleTypeDef* htim_ic)
     */
     GPIO_InitStruct.Pin = PEDAL_Pin;
     GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
-    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Pull = GPIO_PULLDOWN;
     GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
     GPIO_InitStruct.Alternate = GPIO_AF2_TIM4;
     HAL_GPIO_Init(PEDAL_GPIO_Port, &GPIO_InitStruct);
 
     /* TIM4 interrupt Init */
-    HAL_NVIC_SetPriority(TIM4_IRQn, 0, 0);
+    HAL_NVIC_SetPriority(TIM4_IRQn, 5, 0);
     HAL_NVIC_EnableIRQ(TIM4_IRQn);
     /* USER CODE BEGIN TIM4_MspInit 1 */
 
     /* USER CODE END TIM4_MspInit 1 */
+
+  }
+
+}
+
+/**
+  * @brief TIM_Base MSP Initialization
+  * This function configures the hardware resources used in this example
+  * @param htim_base: TIM_Base handle pointer
+  * @retval None
+  */
+void HAL_TIM_Base_MspInit(TIM_HandleTypeDef* htim_base)
+{
+  if(htim_base->Instance==TIM8)
+  {
+    /* USER CODE BEGIN TIM8_MspInit 0 */
+
+    /* USER CODE END TIM8_MspInit 0 */
+    /* Peripheral clock enable */
+    __HAL_RCC_TIM8_CLK_ENABLE();
+    /* USER CODE BEGIN TIM8_MspInit 1 */
+
+    /* USER CODE END TIM8_MspInit 1 */
 
   }
 
@@ -579,7 +663,6 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef* htim)
     /* USER CODE BEGIN TIM3_MspPostInit 0 */
 
     /* USER CODE END TIM3_MspPostInit 0 */
-
     __HAL_RCC_GPIOC_CLK_ENABLE();
     /**TIM3 GPIO Configuration
     PC6     ------> TIM3_CH1
@@ -594,6 +677,27 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef* htim)
     /* USER CODE BEGIN TIM3_MspPostInit 1 */
 
     /* USER CODE END TIM3_MspPostInit 1 */
+  }
+  else if(htim->Instance==TIM8)
+  {
+    /* USER CODE BEGIN TIM8_MspPostInit 0 */
+
+    /* USER CODE END TIM8_MspPostInit 0 */
+
+    __HAL_RCC_GPIOC_CLK_ENABLE();
+    /**TIM8 GPIO Configuration
+    PC7     ------> TIM8_CH2
+    */
+    GPIO_InitStruct.Pin = BUZZER_Pin;
+    GPIO_InitStruct.Mode = GPIO_MODE_AF_PP;
+    GPIO_InitStruct.Pull = GPIO_NOPULL;
+    GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+    GPIO_InitStruct.Alternate = GPIO_AF3_TIM8;
+    HAL_GPIO_Init(BUZZER_GPIO_Port, &GPIO_InitStruct);
+
+    /* USER CODE BEGIN TIM8_MspPostInit 1 */
+
+    /* USER CODE END TIM8_MspPostInit 1 */
   }
 
 }
@@ -641,6 +745,9 @@ void HAL_TIM_PWM_MspDeInit(TIM_HandleTypeDef* htim_pwm)
     /* USER CODE END TIM3_MspDeInit 0 */
     /* Peripheral clock disable */
     __HAL_RCC_TIM3_CLK_DISABLE();
+
+    /* TIM3 interrupt DeInit */
+    HAL_NVIC_DisableIRQ(TIM3_IRQn);
     /* USER CODE BEGIN TIM3_MspDeInit 1 */
 
     /* USER CODE END TIM3_MspDeInit 1 */
@@ -674,6 +781,28 @@ void HAL_TIM_IC_MspDeInit(TIM_HandleTypeDef* htim_ic)
     /* USER CODE BEGIN TIM4_MspDeInit 1 */
 
     /* USER CODE END TIM4_MspDeInit 1 */
+  }
+
+}
+
+/**
+  * @brief TIM_Base MSP De-Initialization
+  * This function freeze the hardware resources used in this example
+  * @param htim_base: TIM_Base handle pointer
+  * @retval None
+  */
+void HAL_TIM_Base_MspDeInit(TIM_HandleTypeDef* htim_base)
+{
+  if(htim_base->Instance==TIM8)
+  {
+    /* USER CODE BEGIN TIM8_MspDeInit 0 */
+
+    /* USER CODE END TIM8_MspDeInit 0 */
+    /* Peripheral clock disable */
+    __HAL_RCC_TIM8_CLK_DISABLE();
+    /* USER CODE BEGIN TIM8_MspDeInit 1 */
+
+    /* USER CODE END TIM8_MspDeInit 1 */
   }
 
 }
@@ -728,6 +857,13 @@ void HAL_PCD_MspInit(PCD_HandleTypeDef* hpcd)
 
     /* Peripheral clock enable */
     __HAL_RCC_USB_OTG_HS_CLK_ENABLE();
+    /* USB_OTG_HS interrupt Init */
+    HAL_NVIC_SetPriority(OTG_HS_EP1_OUT_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(OTG_HS_EP1_OUT_IRQn);
+    HAL_NVIC_SetPriority(OTG_HS_EP1_IN_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(OTG_HS_EP1_IN_IRQn);
+    HAL_NVIC_SetPriority(OTG_HS_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(OTG_HS_IRQn);
     /* USER CODE BEGIN USB_OTG_HS_PCD_MspInit 1 */
 
     /* USER CODE END USB_OTG_HS_PCD_MspInit 1 */
@@ -784,6 +920,13 @@ void HAL_HCD_MspInit(HCD_HandleTypeDef* hhcd)
 
     /* Peripheral clock enable */
     __HAL_RCC_USB_OTG_HS_CLK_ENABLE();
+    /* USB_OTG_HS interrupt Init */
+    HAL_NVIC_SetPriority(OTG_HS_EP1_OUT_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(OTG_HS_EP1_OUT_IRQn);
+    HAL_NVIC_SetPriority(OTG_HS_EP1_IN_IRQn, 5, 0);
+    HAL_NVIC_EnableIRQ(OTG_HS_EP1_IN_IRQn);
+    HAL_NVIC_SetPriority(OTG_HS_IRQn, 10, 0);
+    HAL_NVIC_EnableIRQ(OTG_HS_IRQn);
     /* USER CODE BEGIN USB_OTG_HS_HCD_MspInit 1 */
 
     /* USER CODE END USB_OTG_HS_HCD_MspInit 1 */
@@ -814,6 +957,10 @@ void HAL_PCD_MspDeInit(PCD_HandleTypeDef* hpcd)
     */
     HAL_GPIO_DeInit(GPIOA, GPIO_PIN_9|GPIO_PIN_10);
 
+    /* USB_OTG_HS interrupt DeInit */
+    HAL_NVIC_DisableIRQ(OTG_HS_EP1_OUT_IRQn);
+    HAL_NVIC_DisableIRQ(OTG_HS_EP1_IN_IRQn);
+    HAL_NVIC_DisableIRQ(OTG_HS_IRQn);
     /* USER CODE BEGIN USB_OTG_HS_PCD_MspDeInit 1 */
 
     /* USER CODE END USB_OTG_HS_PCD_MspDeInit 1 */
@@ -843,6 +990,10 @@ void HAL_HCD_MspDeInit(HCD_HandleTypeDef* hhcd)
     */
     HAL_GPIO_DeInit(GPIOA, GPIO_PIN_9|GPIO_PIN_10);
 
+    /* USB_OTG_HS interrupt DeInit */
+    HAL_NVIC_DisableIRQ(OTG_HS_EP1_OUT_IRQn);
+    HAL_NVIC_DisableIRQ(OTG_HS_EP1_IN_IRQn);
+    HAL_NVIC_DisableIRQ(OTG_HS_IRQn);
     /* USER CODE BEGIN USB_OTG_HS_HCD_MspDeInit 1 */
 
     /* USER CODE END USB_OTG_HS_HCD_MspDeInit 1 */

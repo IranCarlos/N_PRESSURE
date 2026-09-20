@@ -18,6 +18,8 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "FreeRTOS.h"
+#include "cmsis_os2.h"
 #include "fatfs.h"
 
 /* Private includes ----------------------------------------------------------*/
@@ -34,9 +36,14 @@
 #include "st7789.h"
 #include "buzzer.h"
 #include "eeprom_storage_io.h"
+#include "fault_manager.h"
+#include "port_dwt.h"
+#include "supervisor.h"
+#include <stm32h7xx_hal_flash_ex.h>
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
+typedef StaticTask_t osStaticThreadDef_t;
 /* USER CODE BEGIN PTD */
 
 /* USER CODE END PTD */
@@ -71,6 +78,40 @@
 #define TASK_HMI_PERIOD_MS          (20u)
 #define TASK_LVGL_HANDLER_PERIOD_MS (15u)
 #define TASK_IWDG_REFRESH_PERIOD_MS (1u)
+// Janela de avaliacao do supervisor (safetyTask). Bem menor que o timeout do
+// IWDG (~8,2 s) e maior que o periodo da tarefa critica mais lenta (appTask,
+// 20 ms) + o bloqueio do beep de bring-up (15 ms), com folga.
+#define SUPERVISOR_WINDOW_MS        (100u)
+
+// Teste de bancada do Fault_Manager (criterio de aceitacao da Fase 1: "hard
+// fault forcado e' registrado e sobrevive ao reset"). 0 = desligado (padrao).
+// Com N > 0, a safetyTask forca um HardFault N ms apos o boot. Com o
+// depurador anexado o GDB para na entrada do HardFault_Handler (vector
+// catch): de "Continue" para o handler gravar o registro e resetar. No boot
+// seguinte g_boot_fault_pending == 1 e g_boot_fault_record traz r0-r3, r12,
+// lr, pc, psr, CFSR, HFSR, MMFAR e BFAR (Live Watch), e o appTask toca 3
+// bipes graves. VOLTAR A 0 depois do teste.
+#define FAULT_TEST_FORCE_HARDFAULT_MS (0u)
+
+// MX_RTC_Init() (gerado pelo CubeMX, nao editavel fora dos marcadores) chama
+// HAL_RTC_SetTime()/SetDate() incondicionalmente a cada boot, com data/hora
+// fixas (00:00:00, 01/01) — sem essa guarda, o calendario seria resetado a
+// cada ligamento mesmo com o RTC alimentado por VBAT. RTC_BKP_DR13 marca
+// "calendario ja inicializado alguma vez" (RTC_BKP_DR0..12 sao usados pelo
+// Fault_Manager — ver fault_manager.c). So' e' escrito de novo se a bateria
+// de backup for removida/descarregar (perda do dominio de backup).
+#define RTC_CALENDAR_INITIALIZED_BKP_REG (RTC_BKP_DR13)
+#define RTC_CALENDAR_INITIALIZED_MAGIC   (0x32F2u)
+
+// Trava de seguranca de hardware: esta placa alimenta o nucleo pelo LDO
+// interno (H723VGT6 em LQFP100, sem SMPS). PWR_EXTERNAL_SOURCE_SUPPLY liga o
+// bypass do LDO — sem tensao de nucleo externa o chip morre, e como o bit so'
+// e' limpo por power-on-reset, nem reset nem debug reconectam ate' cortar a
+// energia. Se o CubeMX regenerar com essa fonte de novo, o build para aqui em
+// vez de gerar um firmware que "mata" a placa.
+#if defined(USE_PWR_EXTERNAL_SOURCE_SUPPLY) || defined(USE_PWR_DIRECT_SMPS_SUPPLY)
+#error "Fonte de alimentacao do nucleo deve ser PWR_LDO_SUPPLY (CubeMX: Clock Configuration / PWR -> Supply Source = LDO). Ver Docs/dev/00-auditoria.md."
+#endif
 
 /* USER CODE END PD */
 
@@ -87,6 +128,8 @@ I2C_HandleTypeDef hi2c1;
 
 IWDG_HandleTypeDef hiwdg1;
 
+RTC_HandleTypeDef hrtc;
+
 SD_HandleTypeDef hsd1;
 
 SPI_HandleTypeDef hspi1;
@@ -95,19 +138,138 @@ DMA_HandleTypeDef hdma_spi1_tx;
 TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
+TIM_HandleTypeDef htim8;
 
 PCD_HandleTypeDef hpcd_USB_OTG_HS;
 HCD_HandleTypeDef hhcd_USB_OTG_HS;
 
+/* Definitions for controlTask */
+osThreadId_t controlTaskHandle;
+uint32_t controlTaskBuffer[ 256 ];
+osStaticThreadDef_t controlTaskControlBlock;
+const osThreadAttr_t controlTask_attributes = {
+  .name = "controlTask",
+  .cb_mem = &controlTaskControlBlock,
+  .cb_size = sizeof(controlTaskControlBlock),
+  .stack_mem = &controlTaskBuffer[0],
+  .stack_size = sizeof(controlTaskBuffer),
+  .priority = (osPriority_t) osPriorityRealtime,
+};
+/* Definitions for safetyTask */
+osThreadId_t safetyTaskHandle;
+uint32_t safetyTaskBuffer[ 128 ];
+osStaticThreadDef_t safetyTaskControlBlock;
+const osThreadAttr_t safetyTask_attributes = {
+  .name = "safetyTask",
+  .cb_mem = &safetyTaskControlBlock,
+  .cb_size = sizeof(safetyTaskControlBlock),
+  .stack_mem = &safetyTaskBuffer[0],
+  .stack_size = sizeof(safetyTaskBuffer),
+  .priority = (osPriority_t) osPriorityHigh,
+};
+/* Definitions for inputTask */
+osThreadId_t inputTaskHandle;
+uint32_t inputTaskBuffer[ 256 ];
+osStaticThreadDef_t inputTaskControlBlock;
+const osThreadAttr_t inputTask_attributes = {
+  .name = "inputTask",
+  .cb_mem = &inputTaskControlBlock,
+  .cb_size = sizeof(inputTaskControlBlock),
+  .stack_mem = &inputTaskBuffer[0],
+  .stack_size = sizeof(inputTaskBuffer),
+  .priority = (osPriority_t) osPriorityAboveNormal,
+};
+/* Definitions for appTask */
+osThreadId_t appTaskHandle;
+uint32_t appTaskBuffer[ 256 ];
+osStaticThreadDef_t appTaskControlBlock;
+const osThreadAttr_t appTask_attributes = {
+  .name = "appTask",
+  .cb_mem = &appTaskControlBlock,
+  .cb_size = sizeof(appTaskControlBlock),
+  .stack_mem = &appTaskBuffer[0],
+  .stack_size = sizeof(appTaskBuffer),
+  .priority = (osPriority_t) osPriorityNormal,
+};
+/* Definitions for usbProtoTask */
+osThreadId_t usbProtoTaskHandle;
+uint32_t usbProtoTaskBuffer[ 512 ];
+osStaticThreadDef_t usbProtoTaskControlBlock;
+const osThreadAttr_t usbProtoTask_attributes = {
+  .name = "usbProtoTask",
+  .cb_mem = &usbProtoTaskControlBlock,
+  .cb_size = sizeof(usbProtoTaskControlBlock),
+  .stack_mem = &usbProtoTaskBuffer[0],
+  .stack_size = sizeof(usbProtoTaskBuffer),
+  .priority = (osPriority_t) osPriorityBelowNormal,
+};
+/* Definitions for storageTask */
+osThreadId_t storageTaskHandle;
+uint32_t storageTaskBuffer[ 512 ];
+osStaticThreadDef_t storageTaskControlBlock;
+const osThreadAttr_t storageTask_attributes = {
+  .name = "storageTask",
+  .cb_mem = &storageTaskControlBlock,
+  .cb_size = sizeof(storageTaskControlBlock),
+  .stack_mem = &storageTaskBuffer[0],
+  .stack_size = sizeof(storageTaskBuffer),
+  .priority = (osPriority_t) osPriorityBelowNormal,
+};
+/* Definitions for uiTask */
+osThreadId_t uiTaskHandle;
+uint32_t uiTaskBuffer[ 1024 ];
+osStaticThreadDef_t uiTaskControlBlock;
+const osThreadAttr_t uiTask_attributes = {
+  .name = "uiTask",
+  .cb_mem = &uiTaskControlBlock,
+  .cb_size = sizeof(uiTaskControlBlock),
+  .stack_mem = &uiTaskBuffer[0],
+  .stack_size = sizeof(uiTaskBuffer),
+  .priority = (osPriority_t) osPriorityLow,
+};
+/* Definitions for audioTask */
+osThreadId_t audioTaskHandle;
+uint32_t audioTaskBuffer[ 128 ];
+osStaticThreadDef_t audioTaskControlBlock;
+const osThreadAttr_t audioTask_attributes = {
+  .name = "audioTask",
+  .cb_mem = &audioTaskControlBlock,
+  .cb_size = sizeof(audioTaskControlBlock),
+  .stack_mem = &audioTaskBuffer[0],
+  .stack_size = sizeof(audioTaskBuffer),
+  .priority = (osPriority_t) osPriorityLow,
+};
 /* USER CODE BEGIN PV */
-// Estruturas de dados globais para o estado do sistema
+// Estruturas de dados globais para o estado do sistema. So' o caminho de
+// producao (!APP_MODE_BRINGUP) usa — em bring-up ficariam "definidas e nao
+// usadas" (-Wunused-variable).
+#if !APP_MODE_BRINGUP
 static SystemConfig_t g_system_cfg;
 static SystemRuntime_t g_runtime_data;
+#endif
 
-static uint32_t g_last_encoder_ms;
-static uint32_t g_last_control_ms;
-static uint32_t g_last_hmi_ms;
-static uint32_t g_last_lvgl_ms;
+// Margem minima de pilha (bytes ainda "virgens", o high-water-mark do
+// FreeRTOS) de cada tarefa, atualizada pela safetyTask a cada 500 ms. Ordem:
+// control, safety, input, app, usbProto, storage, ui, audio. Para diagnosticar
+// estouro de pilha, adicione g_task_stack_free_bytes ao Live Watch: valor
+// proximo de 0 = pilha daquela tarefa esta no limite.
+volatile uint32_t g_task_stack_free_bytes[8];
+
+// Estado do heap do LVGL (LV_MEM_SIZE), atualizado pela uiTask a cada 500 ms.
+// Para diagnostico no Live Watch: max_used proximo de LV_MEM_SIZE (65536) ou
+// free_biggest_size pequeno = heap esgotando (lv_malloc devolve NULL e o
+// LVGL nao checa em varios pontos do desenho -> escrita em NULL -> HardFault).
+lv_mem_monitor_t g_lv_mem;
+
+// Estado do supervisor (ver StartSafetyTask): mascara de tarefas que fizeram
+// check-in na ultima janela e contador de janelas com falta de check-in.
+volatile uint32_t g_supervisor_last_mask;
+volatile uint32_t g_supervisor_missed_windows;
+
+// Fault do boot anterior, recuperado dos registradores de backup do RTC por
+// FaultManager_Init(). Valido so' se g_boot_fault_pending != 0.
+volatile uint8_t g_boot_fault_pending;
+FaultManager_Record_t g_boot_fault_record;
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -125,6 +287,17 @@ static void MX_TIM4_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_SDMMC1_SD_Init(void);
 static void MX_USB_OTG_HS_PCD_Init(void);
+static void MX_RTC_Init(void);
+static void MX_TIM8_Init(void);
+void StartControlTask(void *argument);
+void StartSafetyTask(void *argument);
+void StartInputTask(void *argument);
+void StartAppTask(void *argument);
+void StartUsbProtoTask(void *argument);
+void StartStorageTask(void *argument);
+void StartUiTask(void *argument);
+void StartAudioTask(void *argument);
+
 /* USER CODE BEGIN PFP */
 
 /* USER CODE END PFP */
@@ -152,15 +325,22 @@ int main(void)
    * linha e' so uma garantia defensiva contra ele estar setado no reset.
    */
 
+#ifdef DEBUG
+  /* Somente builds Debug: DISDEFWBUF (ACTLR bit 1 do Cortex-M7; o CMSIS deste
+   * projeto nao define a mascara) desliga o write buffer nos acessos ao mapa
+   * de memoria padrao. Sem isso, um erro de barramento numa ESCRITA e'
+   * "imprecise": e' reportado depois, numa instrucao qualquer, sem endereco
+   * (BFAR invalido) — impossivel saber qual escrita falhou. Com o bit ligado
+   * o BusFault vira preciso: o PC aponta a propria instrucao e o BFAR traz o
+   * endereco invalido. Custa desempenho, por isso nao vai para Release. */
+  SCnSCB->ACTLR |= (1UL << 1);
+#endif
 
-
-   SCB->CCR &= ~SCB_CCR_UNALIGN_TRP_Msk;
   __DSB();
   __ISB();
   /* USER CODE END 1 */
 
-  /* MPU Configuration---------------------------------
-  -----------------------*/
+  /* MPU Configuration--------------------------------------------------------*/
   MPU_Config();
 
   /* Enable the CPU Cache */
@@ -177,7 +357,12 @@ int main(void)
   HAL_Init();
 
   /* USER CODE BEGIN Init */
-
+  // Sem isto, o IWDG continua contando enquanto o core esta parado num
+  // breakpoint (o IWDG nao e' um periferico "congelavel" por natureza — so'
+  // para se o DBGMCU disser explicitamente). Sem essa configuracao, qualquer
+  // pausa no debugger mais longa que o timeout (~8,2 s) reseta a placa no
+  // meio da sessao de debug, parecendo reset espontaneo.
+  __HAL_DBGMCU_FREEZE_IWDG1();
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -203,14 +388,26 @@ int main(void)
   MX_SDMMC1_SD_Init();
   MX_USB_OTG_HS_PCD_Init();
   MX_FATFS_Init();
+  MX_RTC_Init();
+  MX_TIM8_Init();
   /* USER CODE BEGIN 2 */
+  // Fase 1: captura de fault/reset persistente (RTC ja inicializado acima)
+  // e contador de ciclos para medicao de jitter nas Fases 3/4. Rodam antes
+  // de qualquer outro modulo para nao perder um fault ocorrido cedo demais.
+  FaultManager_Init(&hrtc);
+  PortDWT_Init();
+  g_boot_fault_pending = FaultManager_HasPendingFault();
+  if (g_boot_fault_pending != 0u) {
+    FaultManager_GetLastFault(&g_boot_fault_record);
+  }
+
   /* Liga o backlight do display */
   HAL_GPIO_WritePin(TFT_BACKLIGHT_GPIO_Port, TFT_BACKLIGHT_Pin, GPIO_PIN_SET);
 
 #if APP_MODE_BRINGUP
   // --- MODO BRING-UP: testa display, encoder e buzzer isoladamente ---
 #if BRINGUP_ENABLE_BUZZER
-  Buzzer_Init();
+  Buzzer_Init(&htim8);
 #endif
 
 #if (BRINGUP_ENABLE_DISPLAY && !BRINGUP_ENABLE_LVGL)
@@ -285,8 +482,6 @@ int main(void)
     // (apertar pra entrar/sair de edicao) volta a fazer sentido.
     HMI_EncoderGroup_SetEditing(true);
   }
-
-  g_last_lvgl_ms = HAL_GetTick();
 #endif /* BRINGUP_ENABLE_DISPLAY && BRINGUP_ENABLE_LVGL */
 
 #if (BRINGUP_ENABLE_BUZZER && !BRINGUP_ENABLE_DISPLAY && !BRINGUP_ENABLE_ENCODER)
@@ -294,8 +489,6 @@ int main(void)
   // confirmacao na inicializacao e o unico sinal de que o driver rodou.
   Buzzer_Beep(2500u, 200u);
 #endif
-
-  g_last_encoder_ms = HAL_GetTick();
 #else
   // --- INICIALIZACAO DOS MODULOS ---
 
@@ -339,167 +532,76 @@ int main(void)
 
   // 8. Interface Grafica (HMI)
   HMI_Init(&g_runtime_data, &g_system_cfg);
-
-  // 9. Inicializacao dos marcos de agendamento cooperativo
-  g_last_encoder_ms = HAL_GetTick();
-  g_last_control_ms = g_last_encoder_ms;
-  g_last_hmi_ms = g_last_encoder_ms;
-  g_last_lvgl_ms = g_last_encoder_ms;
 #endif /* APP_MODE_BRINGUP */
   /* USER CODE END 2 */
 
+  /* Init scheduler */
+  osKernelInitialize();
+
+  /* USER CODE BEGIN RTOS_MUTEX */
+  /* add mutexes, ... */
+  /* USER CODE END RTOS_MUTEX */
+
+  /* USER CODE BEGIN RTOS_SEMAPHORES */
+  /* add semaphores, ... */
+  /* USER CODE END RTOS_SEMAPHORES */
+
+  /* USER CODE BEGIN RTOS_TIMERS */
+  /* start timers, add new ones, ... */
+  /* USER CODE END RTOS_TIMERS */
+
+  /* USER CODE BEGIN RTOS_QUEUES */
+  /* add queues, ... */
+  /* USER CODE END RTOS_QUEUES */
+
+  /* Create the thread(s) */
+  /* creation of controlTask */
+  controlTaskHandle = osThreadNew(StartControlTask, NULL, &controlTask_attributes);
+
+  /* creation of safetyTask */
+  safetyTaskHandle = osThreadNew(StartSafetyTask, NULL, &safetyTask_attributes);
+
+  /* creation of inputTask */
+  inputTaskHandle = osThreadNew(StartInputTask, NULL, &inputTask_attributes);
+
+  /* creation of appTask */
+  appTaskHandle = osThreadNew(StartAppTask, NULL, &appTask_attributes);
+
+  /* creation of usbProtoTask */
+  usbProtoTaskHandle = osThreadNew(StartUsbProtoTask, NULL, &usbProtoTask_attributes);
+
+  /* creation of storageTask */
+  storageTaskHandle = osThreadNew(StartStorageTask, NULL, &storageTask_attributes);
+
+  /* creation of uiTask */
+  uiTaskHandle = osThreadNew(StartUiTask, NULL, &uiTask_attributes);
+
+  /* creation of audioTask */
+  audioTaskHandle = osThreadNew(StartAudioTask, NULL, &audioTask_attributes);
+
+  /* USER CODE BEGIN RTOS_THREADS */
+  /* add threads, ... */
+  /* USER CODE END RTOS_THREADS */
+
+  /* USER CODE BEGIN RTOS_EVENTS */
+  /* add events, ... */
+  /* USER CODE END RTOS_EVENTS */
+
+  /* Start scheduler */
+  osKernelStart();
+
+  /* We should never get here as control is now taken by the scheduler */
+
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
+  // Morto a partir daqui: osKernelStart() acima nao retorna em operacao
+  // normal ("We should never get here" logo abaixo, gerado pelo CubeMX). A
+  // logica que rodava neste super loop (Encoder_Update, ControlLoop_Update,
+  // HMI_Update, lv_timer_handler, HAL_IWDG_Refresh) foi migrada para as
+  // tarefas correspondentes (StartInputTask, StartControlTask, StartAppTask,
+  // StartUiTask, StartSafetyTask, mais abaixo neste arquivo).
   while (1)
   {
-    // --- SUPER LOOP COOPERATIVO (nao bloqueante) ---
-    uint32_t now = HAL_GetTick();
-    uint8_t ran_task = 0u;
-
-#if APP_MODE_BRINGUP
-    // --- MODO BRING-UP: testa display, encoder e buzzer isoladamente ---
-#if (BRINGUP_ENABLE_ENCODER && BRINGUP_ENABLE_DISPLAY && !BRINGUP_ENABLE_LVGL)
-    static uint32_t s_last_demo_draw_ms = 0u;
-    static int32_t  s_last_bar_px = -1;
-    static uint16_t s_last_bar_color = 0xFFFFu;
-    static uint32_t s_btn_flash_until_ms = 0u;
-#endif
-#if (BRINGUP_ENABLE_ENCODER && BRINGUP_ENABLE_BUZZER)
-    static int32_t  s_last_steps_buzz = 0;
-#endif
-#if (BRINGUP_ENABLE_DISPLAY && !BRINGUP_ENABLE_ENCODER)
-    static uint32_t s_last_color_ms = 0u;
-    static uint8_t  s_color_idx = 0u;
-    static const uint16_t s_colors[] = {
-      0xF800u, /* vermelho */
-      0x07E0u, /* verde    */
-      0x001Fu, /* azul     */
-      0xFFFFu, /* branco   */
-      0x0000u, /* preto    */
-    };
-#endif
-
-#if BRINGUP_ENABLE_ENCODER
-    if ((uint32_t)(now - g_last_encoder_ms) >= TASK_ENCODER_PERIOD_MS) {
-      g_last_encoder_ms = now;
-      Encoder_Update();
-
-#if BRINGUP_ENABLE_BUZZER
-      {
-        Encoder_State_t *enc_now = Encoder_GetState();
-        // Bipe curto (tom de 2.5kHz por 15ms) a cada passo (detent) do encoder.
-        if (enc_now->steps != s_last_steps_buzz) {
-          s_last_steps_buzz = enc_now->steps;
-          Buzzer_Beep(2500u, 15u);
-        }
-      }
-#endif
-
-#if (BRINGUP_ENABLE_DISPLAY && !BRINGUP_ENABLE_LVGL)
-      if ((Encoder_GetEncBtnEvent() != 0u) || (Encoder_GetUserBtnEvent() != 0u)) {
-        s_btn_flash_until_ms = now + 300u;
-      }
-#endif
-
-      ran_task = 1u;
-    }
-#endif /* BRINGUP_ENABLE_ENCODER */
-
-#if (BRINGUP_ENABLE_DISPLAY && !BRINGUP_ENABLE_LVGL)
-#if BRINGUP_ENABLE_ENCODER
-    // --- Barra no display acompanhando o encoder ---
-    if ((uint32_t)(now - s_last_demo_draw_ms) >= 50u) {
-      Encoder_State_t *enc_state;
-      int32_t steps;
-      uint16_t color;
-
-      s_last_demo_draw_ms = now;
-      enc_state = Encoder_GetState();
-
-      steps = enc_state->steps % 320;
-      if (steps < 0) {
-        steps += 320;
-      }
-
-      color = (now < s_btn_flash_until_ms) ? 0xF800u /* vermelho: botao pressionado */
-                                            : 0x07E0u /* verde: normal */;
-
-      if ((steps != s_last_bar_px) || (color != s_last_bar_color)) {
-        ST7789_FillRect(0, 100, 319, 139, 0x0000);
-        if (steps > 0) {
-          ST7789_FillRect(0, 100, (uint16_t)(steps - 1), 139, color);
-        }
-        s_last_bar_px = steps;
-        s_last_bar_color = color;
-      }
-
-      ran_task = 1u;
-    }
-#else
-    // --- Display isolado: ciclo automatico de cores solidas ---
-    // Valida SPI + init do painel sem depender do encoder. Se as cores
-    // aparecerem corretas nessa ordem, o driver ST7789 esta ok.
-    if ((uint32_t)(now - s_last_color_ms) >= 1000u) {
-      s_last_color_ms = now;
-      ST7789_FillRect(0, 0, 319, 239, s_colors[s_color_idx]);
-      s_color_idx = (uint8_t)((s_color_idx + 1u) % (sizeof(s_colors) / sizeof(s_colors[0])));
-      ran_task = 1u;
-    }
-#endif /* BRINGUP_ENABLE_ENCODER */
-#endif /* BRINGUP_ENABLE_DISPLAY && !BRINGUP_ENABLE_LVGL */
-
-#if (BRINGUP_ENABLE_DISPLAY && BRINGUP_ENABLE_LVGL)
-    // --- Estagio LVGL+DMA: bombeia o timer handler (renderiza + dispara o
-    //     flush por HAL_SPI_Transmit_DMA quando algo mudou na tela). ---
-    if ((uint32_t)(now - g_last_lvgl_ms) >= TASK_LVGL_HANDLER_PERIOD_MS) {
-      g_last_lvgl_ms = now;
-      (void)lv_timer_handler();
-      ran_task = 1u;
-    }
-#endif /* BRINGUP_ENABLE_DISPLAY && BRINGUP_ENABLE_LVGL */
-#else
-    if ((uint32_t)(now - g_last_encoder_ms) >= TASK_ENCODER_PERIOD_MS) {
-      g_last_encoder_ms = now;
-      Encoder_Update();
-
-      if ((Encoder_GetUserBtnEvent() != 0u) || (Pedal_GetEvent() != 0u)) {
-        if (g_runtime_data.state == SYSTEM_STATE_IDLE) {
-          ControlLoop_StartInflation();
-        } else {
-          g_runtime_data.bt_user_pressed = 1u;
-        }
-      }
-
-      ran_task = 1u;
-    }
-
-    if ((uint32_t)(now - g_last_control_ms) >= TASK_CONTROL_PERIOD_MS) {
-      g_last_control_ms = now;
-      ControlLoop_Update();
-      ran_task = 1u;
-    }
-
-    if ((uint32_t)(now - g_last_hmi_ms) >= TASK_HMI_PERIOD_MS) {
-      g_last_hmi_ms = now;
-      HMI_Update();
-      ran_task = 1u;
-    }
-
-    if ((uint32_t)(now - g_last_lvgl_ms) >= TASK_LVGL_HANDLER_PERIOD_MS) {
-      g_last_lvgl_ms = now;
-      (void)lv_timer_handler();
-      ran_task = 1u;
-    }
-#endif /* APP_MODE_BRINGUP */
-
-    // Alimenta o watchdog (IWDG1, ~8.2s de timeout) a cada volta do loop.
-    // Novo no H723: o L476 original nao tinha watchdog configurado.
-    HAL_IWDG_Refresh(&hiwdg1);
-
-    // Reduz consumo quando nao ha tarefas pendentes.
-    if (ran_task == 0u) {
-      __WFI();
-    }
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
@@ -522,7 +624,7 @@ void SystemClock_Config(void)
 
   /** Configure the main internal regulator output voltage
   */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
 
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
@@ -530,17 +632,18 @@ void SystemClock_Config(void)
   * in the RCC_OscInitTypeDef structure.
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_HSI
-                              |RCC_OSCILLATORTYPE_LSI;
+                              |RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
+  RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = 64;
   RCC_OscInitStruct.LSIState = RCC_LSI_ON;
   RCC_OscInitStruct.HSI48State = RCC_HSI48_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
-  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSI;
-  RCC_OscInitStruct.PLL.PLLM = 4;
-  RCC_OscInitStruct.PLL.PLLN = 34;
+  RCC_OscInitStruct.PLL.PLLSource = RCC_PLLSOURCE_HSE;
+  RCC_OscInitStruct.PLL.PLLM = 2;
+  RCC_OscInitStruct.PLL.PLLN = 32;
   RCC_OscInitStruct.PLL.PLLP = 1;
-  RCC_OscInitStruct.PLL.PLLQ = 10;
+  RCC_OscInitStruct.PLL.PLLQ = 2;
   RCC_OscInitStruct.PLL.PLLR = 2;
   RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
@@ -563,7 +666,7 @@ void SystemClock_Config(void)
   RCC_ClkInitStruct.APB2CLKDivider = RCC_APB2_DIV2;
   RCC_ClkInitStruct.APB4CLKDivider = RCC_APB4_DIV2;
 
-  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_3) != HAL_OK)
+  if (HAL_RCC_ClockConfig(&RCC_ClkInitStruct, FLASH_LATENCY_2) != HAL_OK)
   {
     Error_Handler();
   }
@@ -666,7 +769,7 @@ static void MX_I2C1_Init(void)
 
   /* USER CODE END I2C1_Init 1 */
   hi2c1.Instance = I2C1;
-  hi2c1.Init.Timing = 0x00C0216C;
+  hi2c1.Init.Timing = 0x60200716;
   hi2c1.Init.OwnAddress1 = 0;
   hi2c1.Init.AddressingMode = I2C_ADDRESSINGMODE_7BIT;
   hi2c1.Init.DualAddressMode = I2C_DUALADDRESS_DISABLE;
@@ -728,6 +831,76 @@ static void MX_IWDG1_Init(void)
 }
 
 /**
+  * @brief RTC Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_RTC_Init(void)
+{
+
+  /* USER CODE BEGIN RTC_Init 0 */
+
+  /* USER CODE END RTC_Init 0 */
+
+  RTC_TimeTypeDef sTime = {0};
+  RTC_DateTypeDef sDate = {0};
+
+  /* USER CODE BEGIN RTC_Init 1 */
+
+  /* USER CODE END RTC_Init 1 */
+
+  /** Initialize RTC Only
+  */
+  hrtc.Instance = RTC;
+  hrtc.Init.HourFormat = RTC_HOURFORMAT_24;
+  hrtc.Init.AsynchPrediv = 127;
+  hrtc.Init.SynchPrediv = 255;
+  hrtc.Init.OutPut = RTC_OUTPUT_DISABLE;
+  hrtc.Init.OutPutPolarity = RTC_OUTPUT_POLARITY_HIGH;
+  hrtc.Init.OutPutType = RTC_OUTPUT_TYPE_OPENDRAIN;
+  hrtc.Init.OutPutRemap = RTC_OUTPUT_REMAP_NONE;
+  if (HAL_RTC_Init(&hrtc) != HAL_OK)
+  {
+    Error_Handler();
+  }
+
+  /* USER CODE BEGIN Check_RTC_BKUP */
+  if (HAL_RTCEx_BKUPRead(&hrtc, RTC_CALENDAR_INITIALIZED_BKP_REG) == RTC_CALENDAR_INITIALIZED_MAGIC) {
+    // Calendario ja foi ajustado antes e o dominio de backup (VBAT) manteve
+    // o valor — nao sobrescrever com a data/hora padrao abaixo.
+    return;
+  }
+  /* USER CODE END Check_RTC_BKUP */
+
+  /** Initialize RTC and set the Time and Date
+  */
+  sTime.Hours = 0x0;
+  sTime.Minutes = 0x0;
+  sTime.Seconds = 0x0;
+  sTime.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+  sTime.StoreOperation = RTC_STOREOPERATION_RESET;
+  if (HAL_RTC_SetTime(&hrtc, &sTime, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sDate.WeekDay = RTC_WEEKDAY_MONDAY;
+  sDate.Month = RTC_MONTH_JANUARY;
+  sDate.Date = 0x1;
+  sDate.Year = 0x0;
+
+  if (HAL_RTC_SetDate(&hrtc, &sDate, RTC_FORMAT_BCD) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN RTC_Init 2 */
+  // So' chega aqui na primeira inicializacao real (ver Check_RTC_BKUP acima)
+  // — marca para nao repetir o SetTime/SetDate default nos proximos boots.
+  HAL_RTCEx_BKUPWrite(&hrtc, RTC_CALENDAR_INITIALIZED_BKP_REG, RTC_CALENDAR_INITIALIZED_MAGIC);
+  /* USER CODE END RTC_Init 2 */
+
+}
+
+/**
   * @brief SDMMC1 Initialization Function
   * @param None
   * @retval None
@@ -747,7 +920,7 @@ static void MX_SDMMC1_SD_Init(void)
   hsd1.Init.ClockPowerSave = SDMMC_CLOCK_POWER_SAVE_ENABLE;
   hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
   hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
-  hsd1.Init.ClockDiv = 0;
+  hsd1.Init.ClockDiv = 5;
   if (HAL_SD_Init(&hsd1) != HAL_OK)
   {
     Error_Handler();
@@ -874,9 +1047,9 @@ static void MX_TIM3_Init(void)
 
   /* USER CODE END TIM3_Init 1 */
   htim3.Instance = TIM3;
-  htim3.Init.Prescaler = 200-1;
+  htim3.Init.Prescaler = 0;
   htim3.Init.CounterMode = TIM_COUNTERMODE_UP;
-  htim3.Init.Period = 1000-1;
+  htim3.Init.Period = 13750-1;
   htim3.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
   htim3.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
   if (HAL_TIM_PWM_Init(&htim3) != HAL_OK)
@@ -953,6 +1126,86 @@ static void MX_TIM4_Init(void)
 }
 
 /**
+  * @brief TIM8 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM8_Init(void)
+{
+
+  /* USER CODE BEGIN TIM8_Init 0 */
+
+  /* USER CODE END TIM8_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+  TIM_OC_InitTypeDef sConfigOC = {0};
+  TIM_BreakDeadTimeConfigTypeDef sBreakDeadTimeConfig = {0};
+
+  /* USER CODE BEGIN TIM8_Init 1 */
+
+  /* USER CODE END TIM8_Init 1 */
+  htim8.Instance = TIM8;
+  htim8.Init.Prescaler = 0;
+  htim8.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim8.Init.Period = 65535;
+  htim8.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim8.Init.RepetitionCounter = 0;
+  htim8.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_DISABLE;
+  if (HAL_TIM_Base_Init(&htim8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim8, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  if (HAL_TIM_PWM_Init(&htim8) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_RESET;
+  sMasterConfig.MasterOutputTrigger2 = TIM_TRGO2_RESET;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim8, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sConfigOC.OCMode = TIM_OCMODE_PWM1;
+  sConfigOC.Pulse = 0;
+  sConfigOC.OCPolarity = TIM_OCPOLARITY_HIGH;
+  sConfigOC.OCNPolarity = TIM_OCNPOLARITY_HIGH;
+  sConfigOC.OCFastMode = TIM_OCFAST_DISABLE;
+  sConfigOC.OCIdleState = TIM_OCIDLESTATE_RESET;
+  sConfigOC.OCNIdleState = TIM_OCNIDLESTATE_RESET;
+  if (HAL_TIM_PWM_ConfigChannel(&htim8, &sConfigOC, TIM_CHANNEL_2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sBreakDeadTimeConfig.OffStateRunMode = TIM_OSSR_DISABLE;
+  sBreakDeadTimeConfig.OffStateIDLEMode = TIM_OSSI_DISABLE;
+  sBreakDeadTimeConfig.LockLevel = TIM_LOCKLEVEL_OFF;
+  sBreakDeadTimeConfig.DeadTime = 0;
+  sBreakDeadTimeConfig.BreakState = TIM_BREAK_DISABLE;
+  sBreakDeadTimeConfig.BreakPolarity = TIM_BREAKPOLARITY_HIGH;
+  sBreakDeadTimeConfig.BreakFilter = 0;
+  sBreakDeadTimeConfig.Break2State = TIM_BREAK2_DISABLE;
+  sBreakDeadTimeConfig.Break2Polarity = TIM_BREAK2POLARITY_HIGH;
+  sBreakDeadTimeConfig.Break2Filter = 0;
+  sBreakDeadTimeConfig.AutomaticOutput = TIM_AUTOMATICOUTPUT_DISABLE;
+  if (HAL_TIMEx_ConfigBreakDeadTime(&htim8, &sBreakDeadTimeConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM8_Init 2 */
+
+  /* USER CODE END TIM8_Init 2 */
+  HAL_TIM_MspPostInit(&htim8);
+
+}
+
+/**
   * @brief USB_OTG_HS Initialization Function
   * @param None
   * @retval None
@@ -974,7 +1227,7 @@ static void MX_USB_OTG_HS_PCD_Init(void)
   hpcd_USB_OTG_HS.Init.phy_itface = USB_OTG_EMBEDDED_PHY;
   hpcd_USB_OTG_HS.Init.Sof_enable = DISABLE;
   hpcd_USB_OTG_HS.Init.low_power_enable = DISABLE;
-  hpcd_USB_OTG_HS.Init.lpm_enable = DISABLE;
+  hpcd_USB_OTG_HS.Init.lpm_enable = ENABLE;
   hpcd_USB_OTG_HS.Init.vbus_sensing_enable = ENABLE;
   hpcd_USB_OTG_HS.Init.use_dedicated_ep1 = DISABLE;
   hpcd_USB_OTG_HS.Init.use_external_vbus = DISABLE;
@@ -1006,7 +1259,7 @@ void MX_USB_OTG_HS_HCD_Init(void)
   hhcd_USB_OTG_HS.Instance = USB_OTG_HS;
   hhcd_USB_OTG_HS.Init.Host_channels = 16;
   hhcd_USB_OTG_HS.Init.speed = HCD_SPEED_FULL;
-  hhcd_USB_OTG_HS.Init.dma_enable = DISABLE;
+  hhcd_USB_OTG_HS.Init.dma_enable = ENABLE;
   hhcd_USB_OTG_HS.Init.phy_itface = USB_OTG_EMBEDDED_PHY;
   hhcd_USB_OTG_HS.Init.Sof_enable = DISABLE;
   hhcd_USB_OTG_HS.Init.low_power_enable = DISABLE;
@@ -1031,10 +1284,10 @@ static void MX_DMA_Init(void)
 
   /* DMA interrupt init */
   /* DMA1_Stream0_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Stream0_IRQn, 5, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream0_IRQn);
   /* DMA1_Stream1_IRQn interrupt configuration */
-  HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 0, 0);
+  HAL_NVIC_SetPriority(DMA1_Stream1_IRQn, 10, 0);
   HAL_NVIC_EnableIRQ(DMA1_Stream1_IRQn);
 
 }
@@ -1052,8 +1305,9 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
-  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
   __HAL_RCC_GPIOB_CLK_ENABLE();
   __HAL_RCC_GPIOD_CLK_ENABLE();
 
@@ -1061,7 +1315,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(TFT_BACKLIGHT_GPIO_Port, TFT_BACKLIGHT_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOC, TFT_CS_Pin|TFT_DC_Pin|BUZZER_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOC, TFT_CS_Pin|TFT_DC_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
   HAL_GPIO_WritePin(TFT_RES_GPIO_Port, TFT_RES_Pin, GPIO_PIN_RESET);
@@ -1083,8 +1337,8 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(TFT_BACKLIGHT_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : TFT_CS_Pin TFT_DC_Pin BUZZER_Pin */
-  GPIO_InitStruct.Pin = TFT_CS_Pin|TFT_DC_Pin|BUZZER_Pin;
+  /*Configure GPIO pins : TFT_CS_Pin TFT_DC_Pin */
+  GPIO_InitStruct.Pin = TFT_CS_Pin|TFT_DC_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -1133,6 +1387,292 @@ static void MX_GPIO_Init(void)
 
 /* USER CODE END 4 */
 
+/* USER CODE BEGIN Header_StartControlTask */
+/**
+  * @brief  Function implementing the controlTask thread.
+  * @param  argument: Not used
+  * @retval None
+  */
+/* USER CODE END Header_StartControlTask */
+void StartControlTask(void *argument)
+{
+  /* USER CODE BEGIN 5 */
+  // Prioridade mais alta (osPriorityRealtime) — reservado para o loop de
+  // controle de pressao a 1 ms (Fase 3/4). Hoje inerte: em APP_MODE_BRINGUP=1
+  // nem ControlLoop_Init() e' chamado (ver main(), USER CODE BEGIN 2), entao
+  // nao ha nada para ControlLoop_Update() atualizar ainda.
+  for(;;)
+  {
+#if !APP_MODE_BRINGUP
+    ControlLoop_Update();
+#endif
+    Supervisor_CheckIn(SUPERVISOR_TASK_CONTROL);
+    osDelay(TASK_CONTROL_PERIOD_MS);
+  }
+  /* USER CODE END 5 */
+}
+
+/* USER CODE BEGIN Header_StartSafetyTask */
+/**
+* @brief Function implementing the safetyTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartSafetyTask */
+void StartSafetyTask(void *argument)
+{
+  /* USER CODE BEGIN StartSafetyTask */
+  // Supervisor (Parte A/B do prompt de projeto): a cada janela de
+  // SUPERVISOR_WINDOW_MS, so' alimenta o IWDG se TODAS as tarefas criticas
+  // (control, input, app — ver supervisor.h) fizeram check-in nessa janela.
+  // Se alguma travar, o IWDG (~8 s) nao e' alimentado e a MCU reseta, caindo
+  // no estado seguro por hardware. UI/USB/storage/audio nao entram de
+  // proposito (nao podem derrubar o controle). Inspecionar no Live Watch:
+  // g_supervisor_last_mask (quem fez check-in na ultima janela) e
+  // g_supervisor_missed_windows (janelas em que faltou alguem).
+  static osThreadId_t s_task_ids[8];
+  uint32_t stack_probe_ticks = 0u;
+  uint32_t supervisor_window_ms = 0u;
+#if (FAULT_TEST_FORCE_HARDFAULT_MS > 0u)
+  uint32_t fault_test_ms = 0u;
+#endif
+
+  s_task_ids[0] = controlTaskHandle;
+  s_task_ids[1] = safetyTaskHandle;
+  s_task_ids[2] = inputTaskHandle;
+  s_task_ids[3] = appTaskHandle;
+  s_task_ids[4] = usbProtoTaskHandle;
+  s_task_ids[5] = storageTaskHandle;
+  s_task_ids[6] = uiTaskHandle;
+  s_task_ids[7] = audioTaskHandle;
+
+  for(;;)
+  {
+    supervisor_window_ms += TASK_IWDG_REFRESH_PERIOD_MS;
+    if (supervisor_window_ms >= SUPERVISOR_WINDOW_MS) {
+      uint32_t collected = Supervisor_CollectCheckIns();
+
+      supervisor_window_ms = 0u;
+      g_supervisor_last_mask = collected;
+      if (Supervisor_AllCheckedIn(collected) != 0u) {
+        HAL_IWDG_Refresh(&hiwdg1);
+      } else {
+        g_supervisor_missed_windows++;
+      }
+    }
+
+#if (FAULT_TEST_FORCE_HARDFAULT_MS > 0u)
+    fault_test_ms += TASK_IWDG_REFRESH_PERIOD_MS;
+    if (fault_test_ms >= FAULT_TEST_FORCE_HARDFAULT_MS) {
+      FaultManager_ForceHardFault();
+    }
+#endif
+
+    stack_probe_ticks += TASK_IWDG_REFRESH_PERIOD_MS;
+    if (stack_probe_ticks >= 500u) {
+      uint32_t i;
+      stack_probe_ticks = 0u;
+      for (i = 0u; i < 8u; i++) {
+        g_task_stack_free_bytes[i] = osThreadGetStackSpace(s_task_ids[i]);
+      }
+    }
+
+    osDelay(TASK_IWDG_REFRESH_PERIOD_MS);
+  }
+  /* USER CODE END StartSafetyTask */
+}
+
+/* USER CODE BEGIN Header_StartInputTask */
+/**
+* @brief Function implementing the inputTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartInputTask */
+void StartInputTask(void *argument)
+{
+  /* USER CODE BEGIN StartInputTask */
+  // Migrado do super loop cooperativo (main(), antes do FreeRTOS entrar):
+  // debounce/leitura do encoder a cada 1 ms, mais o feedback sonoro de
+  // bring-up. O caminho de producao (pedal/bt_user -> ControlLoop) fica
+  // atras de !APP_MODE_BRINGUP, mesmo criterio de antes.
+#if (BRINGUP_ENABLE_ENCODER && BRINGUP_ENABLE_BUZZER)
+  static int32_t s_last_steps_buzz = 0;
+#endif
+
+  for(;;)
+  {
+#if APP_MODE_BRINGUP
+#if BRINGUP_ENABLE_ENCODER
+    Encoder_Update();
+#if BRINGUP_ENABLE_BUZZER
+    {
+      Encoder_State_t *enc_now = Encoder_GetState();
+      // Bipe curto (tom de 2.5kHz por 15ms) a cada passo (detent) do encoder.
+      if (enc_now->steps != s_last_steps_buzz) {
+        s_last_steps_buzz = enc_now->steps;
+        Buzzer_Beep(2500u, 15u);
+      }
+    }
+#endif /* BRINGUP_ENABLE_BUZZER */
+#endif /* BRINGUP_ENABLE_ENCODER */
+    // Nota: os ramos de bring-up "desenho cru" (BRINGUP_ENABLE_LVGL=0) que
+    // liam Encoder_GetEncBtnEvent()/GetUserBtnEvent() para piscar a barra no
+    // display ainda nao foram portados para tarefas — so' o caminho ativo
+    // hoje (LVGL=1) foi migrado. Reativar aquele modo exigiria portar
+    // tambem esse pedaco (era so' escrita de timestamp, sem estado
+    // complexo).
+#else
+    Encoder_Update();
+    if ((Encoder_GetUserBtnEvent() != 0u) || (Pedal_GetEvent() != 0u)) {
+      if (g_runtime_data.state == SYSTEM_STATE_IDLE) {
+        ControlLoop_StartInflation();
+      } else {
+        g_runtime_data.bt_user_pressed = 1u;
+      }
+    }
+#endif /* APP_MODE_BRINGUP */
+
+    Supervisor_CheckIn(SUPERVISOR_TASK_INPUT);
+    osDelay(TASK_ENCODER_PERIOD_MS);
+  }
+  /* USER CODE END StartInputTask */
+}
+
+/* USER CODE BEGIN Header_StartAppTask */
+/**
+* @brief Function implementing the appTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartAppTask */
+void StartAppTask(void *argument)
+{
+  /* USER CODE BEGIN StartAppTask */
+  // Reservado para a orquestracao de ensaio / HMI_Update() (Fase 6). Inerte
+  // em APP_MODE_BRINGUP=1 (HMI_Init() nao e' chamado ainda).
+#if (APP_MODE_BRINGUP && BRINGUP_ENABLE_BUZZER)
+  // Sinaliza sonoramente que o boot anterior terminou em HardFault (o
+  // registro completo esta em g_boot_fault_record). Aqui e' seguro chamar
+  // Buzzer_Beep(): usa osDelay, entao so' pode rodar com o escalonador ativo.
+  if (g_boot_fault_pending != 0u) {
+    uint32_t beep;
+    for (beep = 0u; beep < 3u; beep++) {
+      Buzzer_Beep(400u, 250u);
+      osDelay(150u);
+    }
+  }
+#endif
+  for(;;)
+  {
+#if !APP_MODE_BRINGUP
+    HMI_Update();
+#endif
+    Supervisor_CheckIn(SUPERVISOR_TASK_APP);
+    osDelay(TASK_HMI_PERIOD_MS);
+  }
+  /* USER CODE END StartAppTask */
+}
+
+/* USER CODE BEGIN Header_StartUsbProtoTask */
+/**
+* @brief Function implementing the usbProtoTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartUsbProtoTask */
+void StartUsbProtoTask(void *argument)
+{
+  /* USER CODE BEGIN StartUsbProtoTask */
+  // Reservado para o parser do protocolo USB CDC (Fase 7). Nada ainda.
+  for(;;)
+  {
+    osDelay(100);
+  }
+  /* USER CODE END StartUsbProtoTask */
+}
+
+/* USER CODE BEGIN Header_StartStorageTask */
+/**
+* @brief Function implementing the storageTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartStorageTask */
+void StartStorageTask(void *argument)
+{
+  /* USER CODE BEGIN StartStorageTask */
+  // Reservado para FatFS/log/ensaio (Fase 5). Nada ainda.
+  for(;;)
+  {
+    osDelay(100);
+  }
+  /* USER CODE END StartStorageTask */
+}
+
+/* USER CODE BEGIN Header_StartUiTask */
+/**
+* @brief Function implementing the uiTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartUiTask */
+void StartUiTask(void *argument)
+{
+  /* USER CODE BEGIN StartUiTask */
+  // Migrado do super loop cooperativo: bombeia o lv_timer_handler() no
+  // mesmo periodo de antes (TASK_LVGL_HANDLER_PERIOD_MS). Nota: os ramos de
+  // bring-up sem LVGL (barra/ciclo de cores cru) nao foram portados para
+  // tarefa — so' o caminho ativo hoje (BRINGUP_ENABLE_LVGL=1) foi migrado;
+  // reativar aqueles exigiria portar tambem esse desenho para ca.
+  //
+  // lv_tick_inc() precisa ser chamado daqui agora: o SysTick_Handler() que
+  // fazia isso foi removido inteiro de stm32h7xx_it.c quando o timebase do
+  // HAL mudou para TIM6 (SysTick agora e' do FreeRTOS) — a funcao sumiu e
+  // levou o lv_tick_inc(1) que estava dentro dela junto. Sem isso o LVGL
+  // nunca via o tempo passar (desenhava uma vez e travava). Chamar aqui
+  // evita depender de qual IRQ o CubeMX decidir usar para o timebase no
+  // futuro — soh essa tarefa precisa saber quanto tempo passou entre
+  // chamadas de lv_timer_handler().
+  uint32_t mem_probe_ms = 0u;
+
+  for(;;)
+  {
+#if (BRINGUP_ENABLE_DISPLAY && BRINGUP_ENABLE_LVGL)
+    lv_tick_inc(TASK_LVGL_HANDLER_PERIOD_MS);
+    (void)lv_timer_handler();
+
+    mem_probe_ms += TASK_LVGL_HANDLER_PERIOD_MS;
+    if (mem_probe_ms >= 500u) {
+      mem_probe_ms = 0u;
+      lv_mem_monitor(&g_lv_mem); // na propria uiTask: o LVGL nao e' thread-safe
+    }
+#endif
+    osDelay(TASK_LVGL_HANDLER_PERIOD_MS);
+  }
+  /* USER CODE END StartUiTask */
+}
+
+/* USER CODE BEGIN Header_StartAudioTask */
+/**
+* @brief Function implementing the audioTask thread.
+* @param argument: Not used
+* @retval None
+*/
+/* USER CODE END Header_StartAudioTask */
+void StartAudioTask(void *argument)
+{
+  /* USER CODE BEGIN StartAudioTask */
+  // Reservado para sequencias de tons do produto final (boot/conclusao/erro,
+  // Fase 6). O beep de bring-up por passo do encoder continua em
+  // StartInputTask (dispara no mesmo lugar de antes, sem fila). Nada ainda.
+  for(;;)
+  {
+    osDelay(100);
+  }
+  /* USER CODE END StartAudioTask */
+}
+
  /* MPU Configuration */
 
 void MPU_Config(void)
@@ -1174,6 +1714,28 @@ void MPU_Config(void)
   /* Enables the MPU */
   HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
 
+}
+
+/**
+  * @brief  Period elapsed callback in non blocking mode
+  * @note   This function is called  when TIM6 interrupt took place, inside
+  * HAL_TIM_IRQHandler(). It makes a direct call to HAL_IncTick() to increment
+  * a global variable "uwTick" used as application time base.
+  * @param  htim : TIM handle
+  * @retval None
+  */
+void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
+{
+  /* USER CODE BEGIN Callback 0 */
+
+  /* USER CODE END Callback 0 */
+  if (htim->Instance == TIM6)
+  {
+    HAL_IncTick();
+  }
+  /* USER CODE BEGIN Callback 1 */
+
+  /* USER CODE END Callback 1 */
 }
 
 /**

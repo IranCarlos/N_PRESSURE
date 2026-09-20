@@ -310,6 +310,18 @@ static void handle_state_deflating(void) {
     }
 }
 
+/** @brief Estado seguro (Parte A, item 1 do CLAUDE.md/prompt de projeto):
+ *         motor OFF e V1+V2+V3 abertas. Unico handler que abre a valvula 3
+ *         automaticamente — todo caminho de falha (sobrepressao, sensor
+ *         invalido, timeout, watchdog, perda de heartbeat em modo manual)
+ *         deve levar o sistema a este estado via ControlLoop_EnterFaultState(),
+ *         em vez de abrir valvulas individualmente em cada ponto de deteccao
+ *         de falha. */
+static void handle_state_fault(void) {
+    set_pump_power(0.0f);
+    set_valves(1, 1, 1);
+}
+
 static void handle_state_config(void) {
     if (s_control.manual_test_enabled != 0U) {
         set_pump_power(s_control.manual_pump_power);
@@ -430,9 +442,12 @@ void ControlLoop_Update(void) {
             handle_state_config();
             break;
 
-        case SYSTEM_STATE_BOOT:
         case SYSTEM_STATE_FAULT:
-            // Nenhuma ação de controle nestes estados
+            handle_state_fault();
+            break;
+
+        case SYSTEM_STATE_BOOT:
+            // Nenhuma ação de controle neste estado
             break;
     }
 }
@@ -473,6 +488,15 @@ void ControlLoop_ExitConfigMode(void) {
     set_pump_power(0.0f);
     set_valves(1, 1, 0);
     s_control.runtime_data->state = SYSTEM_STATE_IDLE;
+}
+
+void ControlLoop_EnterFaultState(void) {
+    s_control.manual_test_enabled = 0U;
+    s_control.runtime_data->state = SYSTEM_STATE_FAULT;
+    // Aplica o estado seguro imediatamente, sem esperar o proximo
+    // ControlLoop_Update() — mesma logica de handle_state_fault().
+    set_pump_power(0.0f);
+    set_valves(1, 1, 1);
 }
 
 void ControlLoop_StartLeakTest(void) {

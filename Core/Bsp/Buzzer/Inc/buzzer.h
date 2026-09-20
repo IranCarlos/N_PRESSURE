@@ -11,17 +11,21 @@
 #include "main.h"
 
 /**
- * @brief Habilita o DWT cycle counter (Cortex-M7), necessario para o
- *        delay_us() usado por Buzzer_Beep(). Chame uma vez na inicializacao.
+ * @brief Inicializa o driver do buzzer.
+ *
+ * @param p_htim_buzzer Handle do timer configurado em PWM no canal usado
+ *        pelo buzzer (TIM8 canal 2 / pino PC7 nesta placa — ver
+ *        Docs/dev/hardware.md, secao "Audio"). O modulo guarda o ponteiro;
+ *        quem o possui (main.c) e' quem conhece o handle fisico, mesmo
+ *        principio ja usado por Encoder_Init()/ControlLoop_Init().
  */
-void Buzzer_Init(void);
+void Buzzer_Init(TIM_HandleTypeDef *p_htim_buzzer);
 
 /**
- * @brief Gera um tom no buzzer PASSIVO alternando o pino em freq_hz por
- *        duration_ms (onda quadrada por software; bloqueia a thread por
- *        essa duracao). Um buzzer passivo precisa de um sinal AC nessa
- *        faixa de frequencia; ligar o pino em nivel DC produz apenas um
- *        estalo/ruido do capacitor carregando, nao um tom audivel.
+ * @brief Gera um tom no buzzer PASSIVO por PWM de hardware em freq_hz,
+ *        durante duration_ms. Bloqueia a tarefa chamadora por essa duracao
+ *        via osDelay() (nao ocupa a CPU — o tom continua saindo por
+ *        hardware sem intervencao da CPU enquanto isso).
  */
 void Buzzer_Beep(uint32_t freq_hz, uint32_t duration_ms);
 

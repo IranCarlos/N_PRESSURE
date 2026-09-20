@@ -467,7 +467,7 @@ static lv_obj_t * ui_create_spinbox(lv_obj_t * parent, int32_t min, int32_t max,
     lv_obj_align(spin, LV_ALIGN_RIGHT_MID, -2, 0);
     lv_spinbox_set_range(spin, min, max);
     lv_spinbox_set_digit_format(spin, 4, 2);
-    lv_spinbox_set_step(spin, step);
+    lv_spinbox_set_step(spin, (uint32_t)step);
     lv_spinbox_set_value(spin, 0);
     lv_obj_set_style_text_font(spin, &lv_font_montserrat_14, 0);
     lv_obj_set_style_text_align(spin, LV_TEXT_ALIGN_RIGHT, 0);
@@ -642,7 +642,7 @@ static void ui_unit_changed_cb(lv_event_t * e)
         return;
     }
 
-    selected = lv_roller_get_selected(s_roller_unit);
+    selected = (uint16_t)lv_roller_get_selected(s_roller_unit);
     if (selected >= (uint16_t)SYS_PRESSURE_UNIT_COUNT) {
         selected = (uint16_t)SYS_PRESSURE_UNIT_MMHG;
     }

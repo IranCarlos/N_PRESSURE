@@ -36,7 +36,7 @@ static void encoder_read_cb(lv_indev_t * indev, lv_indev_data_t * data)
     s_enc_substep_acc += count_diff;
     lvgl_steps = s_enc_substep_acc / 2;
     s_enc_substep_acc -= (lvgl_steps * 2);
-    data->enc_diff = lvgl_steps;
+    data->enc_diff = (int16_t)lvgl_steps;
 
     // Estado do botão (pressionado ou liberado)
     if (enc_state->enc_btn) {
