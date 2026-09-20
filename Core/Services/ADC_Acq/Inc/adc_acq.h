@@ -11,6 +11,10 @@
 
 #include "stm32h7xx_hal.h"
 #include "system_types.h"
+#include "pressure_core.h"
+
+/* Amostras do DMA circular (1 ms cada, disparo TIM15 a 1 kHz). 16 x uint16 = 32 B. */
+#define ADC_ACQ_DMA_SAMPLES   (16u)
 
 #ifdef __cplusplus
 extern "C" {
@@ -22,13 +26,15 @@ extern "C" {
  * Configura o ADC para leitura contínua via DMA e inicializa o buffer do filtro.
  * Deve ser chamada uma vez durante a inicialização do sistema.
  *
- * @param hadc Ponteiro para o handle do ADC configurado no CubeMX.
+ * @param hadc Ponteiro para o handle do ADC configurado no CubeMX (trigger TIM15 TRGO, DMA circular).
+ * @param htim_trigger Timer que dispara o ADC (TIM15, 1 kHz); e' iniciado aqui.
  * @param p_sensor_cal Ponteiro para a estrutura de calibração do sensor (carregada da EEPROM).
  * @param p_runtime_data Ponteiro para dados de runtime usados para rastrear baseline atmosférico.
  */
 void ADC_Acq_Init(ADC_HandleTypeDef* hadc,
-				  const SensorConfig_t* p_sensor_cal,
-				  const SystemRuntime_t* p_runtime_data);
+                  TIM_HandleTypeDef* htim_trigger,
+                  const SensorConfig_t* p_sensor_cal,
+                  const SystemRuntime_t* p_runtime_data);
 
 /**
  * @brief Atualiza o processo de leitura e filtragem do sensor.
@@ -53,6 +59,12 @@ float ADC_Acq_GetPressureKpa(void);
  * @param target_unit A unidade de destino para a conversão (ex: SYS_PRESSURE_UNIT_MMHG).
  * @return float O valor da pressão na unidade de destino.
  */
+/** @brief Fixa o zero atmosferico na leitura atual (auto-zero manual). */
+void ADC_Acq_ZeroNow(void);
+
+/** @brief Estado interno (contagens, ruido, flags de sensor) para bench/diagnostico. */
+const PressureCore_t* ADC_Acq_GetDiagnostics(void);
+
 float ADC_Acq_ConvertPressure(float pressure_kpa, PressureUnit_t target_unit);
 
 #ifdef __cplusplus

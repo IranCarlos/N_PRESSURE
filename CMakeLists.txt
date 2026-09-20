@@ -121,6 +121,7 @@ set(N_PRESSURE_INC_DIRS
     Core/Services/EEPROM/Inc
     Core/Services/Fault_Manager/Inc
     Core/Services/Supervisor/Inc
+    Core/Services/Pressure_Core/Inc
     Core/App/HMI_UI/Inc
 )
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${N_PRESSURE_INC_DIRS})

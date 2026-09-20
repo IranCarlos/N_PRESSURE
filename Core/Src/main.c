@@ -73,6 +73,12 @@ typedef StaticTask_t osStaticThreadDef_t;
 // dispositivo de entrada do LVGL).
 #define BRINGUP_ENABLE_LVGL         (1)
 
+// 1 = liga o sensor de pressao (ADC2 disparado pelo TIM15 a 1 kHz + DMA
+// circular) no bring-up, sem Control_Loop/EEPROM. A leitura fica em
+// g_pressure_diag (Live Watch: pressure_kpa, last_p2p_counts = ruido,
+// flags). Estado do sistema fixo em IDLE => baseline atmosferico rastreado.
+#define BRINGUP_ENABLE_PRESSURE     (1)
+
 #define TASK_ENCODER_PERIOD_MS      (1u)
 #define TASK_CONTROL_PERIOD_MS      (1u)
 #define TASK_HMI_PERIOD_MS          (20u)
@@ -139,6 +145,7 @@ TIM_HandleTypeDef htim2;
 TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
 TIM_HandleTypeDef htim8;
+TIM_HandleTypeDef htim15;
 
 PCD_HandleTypeDef hpcd_USB_OTG_HS;
 HCD_HandleTypeDef hhcd_USB_OTG_HS;
@@ -263,11 +270,19 @@ lv_mem_monitor_t g_lv_mem;
 
 // Estado do supervisor (ver StartSafetyTask): mascara de tarefas que fizeram
 // check-in na ultima janela e contador de janelas com falta de check-in.
+#if (APP_MODE_BRINGUP && BRINGUP_ENABLE_PRESSURE)
+static const SensorConfig_t s_bringup_sensor_cal = { .offset_kpa = 0.0f, .scale = 1.0f };
+static SystemRuntime_t s_bringup_runtime = { .state = SYSTEM_STATE_IDLE };
+const PressureCore_t *g_pressure_diag; // Live Watch: expandir para ver ruido/flags
+#endif
 volatile uint32_t g_supervisor_last_mask;
 volatile uint32_t g_supervisor_missed_windows;
 
 // Fault do boot anterior, recuperado dos registradores de backup do RTC por
 // FaultManager_Init(). Valido so' se g_boot_fault_pending != 0.
+// RCC->RSR do boot: PORRSTF/PINRSTF (0x00..), BORRSTF (bit 21, brown-out),
+// SFTRSTF (bit 24, NVIC_SystemReset), IWDG1RSTF (bit 26, watchdog).
+volatile uint32_t g_boot_rsr;
 volatile uint8_t g_boot_fault_pending;
 FaultManager_Record_t g_boot_fault_record;
 /* USER CODE END PV */
@@ -289,6 +304,7 @@ static void MX_SDMMC1_SD_Init(void);
 static void MX_USB_OTG_HS_PCD_Init(void);
 static void MX_RTC_Init(void);
 static void MX_TIM8_Init(void);
+static void MX_TIM15_Init(void);
 void StartControlTask(void *argument);
 void StartSafetyTask(void *argument);
 void StartInputTask(void *argument);
@@ -390,10 +406,12 @@ int main(void)
   MX_FATFS_Init();
   MX_RTC_Init();
   MX_TIM8_Init();
+  MX_TIM15_Init();
   /* USER CODE BEGIN 2 */
   // Fase 1: captura de fault/reset persistente (RTC ja inicializado acima)
   // e contador de ciclos para medicao de jitter nas Fases 3/4. Rodam antes
   // de qualquer outro modulo para nao perder um fault ocorrido cedo demais.
+  g_boot_rsr = RCC->RSR; // antes de o FaultManager limpar: motivo do ultimo reset
   FaultManager_Init(&hrtc);
   PortDWT_Init();
   g_boot_fault_pending = FaultManager_HasPendingFault();
@@ -408,6 +426,11 @@ int main(void)
   // --- MODO BRING-UP: testa display, encoder e buzzer isoladamente ---
 #if BRINGUP_ENABLE_BUZZER
   Buzzer_Init(&htim8);
+#endif
+
+#if BRINGUP_ENABLE_PRESSURE
+  ADC_Acq_Init(&hadc2, &htim15, &s_bringup_sensor_cal, &s_bringup_runtime);
+  g_pressure_diag = ADC_Acq_GetDiagnostics();
 #endif
 
 #if (BRINGUP_ENABLE_DISPLAY && !BRINGUP_ENABLE_LVGL)
@@ -517,7 +540,7 @@ int main(void)
   }
 
   // 6. Sensor de Pressao
-  ADC_Acq_Init(&hadc2, &g_system_cfg.sensor_cal, &g_runtime_data);
+  ADC_Acq_Init(&hadc2, &htim15, &g_system_cfg.sensor_cal, &g_runtime_data);
 
   // 7. Malha de Controle (pinos das valvulas definidos por esta placa,
   //    injetados aqui em vez do modulo depender de main.h diretamente)
@@ -719,10 +742,10 @@ static void MX_ADC2_Init(void)
   hadc2.Init.ContinuousConvMode = DISABLE;
   hadc2.Init.NbrOfConversion = 1;
   hadc2.Init.DiscontinuousConvMode = DISABLE;
-  hadc2.Init.ExternalTrigConv = ADC_SOFTWARE_START;
-  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_NONE;
-  hadc2.Init.ConversionDataManagement = ADC_CONVERSIONDATA_DMA_ONESHOT;
-  hadc2.Init.Overrun = ADC_OVR_DATA_PRESERVED;
+  hadc2.Init.ExternalTrigConv = ADC_EXTERNALTRIG_T15_TRGO;
+  hadc2.Init.ExternalTrigConvEdge = ADC_EXTERNALTRIGCONVEDGE_RISING;
+  hadc2.Init.ConversionDataManagement = ADC_CONVERSIONDATA_DMA_CIRCULAR;
+  hadc2.Init.Overrun = ADC_OVR_DATA_OVERWRITTEN;
   hadc2.Init.LeftBitShift = ADC_LEFTBITSHIFT_NONE;
   hadc2.Init.OversamplingMode = ENABLE;
   hadc2.Init.Oversampling.Ratio = 4;
@@ -1206,6 +1229,52 @@ static void MX_TIM8_Init(void)
 }
 
 /**
+  * @brief TIM15 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_TIM15_Init(void)
+{
+
+  /* USER CODE BEGIN TIM15_Init 0 */
+
+  /* USER CODE END TIM15_Init 0 */
+
+  TIM_ClockConfigTypeDef sClockSourceConfig = {0};
+  TIM_MasterConfigTypeDef sMasterConfig = {0};
+
+  /* USER CODE BEGIN TIM15_Init 1 */
+
+  /* USER CODE END TIM15_Init 1 */
+  htim15.Instance = TIM15;
+  htim15.Init.Prescaler = 275-1;
+  htim15.Init.CounterMode = TIM_COUNTERMODE_UP;
+  htim15.Init.Period = 1000-1;
+  htim15.Init.ClockDivision = TIM_CLOCKDIVISION_DIV1;
+  htim15.Init.RepetitionCounter = 0;
+  htim15.Init.AutoReloadPreload = TIM_AUTORELOAD_PRELOAD_ENABLE;
+  if (HAL_TIM_Base_Init(&htim15) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sClockSourceConfig.ClockSource = TIM_CLOCKSOURCE_INTERNAL;
+  if (HAL_TIM_ConfigClockSource(&htim15, &sClockSourceConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  sMasterConfig.MasterOutputTrigger = TIM_TRGO_UPDATE;
+  sMasterConfig.MasterSlaveMode = TIM_MASTERSLAVEMODE_DISABLE;
+  if (HAL_TIMEx_MasterConfigSynchronization(&htim15, &sMasterConfig) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN TIM15_Init 2 */
+
+  /* USER CODE END TIM15_Init 2 */
+
+}
+
+/**
   * @brief USB_OTG_HS Initialization Function
   * @param None
   * @retval None
@@ -1405,6 +1474,8 @@ void StartControlTask(void *argument)
   {
 #if !APP_MODE_BRINGUP
     ControlLoop_Update();
+#elif BRINGUP_ENABLE_PRESSURE
+    ADC_Acq_Update();
 #endif
     Supervisor_CheckIn(SUPERVISOR_TASK_CONTROL);
     osDelay(TASK_CONTROL_PERIOD_MS);

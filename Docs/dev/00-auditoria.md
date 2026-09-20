@@ -409,3 +409,25 @@ bloqueiam decisões de firmware:
 - [x] Lista de perguntas/decisões objetivas (seção 5, D1–D5) e conflitos (seção 4, C1–C4).
 
 **Aguardando sua aprovação antes de iniciar a Fase 1.**
+
+## Fase 2 — progresso
+
+### 2.1 Sensor de pressao (2026-09-20) — codigo pronto, AGUARDA validacao em bancada
+- **Bug encontrado**: ADC2 estava em software-start + DMA one-shot e `ADC_Acq_Init` disparava uma unica
+  conversao; `ADC_Acq_Update` filtrava sempre o mesmo valor. Corrigido: TIM15 (PSC 274, ARR 999 = 1 kHz)
+  -> TRGO -> ADC2 (borda de subida), DMA circular de 16 amostras (`ADC_ACQ_DMA_SAMPLES`, 32 B em RAM_D1).
+- `Core/Services/Pressure_Core` (C puro, sem HAL): contagens -> kPa, baseline atmosferico, calibracao
+  (offset/escala + `PressureCore_CalibrateTwoPoint`), flags `OUT_OF_RANGE` (<0.10 V ou >4.90 V no sensor)
+  e `STUCK` (500 blocos com pico-a-pico 0). `ADC_Acq` so' cuida de ADC/DMA/cache e alimenta o core.
+- Teste de host: `bash test/host/run.sh` (gcc MSYS2 em `C:\msys64\ucrt64\bin`; sem sanitizers no MinGW).
+- Bring-up: `BRINGUP_ENABLE_PRESSURE` em `main.c`; Live Watch em `g_pressure_diag`
+  (`pressure_kpa`, `last_p2p_counts` = ruido, `flags`).
+- Pendente (bancada): medir e documentar o ruido em repouso; calibrar 2 pontos com o manometro em V3.
+- Encoder H1: decisao do usuario = TI1 (mantido).
+- **Achado de hardware (2026-09-20):** ADC lia 65535 fixo. Causa: pino **VREF+ flutuando (0,32 V)**, sem ligacao
+  ao VDDA (3,26 V); VREFBUF fica desligado no reset. Correcao: VREF+ ligado ao VDDA na placa — validado pelo
+  usuario (leitura normal apos o reparo). **Corrigir no esquema/PCB da proxima revisao.** Sondas mantidas:
+  `g_adc_dbg` (half/full/err), `g_boot_rsr`.
+- Reinicios observados antes do reparo cessaram apos zerar/`Clean` do buffer DMA (RAM_D1, ECC) em `ADC_Acq_Init`;
+  causa provavel, nao provada (sem repro isolada).
+- Pendente: ruido em repouso (`last_p2p_counts`) e calibracao de 2 pontos com o manometro em V3.
