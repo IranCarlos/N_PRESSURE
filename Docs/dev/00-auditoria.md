@@ -431,3 +431,18 @@ bloqueiam decisões de firmware:
 - Reinicios observados antes do reparo cessaram apos zerar/`Clean` do buffer DMA (RAM_D1, ECC) em `ADC_Acq_Init`;
   causa provavel, nao provada (sem repro isolada).
 - Pendente: ruido em repouso (`last_p2p_counts`) e calibracao de 2 pontos com o manometro em V3.
+
+### 2.2 Valvulas e bomba (2026-09-20) — codigo pronto, AGUARDA bancada
+- `Core/Bsp/Valve` (`valve.c` logica pura + `valve_gpio.c` binding): abstracao de polaridade em UM campo
+  (`open_level`; hoje NA, pino LOW = aberta). `Valve_Init` leva tudo a ABERTA. Valvula/id invalido reporta OPEN.
+- `Core/Bsp/PwmMotor` (`pwm_motor.c` + `pwm_motor_tim.c`): `CCR = potencia*(ARR+1)`; 100 % agora e' 100 % real
+  (antes `potencia*ARR` dava 99,99 %). NaN/negativo = 0; `PwmMotor_SetLimit` para teto de bancada.
+- `Control_Loop` passou a usar os dois drivers (mesmo comportamento; a malha continua fora do caminho ativo).
+  Ainda nao verificado em bancada — como toda mudanca no Control_Loop, exige verificacao com hardware.
+- `Core/App/Bench/actuator_bench.c` (logica pura, testada no host): bancada comandada pelo Live Watch
+  (`g_act_arm`, `g_act_pump`, `g_act_valves`). Desarmado = bomba 0 + V1..V3 abertas; potencia <= 30 %;
+  bomba continua > 5 s = trip; pressao > 15 kPa ou sensor invalido = trip (latch ate desarmar). Habilita com
+  `BRINGUP_ENABLE_ACTUATORS=1` (default 0).
+- Testes de host: `bash test/host/run.sh` (pressure_core + valve + pwm_motor + actuator_bench).
+- Aberto: como a bomba/driver se comporta com o pino em alta impedancia no reset (as valvulas abrem por serem NA;
+  confirmar tambem que a bomba fica desligada por pull-down no hardware).

@@ -115,6 +115,8 @@ set(N_PRESSURE_INC_DIRS
     Core/Bsp/Buzzer/Inc
     Core/Bsp/Pedal/Inc
     Core/Bsp/Port/Inc
+    Core/Bsp/Valve/Inc
+    Core/Bsp/PwmMotor/Inc
     Core/Bsp/LvglPort/Inc
     Core/Services/ADC_Acq/Inc
     Core/Services/Control_Loop/Inc
@@ -123,6 +125,7 @@ set(N_PRESSURE_INC_DIRS
     Core/Services/Supervisor/Inc
     Core/Services/Pressure_Core/Inc
     Core/App/HMI_UI/Inc
+    Core/App/Bench/Inc
 )
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${N_PRESSURE_INC_DIRS})
 

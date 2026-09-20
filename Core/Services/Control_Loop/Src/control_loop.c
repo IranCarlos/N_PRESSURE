@@ -8,6 +8,8 @@
 
 #include "control_loop.h"
 #include "adc_acq.h"
+#include "valve_gpio.h"
+#include "pwm_motor_tim.h"
 #include <string.h>
 #include <math.h> // Para fabsf
 
@@ -47,8 +49,6 @@ static struct {
     // Ponteiros para dados externos
     SystemConfig_t* sys_cfg;
     SystemRuntime_t* runtime_data;
-    TIM_HandleTypeDef* htim_pwm;
-    ControlLoop_ValvePins_t valve_pins;
 
     // Estado interno
     PID_State_t pid_state;
@@ -75,9 +75,7 @@ static struct {
 /** @brief Controla o estado das válvulas. Valvula 3 (calibracao) so e aberta
  *         explicitamente pelo modo manual — todo chamador automatico passa 0. */
 static void set_valves(uint8_t v1_open, uint8_t v2_open, uint8_t v3_open) {
-    HAL_GPIO_WritePin(s_control.valve_pins.valve1.port, s_control.valve_pins.valve1.pin, !v1_open);
-    HAL_GPIO_WritePin(s_control.valve_pins.valve2.port, s_control.valve_pins.valve2.pin, !v2_open);
-    HAL_GPIO_WritePin(s_control.valve_pins.valve3.port, s_control.valve_pins.valve3.pin, !v3_open);
+    Valve_SetAll(v1_open, v2_open, v3_open); // polaridade NA/LOW=aberta vive em valve_gpio.c
 }
 
 /** @brief Controla a bomba de ar via PWM. Escreve direto no CCR do timer
@@ -85,21 +83,7 @@ static void set_valves(uint8_t v1_open, uint8_t v2_open, uint8_t v3_open) {
  *         do loop de controle (TASK_CONTROL_PERIOD_MS), nao a cada periodo
  *         de PWM. */
 static void set_pump_power(float power) {
-    uint32_t period;
-    uint32_t pulse;
-
-    // Garante faixa valida para duty cycle de PWM.
-    if (power < 0.0f) {
-        power = 0.0f;
-    }
-    if (power > 1.0f) {
-        power = 1.0f;
-    }
-
-    // Converte a potência (0.0 a 1.0) para o valor do registrador de pulso do timer
-    period = s_control.htim_pwm->Init.Period;
-    pulse = (uint32_t)(power * (float)period);
-    __HAL_TIM_SET_COMPARE(s_control.htim_pwm, TIM_CHANNEL_1, pulse);
+    (void)PwmMotor_SetPower(power); // satura em [0, limite]; CCR = potencia*(ARR+1)
 }
 
 /** @brief Executa uma iteração do algoritmo PID. */
@@ -378,8 +362,6 @@ void ControlLoop_Init(SystemConfig_t* p_sys_cfg, TIM_HandleTypeDef* p_htim_pwm,
 
     s_control.sys_cfg = p_sys_cfg;
     s_control.runtime_data = p_runtime_data;
-    s_control.htim_pwm = p_htim_pwm;
-    s_control.valve_pins = *p_valve_pins;
 
     // Estado inicial
     s_control.runtime_data->state = SYSTEM_STATE_IDLE;
@@ -391,16 +373,22 @@ void ControlLoop_Init(SystemConfig_t* p_sys_cfg, TIM_HandleTypeDef* p_htim_pwm,
         s_control.runtime_data->setpoint_mmhg = p_sys_cfg->max_setpoint_mmhg;
     }
 
-    // Desliga todos os atuadores
+    // Drivers dos atuadores: valvulas (todas abertas ao iniciar) e PWM da
+    // bomba (CCR = 0 antes de habilitar a saida). O canal (TIM_CHANNEL_1) deve
+    // corresponder ao configurado no CubeMX.
+    {
+        Valve_GpioMap_t map = { .valve = {
+            { p_valve_pins->valve1.port, p_valve_pins->valve1.pin },
+            { p_valve_pins->valve2.port, p_valve_pins->valve2.pin },
+            { p_valve_pins->valve3.port, p_valve_pins->valve3.pin },
+        } };
+        Valve_InitGpio(&map);
+    }
+    PwmMotor_InitTim(p_htim_pwm, TIM_CHANNEL_1);
+
+    // Estado de repouso: bomba off, V1+V2 abertas, V3 (manometro) fechada.
     set_pump_power(0.0f);
     set_valves(1, 1, 0);
-
-    // Inicia o PWM (escrita direta do CCR via __HAL_TIM_SET_COMPARE em
-    // set_pump_power(), sem DMA). O canal (TIM_CHANNEL_1) deve corresponder
-    // ao configurado no CubeMX.
-    if (HAL_TIM_PWM_Start(s_control.htim_pwm, TIM_CHANNEL_1) != HAL_OK) {
-        Error_Handler();
-    }
 }
 
 void ControlLoop_Update(void) {

@@ -28,6 +28,9 @@
 #include "lv_port_disp.h"
 #include "lv_port_indev.h"
 #include "adc_acq.h"
+#include "valve_gpio.h"
+#include "pwm_motor_tim.h"
+#include "actuator_bench.h"
 #include "control_loop.h"
 #include "encoder.h"
 #include "pedal.h"
@@ -78,6 +81,14 @@ typedef StaticTask_t osStaticThreadDef_t;
 // g_pressure_diag (Live Watch: pressure_kpa, last_p2p_counts = ruido,
 // flags). Estado do sistema fixo em IDLE => baseline atmosferico rastreado.
 #define BRINGUP_ENABLE_PRESSURE     (1)
+
+// 1 = bancada de atuadores: bomba (TIM3_CH1) e valvulas V1/V2/V3 comandadas
+// pelo Live Watch, SEM a malha de controle (ver actuator_bench.h). Exige
+// BRINGUP_ENABLE_PRESSURE=1 (usa a pressao para o intertravamento). Comece com
+// a MANGUEIRA DESCONECTADA do manguito. Variaveis: g_act_arm (0/1),
+// g_act_pump (0..1, limitada a 0.30), g_act_valves (bit0=V1, bit1=V2, bit2=V3;
+// 1 = aberta). Trip por sobrepressao/sensor/tempo de bomba: ver g_act_bench.trip.
+#define BRINGUP_ENABLE_ACTUATORS    (0)
 
 #define TASK_ENCODER_PERIOD_MS      (1u)
 #define TASK_CONTROL_PERIOD_MS      (1u)
@@ -275,6 +286,16 @@ static const SensorConfig_t s_bringup_sensor_cal = { .offset_kpa = 0.0f, .scale 
 static SystemRuntime_t s_bringup_runtime = { .state = SYSTEM_STATE_IDLE };
 const PressureCore_t *g_pressure_diag; // Live Watch: expandir para ver ruido/flags
 #endif
+#if (APP_MODE_BRINGUP && BRINGUP_ENABLE_ACTUATORS)
+#if !BRINGUP_ENABLE_PRESSURE
+#error "BRINGUP_ENABLE_ACTUATORS exige BRINGUP_ENABLE_PRESSURE=1 (intertravamento por pressao)"
+#endif
+volatile uint8_t g_act_arm;                          // 0 = seguro
+volatile float   g_act_pump;                         // 0..1 (limitada em 0.30)
+volatile uint8_t g_act_valves = ACTBENCH_ALL_OPEN;   // bit=1 -> aberta
+ActuatorBench_t     g_act_bench;
+ActuatorBench_Out_t g_act_out = { 0.0f, ACTBENCH_ALL_OPEN };
+#endif
 volatile uint32_t g_supervisor_last_mask;
 volatile uint32_t g_supervisor_missed_windows;
 
@@ -431,6 +452,20 @@ int main(void)
 #if BRINGUP_ENABLE_PRESSURE
   ADC_Acq_Init(&hadc2, &htim15, &s_bringup_sensor_cal, &s_bringup_runtime);
   g_pressure_diag = ADC_Acq_GetDiagnostics();
+#endif
+
+#if BRINGUP_ENABLE_ACTUATORS
+  {
+    const Valve_GpioMap_t map = { .valve = {
+        { VALVE_1_GPIO_Port, VALVE_1_Pin },
+        { VALVE_2_GPIO_Port, VALVE_2_Pin },
+        { VALVE_3_GPIO_Port, VALVE_3_Pin },
+    } };
+    Valve_InitGpio(&map);                       // todas abertas
+    PwmMotor_InitTim(&htim3, TIM_CHANNEL_1);    // CCR = 0
+    PwmMotor_SetLimit(ACTBENCH_PUMP_MAX);
+    ActuatorBench_Init(&g_act_bench);
+  }
 #endif
 
 #if (BRINGUP_ENABLE_DISPLAY && !BRINGUP_ENABLE_LVGL)
@@ -1476,6 +1511,22 @@ void StartControlTask(void *argument)
     ControlLoop_Update();
 #elif BRINGUP_ENABLE_PRESSURE
     ADC_Acq_Update();
+#if BRINGUP_ENABLE_ACTUATORS
+    {
+      const ActuatorBench_Cmd_t cmd = { g_act_arm, g_act_pump, g_act_valves };
+      const uint8_t sensor_ok =
+          ((g_pressure_diag->flags != 0u) || (g_pressure_diag->atmospheric_valid == 0u)) ? 0u : 1u;
+
+      ActuatorBench_Step(&g_act_bench, &cmd, g_pressure_diag->pressure_kpa, sensor_ok,
+                         TASK_CONTROL_PERIOD_MS, &g_act_out);
+      // Valvulas antes da bomba ao ligar; bomba antes das valvulas ao desligar
+      // nao importa aqui: o estado seguro abre tudo E zera a bomba no mesmo passo.
+      Valve_SetAll((g_act_out.valve_open_mask & ACTBENCH_V1) != 0u,
+                   (g_act_out.valve_open_mask & ACTBENCH_V2) != 0u,
+                   (g_act_out.valve_open_mask & ACTBENCH_V3) != 0u);
+      (void)PwmMotor_SetPower(g_act_out.pump_power);
+    }
+#endif
 #endif
     Supervisor_CheckIn(SUPERVISOR_TASK_CONTROL);
     osDelay(TASK_CONTROL_PERIOD_MS);
