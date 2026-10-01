@@ -89,7 +89,17 @@ typedef StaticTask_t osStaticThreadDef_t;
 // a MANGUEIRA DESCONECTADA do manguito. Variaveis: g_act_arm (0/1),
 // g_act_pump (0..1, limitada a 0.30), g_act_valves (bit0=V1, bit1=V2, bit2=V3;
 // 1 = aberta). Trip por sobrepressao/sensor/tempo de bomba: ver g_act_bench.trip.
-#define BRINGUP_ENABLE_ACTUATORS    (1)
+#define BRINGUP_ENABLE_ACTUATORS    (0)
+
+// 1 = ensaio automatico de verdade (Fase 4): Control_Loop/Control_Core
+// comandam bomba+valvulas pela maquina de estados real (IDLE->INFLATING->
+// STABILIZING->STABILIZED->DEFLATING_FAST), com as protecoes de seguranca
+// descritas em Docs/dev/sim-report.md (sobrepressao, sensor invalido,
+// vazamento, timeouts). Mutuamente exclusivo com BRINGUP_ENABLE_ACTUATORS
+// (os dois comandam os mesmos atuadores) e exige BRINGUP_ENABLE_PRESSURE=1.
+// NUNCA testado em hardware ainda — ver o aviso de bancada no bloco de
+// globais logo abaixo antes de habilitar.
+#define BRINGUP_ENABLE_CONTROL      (0)
 
 #define TASK_ENCODER_PERIOD_MS      (1u)
 #define TASK_CONTROL_PERIOD_MS      (1u)
@@ -297,6 +307,27 @@ volatile uint8_t g_act_valves = ACTBENCH_ALL_OPEN;   // bit=1 -> aberta
 ActuatorBench_t     g_act_bench;
 ActuatorBench_Out_t g_act_out = { 0.0f, ACTBENCH_ALL_OPEN };
 #endif
+#if (APP_MODE_BRINGUP && BRINGUP_ENABLE_CONTROL)
+#if !BRINGUP_ENABLE_PRESSURE
+#error "BRINGUP_ENABLE_CONTROL exige BRINGUP_ENABLE_PRESSURE=1 (precisa de leitura real de pressao)"
+#endif
+#if BRINGUP_ENABLE_ACTUATORS
+#error "BRINGUP_ENABLE_CONTROL e BRINGUP_ENABLE_ACTUATORS sao mutuamente exclusivos (os dois comandam bomba/valvulas)"
+#endif
+// Fase 4: ensaio automatico de verdade, pela 1a vez no hardware. Comece com
+// o setpoint BAIXO (ver g_bringup_sys_cfg.current_setpoint_mmhg, default 40
+// mmHg aqui) e um reservatorio/manguito de volume conhecido — NUNCA o
+// manguito direto num paciente ou membro nesta fase. Suba o setpoint aos
+// poucos pelo Live Watch so' depois de confirmar que insufla/desinfla e
+// estabiliza em baixa pressao. Pedal ou botao do encoder: 1o clique insufla,
+// clique durante o ensaio desinfla (mesma logica do caminho de producao).
+// Diagnostico: g_control_runtime->state/pressure_display, g_control_last_error
+// (ver ControlCore_Error_t em control_core.h), g_control_jitter_us.
+SystemConfig_t   g_bringup_sys_cfg;
+SystemRuntime_t *g_control_runtime; // aponta para s_bringup_runtime (compartilhado com ADC_Acq)
+volatile uint32_t g_control_last_error;
+volatile uint32_t g_control_jitter_us;
+#endif
 volatile uint32_t g_supervisor_last_mask;
 volatile uint32_t g_supervisor_missed_windows;
 
@@ -464,6 +495,25 @@ int main(void)
 #if BRINGUP_ENABLE_PRESSURE
   ADC_Acq_Init(&hadc2, &htim15, &s_bringup_sensor_cal, &s_bringup_runtime);
   g_pressure_diag = ADC_Acq_GetDiagnostics();
+#endif
+
+#if BRINGUP_ENABLE_CONTROL
+  {
+    const ControlLoop_ValvePins_t valve_pins = {
+        .valve1 = { VALVE_1_GPIO_Port, VALVE_1_Pin },
+        .valve2 = { VALVE_2_GPIO_Port, VALVE_2_Pin },
+        .valve3 = { VALVE_3_GPIO_Port, VALVE_3_Pin },
+    };
+    EEPROM_Storage_LoadDefaults(&g_bringup_sys_cfg);
+    // 1o teste em hardware de verdade: setpoint baixo de proposito, mesmo
+    // com o default da EEPROM sendo 120 mmHg — suba pelo Live Watch
+    // (g_bringup_sys_cfg.current_setpoint_mmhg) so' depois de confirmar
+    // que o ciclo completo (inflar/estabilizar/desinflar) funciona aqui.
+    g_bringup_sys_cfg.current_setpoint_mmhg = 40.0f;
+    g_control_runtime = &s_bringup_runtime;
+    Pedal_Init(&htim4); // nao chamado em nenhum outro lugar do bring-up
+    ControlLoop_Init(&g_bringup_sys_cfg, &htim3, g_control_runtime, &valve_pins);
+  }
 #endif
 
 #if BRINGUP_ENABLE_ACTUATORS
@@ -1537,6 +1587,10 @@ void StartControlTask(void *argument)
   {
 #if !APP_MODE_BRINGUP
     ControlLoop_Update();
+#elif BRINGUP_ENABLE_CONTROL
+    ControlLoop_Update();
+    g_control_last_error = (uint32_t)ControlLoop_GetLastError();
+    g_control_jitter_us = ControlLoop_GetMaxJitterCycles() / (SystemCoreClock / 1000000u);
 #elif BRINGUP_ENABLE_PRESSURE
     ADC_Acq_Update();
 #if BRINGUP_ENABLE_ACTUATORS
@@ -1672,6 +1726,17 @@ void StartInputTask(void *argument)
     // hoje (LVGL=1) foi migrado. Reativar aquele modo exigiria portar
     // tambem esse pedaco (era so' escrita de timestamp, sem estado
     // complexo).
+#if BRINGUP_ENABLE_CONTROL
+    // Mesma logica do caminho de producao (ver #else logo abaixo), usando o
+    // runtime de bring-up em vez de g_runtime_data.
+    if ((Encoder_GetUserBtnEvent() != 0u) || (Pedal_GetEvent() != 0u)) {
+      if (g_control_runtime->state == SYSTEM_STATE_IDLE) {
+        ControlLoop_StartInflation();
+      } else {
+        g_control_runtime->bt_user_pressed = 1u;
+      }
+    }
+#endif
 #else
     Encoder_Update();
     if ((Encoder_GetUserBtnEvent() != 0u) || (Pedal_GetEvent() != 0u)) {

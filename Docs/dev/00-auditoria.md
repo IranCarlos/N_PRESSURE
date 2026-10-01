@@ -528,3 +528,34 @@ bloqueiam decisões de firmware:
 - Pendente antes da Fase 4: decidir com o usuario o `overshoot_max` real (hoje so' o exemplo do
   Apendice E, "<= 2 mmHg"); medir T_lag/vazao das valvulas/capacitancia do manguito na bancada e
   re-tunar o mesmo simulador antes de tocar no hardware de verdade.
+
+## Fase 4 — Controle no hardware (inicio, 2026-10-01)
+
+- **Decisao do usuario**: manter `overshoot_max` ja citado (Apendice E, <= 2 mmHg); ajustes finos de
+  PID/bandas ficam para quando o ciclo completo ja estiver rodando no hardware, nao antes.
+- `Core/Services/Control_Loop` agora delega o ensaio automatico (IDLE/INFLATING/STABILIZING/
+  STABILIZED/DEFLATING_FAST/FAULT) ao `Control_Core` (Fase 3). CONFIG (modo manual da tela de
+  config) e LEAK_TEST (calibracao) continuam com a logica antiga, intocados.
+- `EEPROM_Storage_LoadDefaults()` atualizado com os ganhos de PID e a banda de estabilizacao
+  validados SO' no simulador (`kp=0.8 ki=0.015 kd=0.15 i_min=-8 i_max=8`, `stabilization.band_mmhg=3.0`)
+  — os valores antigos (nunca testados) causavam ~60 mmHg de overshoot. Ainda pendente de ajuste na
+  bancada de verdade.
+- Jitter do loop de controle instrumentado via DWT (`ControlLoop_GetMaxJitterCycles()`), exposto no
+  bring-up como `g_control_jitter_us`. Erro do ensaio automatico em `ControlLoop_GetLastError()`
+  (`g_control_last_error` no bring-up).
+- **Bring-up novo: `BRINGUP_ENABLE_CONTROL`** (default **0**, nunca testado em hardware ainda).
+  Mutuamente exclusivo com `BRINGUP_ENABLE_ACTUATORS` (os dois comandam os mesmos atuadores) —
+  por isso `BRINGUP_ENABLE_ACTUATORS` voltou a 0 neste commit. Liga o ensaio automatico de verdade
+  pela primeira vez no hardware: pedal/botao do encoder insufla/desinfla, setpoint inicial forcado a
+  **40 mmHg** (bem abaixo do default de 120 mmHg) para o primeiro teste. Variaveis de diagnostico:
+  `g_control_runtime` (state/pressure_display/setpoint), `g_control_last_error`, `g_control_jitter_us`.
+- **Checklist de bancada (Parte C/Fase 4 do prompt, antes de habilitar)**:
+  1. Manguito/reservatorio de **volume conhecido**, NUNCA direto num paciente ou membro nesta fase.
+  2. Confirmar visualmente que as 3 valvulas e a bomba respondem (reusar o teste da Fase 2 se preciso).
+  3. Habilitar `BRINGUP_ENABLE_CONTROL=1`, gravar, acompanhar `g_control_runtime->state` no Live Watch.
+  4. Testar 1 ciclo completo em 40 mmHg: inflar -> estabilizar -> pedal -> desinflar -> IDLE.
+  5. So' depois subir `g_bringup_sys_cfg.current_setpoint_mmhg` aos poucos (Live Watch), repetindo o
+     ciclo a cada degrau.
+  6. Registrar overshoot, tempo ao setpoint e `g_control_jitter_us` em cada degrau — isso vira o
+     proximo ajuste do simulador e, depois, da EEPROM.
+- Build Debug/Release limpo com a flag em 0 (default) e em 1 (testado so' por compilacao).

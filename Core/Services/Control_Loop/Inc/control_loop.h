@@ -27,6 +27,7 @@
 
 #include "stm32h7xx_hal.h"
 #include "system_types.h"
+#include "control_core.h" /* ControlCore_Error_t (ver ControlLoop_GetLastError) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -74,6 +75,21 @@ void ControlLoop_Init(SystemConfig_t* p_sys_cfg, TIM_HandleTypeDef* p_htim_pwm,
  * atualiza os atuadores.
  */
 void ControlLoop_Update(void);
+
+/**
+ * @brief Maior jitter (em ciclos de CPU) ja observado entre chamadas
+ *        consecutivas de ControlLoop_Update(), frente ao periodo nominal
+ *        de 1 ms (Fase 3/4: "registrar jitter maximo... e expor via
+ *        diagnostico"). Dividir por (SystemCoreClock/1000000) para us.
+ */
+uint32_t ControlLoop_GetMaxJitterCycles(void);
+
+/**
+ * @brief Ultimo erro latched pelo nucleo do ensaio automatico (Control_Core)
+ *        — ver ControlCore_Error_t em control_core.h (subconjunto do
+ *        Apendice D: E001/E002/E003/E004/E013). CONTROL_ERR_NONE se nenhum.
+ */
+ControlCore_Error_t ControlLoop_GetLastError(void);
 
 /**
  * @brief Define um novo setpoint de pressão para o controlador.

@@ -109,14 +109,23 @@ void EEPROM_Storage_LoadDefaults(SystemConfig_t *cfg)
     cfg->layout_version = EEPROM_STORAGE_LAYOUT_VERSION;
     cfg->crc32 = 0u;
 
-    cfg->pid.kp = 2.5f;
-    cfg->pid.ki = 0.25f;
-    cfg->pid.kd = 0.02f;
+    /* Ganhos de partida (Fase 3, simulados — ver Docs/dev/sim-report.md).
+     * Os valores antigos (kp=2.5 ki=0.25 i_max=300) nunca foram testados em
+     * lugar nenhum (Control_Loop e' o ramo morto atras de APP_MODE_BRINGUP)
+     * e produziram ~60 mmHg de overshoot e nenhuma estabilizacao no
+     * simulador — o anti-windup (i_max=300, 30% da escala de saida) era
+     * grande demais e deixava a bomba empurrando muito alem do alvo. Os
+     * valores abaixo sao o ponto de partida validado SO' no simulador;
+     * ainda precisam de ajuste fino na bancada (Fase 4) com T_lag e vazao
+     * de valvula medidos de verdade. */
+    cfg->pid.kp = 0.8f;
+    cfg->pid.ki = 0.015f;
+    cfg->pid.kd = 0.15f;
     cfg->pid.ff = 1.5f;
     cfg->pid.out_min = 0.0f;
     cfg->pid.out_max = 1000.0f;
-    cfg->pid.i_min = -300.0f;
-    cfg->pid.i_max = 300.0f;
+    cfg->pid.i_min = -8.0f;
+    cfg->pid.i_max = 8.0f;
     cfg->pid.sample_time_ms = 1u;
 
     cfg->sensor_cal.offset_kpa = 0.0f;
@@ -125,7 +134,11 @@ void EEPROM_Storage_LoadDefaults(SystemConfig_t *cfg)
 
     cfg->max_setpoint_mmhg = 300.0f;
     cfg->current_setpoint_mmhg = 120.0f;
-    cfg->stabilization.band_mmhg = 2.0f;
+    /* 3.0 mmHg (nao mais 2.0): a saida de STABILIZED usa o DOBRO desta banda
+     * como histerese (ver handle_stabilized em control_core.c) para nao
+     * voltar a inflar por causa so' da inercia residual da bomba logo apos
+     * zerar a potencia — achado do simulador, ver sim-report.md item 6. */
+    cfg->stabilization.band_mmhg = 3.0f;
     cfg->stabilization.time_ms = 1000u;
 
     cfg->leak_test.target_mmhg = 180.0f;

@@ -3,13 +3,15 @@
  * Company: Dynaminds Electronics
  * Contact: dynamindelectronics@gmail.com
  * Created: 2026-07-24
- * Modified: 2026-08-03
+ * Modified: 2026-10-01
  */
 
 #include "control_loop.h"
 #include "adc_acq.h"
 #include "valve_gpio.h"
 #include "pwm_motor_tim.h"
+#include "control_core.h"
+#include "port_dwt.h"
 #include <string.h>
 #include <math.h> // Para fabsf
 
@@ -19,14 +21,35 @@
 extern void Error_Handler(void);
 
 #define MMHG_PER_KPA (7.50062f)
-#define CONTROL_BAND_MMHG            (10.0f) // Banda de controle para ativar alívio de pressão (em mmHg)
-#define OVERPRESS_MILD_MMHG          (10.0f) // Sobrepressão leve para ativar alívio de pressão (em mmHg)
-#define OVERPRESS_STRONG_MMHG        (50.0f) // Sobrepressão forte para ativar alívio de pressão (em mmHg)
-#define PUMP_MIN_COMPENSATION_POWER  (0.2f) // Potência mínima da bomba para compensar vazamentos (0..1)
-#define RELIEF_PULSE_FAST_MS         (1U)   // Duração do pulso de alívio rápido (em ms)
-#define RELIEF_PULSE_STRONG_MS       (1U)   // Duração do pulso de alívio forte (em ms)
-#define RELIEF_SETTLE_MS             (10U) // Tempo de espera após alívio para estabilização (em ms)
 #define LEAK_TEST_TARGET_HYST_MMHG   (10.0f) // Histerese para considerar que a pressão atingiu o alvo durante o teste de vazamento (em mmHg)
+
+/* Periodo real do loop de controle (TASK_CONTROL_PERIOD_MS em main.c).
+ * Repetido aqui como constante numerica (nao um #include de main.h — ver
+ * nota acima) porque e' o dt que ControlCore_Step() assume a cada chamada;
+ * se a tarefa que chama ControlLoop_Update() mudar de periodo, atualizar os
+ * dois lugares. */
+#define CONTROL_LOOP_PERIOD_MS (1u)
+
+/*
+ * Parametros de seguranca do Apendice E (Fase 3/4) usados pelo Control_Core
+ * no caminho automatico do ensaio. Ainda NAO vivem na EEPROM/SystemConfig_t
+ * (isso e' trabalho de IHM/parametros, Fase 6) — por ora sao constantes,
+ * com os MESMOS valores simulados e documentados em Docs/dev/sim-report.md.
+ * Overshoot_max permanece o do Apendice E (<= 2 mmHg); o simulador mostrou
+ * um residuo de ~3 mmHg em manguitos pequenos/rapidos com a banda de alivio
+ * atual — ajuste fino fica para quando o hardware estiver rodando de
+ * verdade (decisao do usuario, 00-auditoria.md).
+ */
+static const ControlCore_SafetyConfig_t s_control_safety = {
+    .p_max_abs_mmhg = 320.0f,
+    .sensor_fault_debounce_ms = 50u,
+    .t_inflar_max_ms = 60000u,
+    .t_desinflar_max_ms = 15000u,
+    .dp_vazamento_mmhg = 1.0f,
+    .t_janela_ms = 5000u,
+    .p_segura_mmhg = 5.0f,
+    .t_seguro_ms = 200u,
+};
 
 typedef enum {
     LEAK_PHASE_INFLATE = 0,
@@ -34,12 +57,13 @@ typedef enum {
 } LeakPhase_t;
 
 /**
- * @brief Estrutura interna do estado do PID.
+ * @brief Estrutura interna do estado do PID (usada SO' pelo teste de
+ *        vazamento manual/calibracao — ver handle_state_leak_test). O
+ *        caminho automatico do ensaio usa o Control_Core (ControlCore_t).
  */
 typedef struct {
     float integral;
     float prev_error;
-    uint32_t last_update_tick;
 } PID_State_t;
 
 /**
@@ -50,9 +74,15 @@ static struct {
     SystemConfig_t* sys_cfg;
     SystemRuntime_t* runtime_data;
 
-    // Estado interno
+    // Nucleo do ensaio automatico (IDLE/INFLATING/STABILIZING/STABILIZED/
+    // DEFLATING_FAST/FAULT) — logica pura, testada no host (Fase 3/
+    // sim-report.md). CONFIG e LEAK_TEST continuam tratados aqui embaixo,
+    // sem passar pelo Control_Core (nao fazem parte do ciclo normal de
+    // ensaio — ver sim-report.md, item 10).
+    ControlCore_t cc;
+
+    // Estado do PID "manual", usado so' pelo teste de vazamento (DEV/cal).
     PID_State_t pid_state;
-    uint32_t stabilization_start_tick;
     float leak_test_start_pressure;
     uint32_t leak_test_start_tick;
     uint32_t leak_test_hold_start_tick;
@@ -60,13 +90,19 @@ static struct {
     float leak_prev_setpoint_mmhg;
     uint32_t relief_pulse_until_tick;
     uint32_t relief_recheck_tick;
-    uint32_t deflate_settle_start_tick; /**< 0 = ainda nao atingiu o alvo de desinflar; !=0 = aguardando assentar antes de IDLE. */
 
     uint8_t manual_test_enabled;
     uint8_t manual_v1_on;
     uint8_t manual_v2_on;
     uint8_t manual_v3_on;
     float manual_pump_power;
+
+    // Jitter do loop de controle (Fase 3/4: "registrar jitter maximo e
+    // expor via diagnostico"). Cycles do DWT->CYCCNT entre chamadas
+    // consecutivas de ControlLoop_Update(); o alvo e' CONTROL_LOOP_PERIOD_MS.
+    uint32_t last_update_cycles;
+    uint32_t max_jitter_cycles; /**< maior |delta - periodo esperado| ja' visto */
+    uint8_t  jitter_has_sample;
 
 } s_control;
 
@@ -86,7 +122,14 @@ static void set_pump_power(float power) {
     (void)PwmMotor_SetPower(power); // satura em [0, limite]; CCR = potencia*(ARR+1)
 }
 
-/** @brief Executa uma iteração do algoritmo PID. */
+/** @brief Executa uma iteração do algoritmo PID "manual" — usado SO' pela
+ *         fase de inflar do teste de vazamento (handle_state_leak_test).
+ *         Mesma formula historica deste modulo; o caminho automatico do
+ *         ensaio usa o PID do Control_Core (ver control_core.c), que
+ *         corrigiu dois bugs aqui presentes (ver sim-report.md itens 2-3) —
+ *         nao replicados aqui porque o teste de vazamento e' uma rotina de
+ *         bancada/calibracao, nao o ensaio em si; revisar se for reaproveitar
+ *         tambem. */
 static void run_pid_iteration(void) {
     const PID_Config_t* pid_cfg = &s_control.sys_cfg->pid;
     float error_mmhg;
@@ -98,34 +141,25 @@ static void run_pid_iteration(void) {
     uint32_t now_tick;
     uint32_t pulse_ms;
 
-    // Converte setpoint de mmHg para kPa para consistencia interna.
     float setpoint_kpa = s_control.runtime_data->setpoint_mmhg / MMHG_PER_KPA;
     float current_kpa = s_control.runtime_data->pressure_kpa;
 
     float error = setpoint_kpa - current_kpa;
 
-    // --- Termo Proporcional ---
     float p_term = pid_cfg->kp * error;
 
-    // --- Termo Integral (com anti-windup) ---
     s_control.pid_state.integral += pid_cfg->ki * error * (pid_cfg->sample_time_ms / 1000.0f);
     if (s_control.pid_state.integral > pid_cfg->i_max) s_control.pid_state.integral = pid_cfg->i_max;
     if (s_control.pid_state.integral < pid_cfg->i_min) s_control.pid_state.integral = pid_cfg->i_min;
 
-    // --- Termo Derivativo ---
     float derivative = (error - s_control.pid_state.prev_error) / (pid_cfg->sample_time_ms / 1000.0f);
     float d_term = pid_cfg->kd * derivative / 10.f;
     s_control.pid_state.prev_error = error;
 
-    // --- Termo Feedforward ---
-    // Estima a potência necessária para manter o setpoint (relação linear)
     float ff_term = pid_cfg->ff * setpoint_kpa;
 
-    // --- Saída Final ---
     output = ff_term + p_term + s_control.pid_state.integral + d_term;
 
-    // Converte a saida do PID para potencia normalizada de PWM (0..1).
-    // out_max da EEPROM representa a escala de comando do PID.
     if (pid_cfg->out_max > 0.0f) {
         pump_power = output / pid_cfg->out_max;
     } else {
@@ -139,11 +173,10 @@ static void run_pid_iteration(void) {
         pump_power = 1.0f;
     }
 
-    // Mantem bomba em baixa potencia proximo do alvo para compensar pequenos vazamentos.
     error_mmhg = (setpoint_kpa - current_kpa) * MMHG_PER_KPA;
     if ((fabsf(error_mmhg) <= 5.0f) && (s_control.runtime_data->setpoint_mmhg > 10.0f) &&
-        (pump_power < PUMP_MIN_COMPENSATION_POWER)) {
-        pump_power = PUMP_MIN_COMPENSATION_POWER;
+        (pump_power < 0.2f)) {
+        pump_power = 0.2f;
     }
 
     relief_on = 0U;
@@ -155,29 +188,27 @@ static void run_pid_iteration(void) {
         pump_power *= 0.1f;
     }
 
-    if (error_mmhg < -CONTROL_BAND_MMHG) {
+    if (error_mmhg < -10.0f) {
         over_mmhg = -error_mmhg;
 
-        if (over_mmhg >= OVERPRESS_STRONG_MMHG) {
-            // Sobrepressao alta: pulso mais largo + queda forte da bomba.
+        if (over_mmhg >= 50.0f) {
             if (now_tick >= s_control.relief_recheck_tick) {
-                pulse_ms = RELIEF_PULSE_STRONG_MS;
+                pulse_ms = 1u;
                 s_control.relief_pulse_until_tick = now_tick + pulse_ms;
-                s_control.relief_recheck_tick = now_tick + pulse_ms + RELIEF_SETTLE_MS;
+                s_control.relief_recheck_tick = now_tick + pulse_ms + 10u;
                 relief_on = 1U;
             }
             pump_power *= 0.8f;
         } else {
-            // Sobrepressao moderada: pulso curto e aguarda acomodar antes do proximo.
             if (now_tick >= s_control.relief_recheck_tick) {
-                pulse_ms = RELIEF_PULSE_FAST_MS;
+                pulse_ms = 1u;
                 s_control.relief_pulse_until_tick = now_tick + pulse_ms;
-                s_control.relief_recheck_tick = now_tick + pulse_ms + RELIEF_SETTLE_MS;
+                s_control.relief_recheck_tick = now_tick + pulse_ms + 10u;
                 relief_on = 1U;
             }
 
-            if (pump_power < PUMP_MIN_COMPENSATION_POWER) {
-                pump_power = PUMP_MIN_COMPENSATION_POWER;
+            if (pump_power < 0.2f) {
+                pump_power = 0.2f;
             }
             pump_power *= 0.6f;
         }
@@ -190,121 +221,7 @@ static void run_pid_iteration(void) {
     set_valves(relief_on, valve2_on, 0);
 }
 
-/* --- Máquina de Estados (Handlers) --- */
-
-static void handle_state_idle(void) {
-    set_pump_power(0.0f);
-    set_valves(1, 1, 0); // Mantem valvulas abertas fora do ciclo de inflacao
-}
-
-static void handle_state_inflating(void) {
-    uint32_t now = HAL_GetTick();
-
-    if (s_control.runtime_data->bt_user_pressed) {
-        s_control.runtime_data->bt_user_pressed = 0;
-        s_control.runtime_data->state = SYSTEM_STATE_DEFLATING_FAST;
-        return;
-    }
-
-    if (now - s_control.pid_state.last_update_tick >= s_control.sys_cfg->pid.sample_time_ms) {
-        s_control.pid_state.last_update_tick = now;
-        run_pid_iteration();
-    }
-
-    // Condição de transição para estabilização
-    float error_mmhg = s_control.runtime_data->setpoint_mmhg - s_control.runtime_data->pressure_display;
-    if (fabsf(error_mmhg) <= s_control.sys_cfg->stabilization.band_mmhg) {
-        s_control.runtime_data->state = SYSTEM_STATE_STABILIZING;
-        s_control.stabilization_start_tick = now;
-    }
-}
-
-static void handle_state_stabilizing(void) {
-    uint32_t now = HAL_GetTick();
-
-    if (s_control.runtime_data->bt_user_pressed) {
-        s_control.runtime_data->bt_user_pressed = 0;
-        s_control.runtime_data->state = SYSTEM_STATE_DEFLATING_FAST;
-        return;
-    }
-
-    // Continua executando o PID para manter a pressão
-    if (now - s_control.pid_state.last_update_tick >= s_control.sys_cfg->pid.sample_time_ms) {
-        s_control.pid_state.last_update_tick = now;
-        run_pid_iteration();
-    }
-
-    float error_mmhg = s_control.runtime_data->setpoint_mmhg - s_control.runtime_data->pressure_display;
-    if (fabsf(error_mmhg) > s_control.sys_cfg->stabilization.band_mmhg) {
-        // Saiu da banda de estabilização, volta a inflar
-        s_control.runtime_data->state = SYSTEM_STATE_INFLATING;
-        return;
-    }
-
-    if (now - s_control.stabilization_start_tick >= s_control.sys_cfg->stabilization.time_ms) {
-        // Tempo de estabilização atingido
-        s_control.runtime_data->state = SYSTEM_STATE_STABILIZED;
-    }
-}
-
-static void handle_state_stabilized(void) {
-    static uint32_t wait_error = 0U;
-    set_pump_power(0.0f); // Desliga a bomba
-    set_valves(0, 0, 0);     // Fecha as válvulas para manter a pressão
-
-    // Aguarda o botão do usuário para desinflar
-    if (s_control.runtime_data->bt_user_pressed) {
-        s_control.runtime_data->state = SYSTEM_STATE_DEFLATING_FAST;
-        s_control.runtime_data->bt_user_pressed = 0; // Consome o evento
-    }
-    float error_mmhg = s_control.runtime_data->setpoint_mmhg - s_control.runtime_data->pressure_display;
-    if (fabsf(error_mmhg) > s_control.sys_cfg->stabilization.band_mmhg) {
-        wait_error += 1; // Incrementa o tempo de espera (ajuste conforme necessário)
-        if (wait_error >= 2U) {
-            // Saiu da banda de estabilização, volta a inflar
-            s_control.runtime_data->state = SYSTEM_STATE_INFLATING;
-            return;
-        }
-    } else {
-        wait_error = 0U; // Reseta o tempo de espera se o erro estiver dentro da banda
-    }
-}
-
-/** @brief Tempo de assentamento apos a pressao cair abaixo do limiar de
- *         "desinflado", antes de ir para IDLE (ver handle_state_deflating). */
-#define DEFLATE_SETTLE_MS (100U)
-
-static void handle_state_deflating(void) {
-    set_pump_power(0.0f);
-    set_valves(1, 1, 0); // Abre ambas as válvulas para desinsuflação rápida
-
-    // Condição de transição para IDLE: pressão abaixo de 2 mmHg por
-    // DEFLATE_SETTLE_MS seguidos. Não-bloqueante (baseado em tick) — o
-    // HAL_Delay(100) que havia aqui congelava o super loop inteiro (LVGL,
-    // encoder, watchdog) por 100ms a cada ciclo de desinflação.
-    if (s_control.runtime_data->pressure_display < 2.0f) {
-        if (s_control.deflate_settle_start_tick == 0U) {
-            s_control.deflate_settle_start_tick = HAL_GetTick();
-        } else if ((HAL_GetTick() - s_control.deflate_settle_start_tick) >= DEFLATE_SETTLE_MS) {
-            s_control.deflate_settle_start_tick = 0U;
-            s_control.runtime_data->state = SYSTEM_STATE_IDLE;
-        }
-    } else {
-        s_control.deflate_settle_start_tick = 0U; // pressão voltou a subir antes de assentar; reinicia a espera
-    }
-}
-
-/** @brief Estado seguro (Parte A, item 1 do CLAUDE.md/prompt de projeto):
- *         motor OFF e V1+V2+V3 abertas. Unico handler que abre a valvula 3
- *         automaticamente — todo caminho de falha (sobrepressao, sensor
- *         invalido, timeout, watchdog, perda de heartbeat em modo manual)
- *         deve levar o sistema a este estado via ControlLoop_EnterFaultState(),
- *         em vez de abrir valvulas individualmente em cada ponto de deteccao
- *         de falha. */
-static void handle_state_fault(void) {
-    set_pump_power(0.0f);
-    set_valves(1, 1, 1);
-}
+/* --- Handlers fora do ensaio automatico (CONFIG e LEAK_TEST) --- */
 
 static void handle_state_config(void) {
     if (s_control.manual_test_enabled != 0U) {
@@ -363,8 +280,6 @@ void ControlLoop_Init(SystemConfig_t* p_sys_cfg, TIM_HandleTypeDef* p_htim_pwm,
     s_control.sys_cfg = p_sys_cfg;
     s_control.runtime_data = p_runtime_data;
 
-    // Estado inicial
-    s_control.runtime_data->state = SYSTEM_STATE_IDLE;
     s_control.runtime_data->setpoint_mmhg = p_sys_cfg->current_setpoint_mmhg;
     if (s_control.runtime_data->setpoint_mmhg < 0.0f) {
         s_control.runtime_data->setpoint_mmhg = 0.0f;
@@ -372,6 +287,9 @@ void ControlLoop_Init(SystemConfig_t* p_sys_cfg, TIM_HandleTypeDef* p_htim_pwm,
     if (s_control.runtime_data->setpoint_mmhg > p_sys_cfg->max_setpoint_mmhg) {
         s_control.runtime_data->setpoint_mmhg = p_sys_cfg->max_setpoint_mmhg;
     }
+
+    // Nucleo do ensaio automatico — deixa runtime_data->state em IDLE.
+    ControlCore_Init(&s_control.cc, p_sys_cfg, p_runtime_data, &s_control_safety);
 
     // Drivers dos atuadores: valvulas (todas abertas ao iniciar) e PWM da
     // bomba (CCR = 0 antes de habilitar a saida). O canal (TIM_CHANNEL_1) deve
@@ -391,7 +309,31 @@ void ControlLoop_Init(SystemConfig_t* p_sys_cfg, TIM_HandleTypeDef* p_htim_pwm,
     set_valves(1, 1, 0);
 }
 
+/** @brief Atualiza g_control_jitter_dbg-equivalente (ver ControlLoop_GetMaxJitterCycles):
+ *         mede o intervalo real entre chamadas via DWT->CYCCNT e guarda o
+ *         maior desvio ja' observado frente ao periodo nominal de 1 ms.
+ *         Fase 3/4 do prompt: "Registrar jitter maximo... e expor via
+ *         diagnostico". So' mede — nao decide nada a partir disso ainda. */
+static void update_jitter_measurement(void) {
+    uint32_t now_cycles = PortDWT_GetCycles();
+
+    if (s_control.jitter_has_sample != 0u) {
+        uint32_t delta_cycles = now_cycles - s_control.last_update_cycles; /* wrap-safe (uint32) */
+        uint32_t expected_cycles = (SystemCoreClock / 1000u) * CONTROL_LOOP_PERIOD_MS;
+        uint32_t jitter = (delta_cycles > expected_cycles)
+            ? (delta_cycles - expected_cycles) : (expected_cycles - delta_cycles);
+
+        if (jitter > s_control.max_jitter_cycles) {
+            s_control.max_jitter_cycles = jitter;
+        }
+    }
+    s_control.last_update_cycles = now_cycles;
+    s_control.jitter_has_sample = 1u;
+}
+
 void ControlLoop_Update(void) {
+    update_jitter_measurement();
+
     // Atualiza as leituras de pressão do módulo ADC
     ADC_Acq_Update();
     s_control.runtime_data->pressure_kpa = ADC_Acq_GetPressureKpa();
@@ -400,44 +342,42 @@ void ControlLoop_Update(void) {
         s_control.sys_cfg->unit
     );
 
-    // Máquina de estados principal
-    switch (s_control.runtime_data->state) {
-        case SYSTEM_STATE_IDLE:
-            handle_state_idle();
-            break;
-
-        case SYSTEM_STATE_INFLATING:
-            handle_state_inflating();
-            break;
-
-        case SYSTEM_STATE_STABILIZING:
-            handle_state_stabilizing();
-            break;
-
-        case SYSTEM_STATE_STABILIZED:
-            handle_state_stabilized();
-            break;
-
-        case SYSTEM_STATE_DEFLATING_FAST:
-            handle_state_deflating();
-            break;
-
-        case SYSTEM_STATE_LEAK_TEST:
-            handle_state_leak_test();
-            break;
-
-        case SYSTEM_STATE_CONFIG:
-            handle_state_config();
-            break;
-
-        case SYSTEM_STATE_FAULT:
-            handle_state_fault();
-            break;
-
-        case SYSTEM_STATE_BOOT:
-            // Nenhuma ação de controle neste estado
-            break;
+    // CONFIG e LEAK_TEST ficam fora do Control_Core (ver sim-report.md item 10).
+    if (s_control.runtime_data->state == SYSTEM_STATE_CONFIG) {
+        handle_state_config();
+        return;
     }
+    if (s_control.runtime_data->state == SYSTEM_STATE_LEAK_TEST) {
+        handle_state_leak_test();
+        return;
+    }
+
+    // Ensaio automatico (IDLE/INFLATING/STABILIZING/STABILIZED/
+    // DEFLATING_FAST/FAULT): delega ao Control_Core — ver sim-report.md.
+    {
+        const PressureCore_t* diag = ADC_Acq_GetDiagnostics();
+        ControlCore_Inputs_t in;
+        ControlCore_Actuators_t out;
+
+        in.pressure_kpa = s_control.runtime_data->pressure_kpa;
+        in.sensor_ok = (diag->flags == 0u) ? 1u : 0u;
+        in.abort_request = s_control.runtime_data->bt_user_pressed;
+        s_control.runtime_data->bt_user_pressed = 0u; // consumido aqui (so chega != 0 nestes estados)
+        in.dt_ms = CONTROL_LOOP_PERIOD_MS;
+
+        ControlCore_Step(&s_control.cc, &in, &out);
+
+        set_pump_power(out.pump_power);
+        set_valves(out.valve1_open, out.valve2_open, out.valve3_open);
+    }
+}
+
+uint32_t ControlLoop_GetMaxJitterCycles(void) {
+    return s_control.max_jitter_cycles;
+}
+
+ControlCore_Error_t ControlLoop_GetLastError(void) {
+    return s_control.cc.last_error;
 }
 
 void ControlLoop_SetSetpointMmHg(float setpoint_mmhg) {
@@ -457,10 +397,8 @@ void ControlLoop_SetSetpointMmHg(float setpoint_mmhg) {
 void ControlLoop_StartInflation(void) {
     if (s_control.runtime_data->state == SYSTEM_STATE_IDLE) {
         s_control.manual_test_enabled = 0U;
-        s_control.runtime_data->state = SYSTEM_STATE_INFLATING;
-        // Reseta o estado do PID para um novo ciclo
-        memset(&s_control.pid_state, 0, sizeof(s_control.pid_state));
-        set_valves(0, 0, 0); // Fecha no inicio da inflacao
+        ControlCore_StartInflation(&s_control.cc);
+        set_valves(0, 0, 0); // Fecha no inicio da inflacao, nao espera o proximo Update()
     }
 }
 
@@ -479,12 +417,14 @@ void ControlLoop_ExitConfigMode(void) {
 }
 
 void ControlLoop_EnterFaultState(void) {
+    ControlCore_Actuators_t out;
+
     s_control.manual_test_enabled = 0U;
-    s_control.runtime_data->state = SYSTEM_STATE_FAULT;
     // Aplica o estado seguro imediatamente, sem esperar o proximo
-    // ControlLoop_Update() — mesma logica de handle_state_fault().
-    set_pump_power(0.0f);
-    set_valves(1, 1, 1);
+    // ControlLoop_Update().
+    ControlCore_EnterFaultState(&s_control.cc, &out);
+    set_pump_power(out.pump_power);
+    set_valves(out.valve1_open, out.valve2_open, out.valve3_open);
 }
 
 void ControlLoop_StartLeakTest(void) {
