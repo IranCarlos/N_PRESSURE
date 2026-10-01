@@ -509,3 +509,22 @@ bloqueiam decisões de firmware:
 - Fase 2 dada como **concluida**: pressure_sensor, pwm_motor, valve, rtc feitos e testados
   (no que depende de codigo); input (pedal/bt_user/encoder) ja funcional desde a Fase 0/1, falta so'
   a medicao manual de latencia do pedal em bancada (nao bloqueia o avanco de fase).
+
+## Fase 3 — Controle de pressao + simulador (2026-10-01)
+
+- `Core/Services/Control_Core` (C puro, sem HAL): mesma logica de `Control_Loop` (D4), parametrizada
+  por `dt_ms` em vez de `HAL_GetTick()`, com protecoes novas (P_MAX_ABS->E001, sensor invalido->E002,
+  vazamento em manutencao->E013, timeouts de inflar/desinflar->E003/E004). `Control_Loop.c`
+  (hardware) **nao foi alterado** — integracao e verificacao em bancada ficam para a Fase 4.
+- `test/host/sim_plant.c`: simulador de planta pneumatica de 1a ordem (nao validado fisicamente),
+  so' para exercitar o Control_Core no host.
+- `test/host/test_control_core.c`: cenarios de manguito pequeno/grande, vazamento, sensor travado,
+  sobrepressao e abort. Todos passam — `bash test/host/run.sh`.
+- Relatorio completo (parametros, achados, bugs encontrados nos ganhos de PID nunca testados do
+  `Control_Loop.c` atual, decisoes de projeto tomadas no Control_Core): `Docs/dev/sim-report.md`.
+- Build Debug/Release do firmware continua limpo (Control_Core entra no include path mas ainda nao
+  e' chamado por `main.c` — mesmo padrao de codigo "existe mas nao esta' ligado" que o resto do
+  projeto ja usa, ex. o proprio Control_Loop sob APP_MODE_BRINGUP).
+- Pendente antes da Fase 4: decidir com o usuario o `overshoot_max` real (hoje so' o exemplo do
+  Apendice E, "<= 2 mmHg"); medir T_lag/vazao das valvulas/capacitancia do manguito na bancada e
+  re-tunar o mesmo simulador antes de tocar no hardware de verdade.

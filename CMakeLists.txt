@@ -125,6 +125,7 @@ set(N_PRESSURE_INC_DIRS
     Core/Services/Supervisor/Inc
     Core/Services/Pressure_Core/Inc
     Core/Services/Rtc_Service/Inc
+    Core/Services/Control_Core/Inc
     Core/App/HMI_UI/Inc
     Core/App/Bench/Inc
 )

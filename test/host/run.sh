@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 OUT=build/host
 mkdir -p "$OUT"
 CFLAGS="-std=c11 -Wall -Wextra -Wconversion -Werror -O0 -g"
-INC="-ICore/Services/Pressure_Core/Inc -ICore/Bsp/Valve/Inc -ICore/Bsp/PwmMotor/Inc -ICore/App/Bench/Inc -ICore/Services/Rtc_Service/Inc"
+INC="-ICore/Services/Pressure_Core/Inc -ICore/Bsp/Valve/Inc -ICore/Bsp/PwmMotor/Inc -ICore/App/Bench/Inc -ICore/Services/Rtc_Service/Inc -ICore/Services/Control_Core/Inc -ICore/Common/Inc"
 fail=0
 run() { # nome fontes...
     local name=$1; shift
@@ -18,4 +18,5 @@ run test_pressure_core test/host/test_pressure_core.c Core/Services/Pressure_Cor
 run test_actuators test/host/test_actuators.c Core/Bsp/Valve/Src/valve.c \
     Core/Bsp/PwmMotor/Src/pwm_motor.c Core/App/Bench/Src/actuator_bench.c
 run test_rtc_validity test/host/test_rtc_validity.c Core/Services/Rtc_Service/Src/rtc_validity.c
+run test_control_core test/host/test_control_core.c Core/Services/Control_Core/Src/control_core.c test/host/sim_plant.c
 exit $fail
