@@ -42,6 +42,7 @@
 #include "fault_manager.h"
 #include "port_dwt.h"
 #include "supervisor.h"
+#include "rtc_service.h"
 #include <stm32h7xx_hal_flash_ex.h>
 /* USER CODE END Includes */
 
@@ -88,7 +89,7 @@ typedef StaticTask_t osStaticThreadDef_t;
 // a MANGUEIRA DESCONECTADA do manguito. Variaveis: g_act_arm (0/1),
 // g_act_pump (0..1, limitada a 0.30), g_act_valves (bit0=V1, bit1=V2, bit2=V3;
 // 1 = aberta). Trip por sobrepressao/sensor/tempo de bomba: ver g_act_bench.trip.
-#define BRINGUP_ENABLE_ACTUATORS    (0)
+#define BRINGUP_ENABLE_ACTUATORS    (1)
 
 #define TASK_ENCODER_PERIOD_MS      (1u)
 #define TASK_CONTROL_PERIOD_MS      (1u)
@@ -304,6 +305,16 @@ volatile uint32_t g_supervisor_missed_windows;
 // RCC->RSR do boot: PORRSTF/PINRSTF (0x00..), BORRSTF (bit 21, brown-out),
 // SFTRSTF (bit 24, NVIC_SystemReset), IWDG1RSTF (bit 26, watchdog).
 volatile uint32_t g_boot_rsr;
+
+// 1 quando o calendario precisou ser reinicializado neste boot (o backup
+// register RTC_CALENDAR_INITIALIZED_BKP_REG nao tinha o magic): 1o boot de
+// sempre, OU o dominio de backup foi resetado (perda de VBAT, ou troca da
+// fonte de clock do RTC via CubeMX). Setado em MX_RTC_Init() (USER CODE
+// BEGIN RTC_Init 2), consumido por RtcService_CheckAtBoot() logo depois.
+volatile uint8_t  g_rtc_backup_domain_was_reset;
+// Resultado de RtcService_CheckAtBoot (Live Watch): ver RtcValidityFlags_t
+// em rtc_validity.h. 0 = calendario confiavel para timestamps de log/ensaio.
+volatile uint32_t g_rtc_status;
 volatile uint8_t g_boot_fault_pending;
 FaultManager_Record_t g_boot_fault_record;
 /* USER CODE END PV */
@@ -435,6 +446,7 @@ int main(void)
   g_boot_rsr = RCC->RSR; // antes de o FaultManager limpar: motivo do ultimo reset
   FaultManager_Init(&hrtc);
   PortDWT_Init();
+  g_rtc_status = RtcService_CheckAtBoot(&hrtc, g_rtc_backup_domain_was_reset);
   g_boot_fault_pending = FaultManager_HasPendingFault();
   if (g_boot_fault_pending != 0u) {
     FaultManager_GetLastFault(&g_boot_fault_record);
@@ -954,6 +966,7 @@ static void MX_RTC_Init(void)
   // So' chega aqui na primeira inicializacao real (ver Check_RTC_BKUP acima)
   // — marca para nao repetir o SetTime/SetDate default nos proximos boots.
   HAL_RTCEx_BKUPWrite(&hrtc, RTC_CALENDAR_INITIALIZED_BKP_REG, RTC_CALENDAR_INITIALIZED_MAGIC);
+  g_rtc_backup_domain_was_reset = 1u;
   /* USER CODE END RTC_Init 2 */
 
 }

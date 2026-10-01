@@ -206,11 +206,19 @@ Todos os pinos de GPIO de válvula/backlight/TFT são reiniciados para `GPIO_PIN
 
 ## RTC / relógio de tempo real
 
-- **H8 resolvido e configurado (2026-09-19)**: LSE ativado em `PC14-OSC32_IN`/`PC15-OSC32_OUT`,
-  RTC ativado com calendário (`VP_RTC_VS_RTC_Activate`, `VP_RTC_VS_RTC_Calendar`), `MX_RTC_Init()`
-  gerado e chamado em `main()`. Build confirmado limpo após a regeneração. Falta só a aplicação
-  (Fase 2+) usar `HAL_RTC_GetTime`/`HAL_RTC_GetDate` de fato e implementar a detecção de "hora não
-  ajustada"/RTC inválido exigida pela Parte A.
+- **H8 — reaberto (2026-10-01): fonte de clock do RTC esta' em LSI, nao LSE.** A nota de
+  2026-09-19 abaixo registrava LSE como resolvido; nao esta' mais assim no `.ioc`/codigo atuais
+  (regressao entre regeneracoes, mesmo padrao de `feedback_cubemx_regeneration_hazards`). Os pinos
+  `PC14-OSC32_IN`/`PC15-OSC32_OUT` continuam em `LSE-External-Oscillator`, mas o bloco `RCC` do
+  `.ioc` nao tem `LSEState` nem `RTCClockSelection` — e `stm32h7xx_hal_msp.c` gera
+  `RTCClockSelection = RCC_RTCCLKSOURCE_LSI`. LSI vive no dominio VDD (nao VBAT): sem alimentacao
+  principal o calendario **congela** mesmo com a bateria presente, o que anula o proposito do
+  hardware (cristal + bateria confirmados pelo usuario). Correcao e detalhe completo em
+  `00-auditoria.md` §2.3 (instrucoes de CubeMX + firmware ja pronto em `Core/Services/Rtc_Service`).
+- ~~H8 resolvido e configurado (2026-09-19): LSE ativado..., RTC ativado com calendário...~~
+  (nota original, ver acima — nao reflete mais o estado real do projeto).
+- Falta a aplicacao (Fase 2+) usar `HAL_RTC_GetTime`/`HAL_RTC_GetDate` de fato (Fase 5/6) alem da
+  deteccao de "hora nao ajustada"/RTC invalido, ja implementada em `Rtc_Service`.
 
 ## Áudio (buzzer)
 

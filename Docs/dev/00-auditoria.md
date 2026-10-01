@@ -446,3 +446,54 @@ bloqueiam decisões de firmware:
 - Testes de host: `bash test/host/run.sh` (pressure_core + valve + pwm_motor + actuator_bench).
 - Aberto: como a bomba/driver se comporta com o pino em alta impedancia no reset (as valvulas abrem por serem NA;
   confirmar tambem que a bomba fica desligada por pull-down no hardware).
+
+### 2.2 — resultado da bancada de atuadores (2026-09-30)
+- **Sensor de pressao**: reparo do VREF+ confirmado pelo usuario — leitura correta.
+- **Achado de hardware (aberto)**: no reset/power-up, valvulas e bomba energizam brevemente mesmo com
+  pull-down no hardware. Causa provavel: entre o reset e `MX_GPIO_Init()` (primeira coisa em `main()`
+  apos os clocks — ja na ordem mais cedo possivel), os pinos ficam em alta impedancia (estado de reset
+  do GPIO) por uma janela de alguns ms (startup + HAL_Init + PLL lock), dependendo so' do pull-down
+  externo. Se o pull-down nao segura o pino nessa janela, e' revisao de hardware (valor do resistor,
+  ou um estagio de enable controlado por RC/poder-bom), nao corrigivel em firmware alem do que ja'
+  esta' feito. **Decisao do usuario: adiar teste/mitigacao mais profunda para quando o software de
+  controle (Fase 3/4) estiver pronto.**
+- **Bomba**: potencia minima estavel medida em bancada ≈ **30%**. Isso e' MAIOR que
+  `PUMP_MIN_COMPENSATION_POWER` (0.2) em `control_loop.c` — com esse valor a malha poderia comandar uma
+  potencia que nao gira a bomba. **Revisar na Fase 3/4** (ajuste de PID/feedforward com a bomba real).
+  Tambem e' igual ao teto da bancada (`ACTBENCH_PUMP_MAX = 0.30`) — sem faixa de sobra para testar
+  controle incremental no bench; aceitavel pois o bench foi despriorizado pelo usuario.
+
+### 2.3 Relogio de tempo real — RTC clocado por LSI, nao LSE (2026-10-01) — BUG encontrado, aguarda fix no CubeMX
+- **Achado**: apesar do hardware ter cristal LSE + bateria (confirmado pelo usuario na Fase 0), o
+  `PeriphCommonClock_Config()` gerado nunca configura `RCC_PERIPHCLK_RTC` — e o `HAL_RTC_MspInit()`
+  (`stm32h7xx_hal_msp.c`) usa `RTCClockSelection = RCC_RTCCLKSOURCE_LSI`. O `.ioc` nem habilita o
+  oscilador LSE (`RCC_OscInitStruct.OscillatorType` so' tem HSI48/HSI/LSI/HSE).
+- **Por que importa**: LSI vive no dominio VDD, nao no dominio de backup (VBAT). Sem alimentacao
+  principal, o LSI para e o calendario **congela** mesmo com a bateria presente — a bateria so' mantem
+  os registradores, nao o avanco do tempo. Isso anula o proposito de ter bateria+cristal: os
+  timestamps de log/ensaio (Fase 5/Apendice C) ficariam errados apos qualquer queda de energia. LSI
+  tambem tem baixa precisao (~±5%), inadequado mesmo com VDD presente.
+- **Correcao (CubeMX, a fazer pelo usuario)**:
+  1. Pinout & Configuration → System Core → **RCC**: em "Low Speed Clock (LSE)", selecionar
+     **Crystal/Ceramic Resonator** (mantem LSI ligado — necessario para o IWDG, que usa LSI fixo
+     no H7 independente desta escolha).
+  2. Aba **Clock Configuration**: no seletor "RTC Clock Mux", trocar de **LSI** para **LSE**.
+  3. Gerar o codigo. Conferir no diff: `RCC_OscInitStruct.OscillatorType` deve ganhar
+     `RCC_OSCILLATORTYPE_LSE` com `LSEState = RCC_LSE_ON` (ou `_BYPASS` se for oscilador externo, nao
+     cristal — confirmar com o usuario qual e' o caso); em `stm32h7xx_hal_msp.c`,
+     `RTCClockSelection` deve virar `RCC_RTCCLKSOURCE_LSE`.
+  4. **Efeito colateral esperado, unico, no 1o boot apos a troca**: o HAL reseta o dominio de backup
+     quando a fonte do RTC muda (`RCC_BDCR_RTCSEL` so' pode mudar via `BDRST`) — isso apaga os
+     registradores de backup (calendario, magic de `RTC_CALENDAR_INITIALIZED_BKP_REG`, e o registro
+     de fault do `Fault_Manager`). Esperado, nao e' bug; calendario volta ao default e e' reajustado
+     normalmente depois.
+- **Firmware ja pronto para quando o CubeMX for ajustado** (`Core/Services/Rtc_Service`):
+  - `rtc_validity.c` (C puro, testado no host): avalia hora/data lidas do RTC e devolve flags —
+    `LSE_NOT_READY`, `BACKUP_DOMAIN_RESET`, `NEVER_SET` (calendario no default exato do
+    `MX_RTC_Init()`) e `DATE_IMPLAUSIBLE` (campos invalidos ou ano < 2026).
+  - `rtc_service.c` (binding HAL): le `HAL_RTC_GetTime/GetDate` + `RCC_FLAG_LSERDY`, chama
+    `RtcValidity_Evaluate`. Chamado uma vez no boot (`RtcService_CheckAtBoot`, logo apos
+    `FaultManager_Init`); resultado em `g_rtc_status` (Live Watch).
+  - `g_rtc_backup_domain_was_reset` setado dentro do `USER CODE BEGIN RTC_Init 2` (sobrevive a'
+    regeneracao) — detecta que o dominio de backup acabou de ser resetado neste boot.
+  - Teste de host: `bash test/host/run.sh` (pressure_core + actuators + rtc_validity).
