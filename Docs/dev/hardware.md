@@ -206,19 +206,34 @@ Todos os pinos de GPIO de válvula/backlight/TFT são reiniciados para `GPIO_PIN
 
 ## RTC / relógio de tempo real
 
-- **H8 — reaberto (2026-10-01): fonte de clock do RTC esta' em LSI, nao LSE.** A nota de
-  2026-09-19 abaixo registrava LSE como resolvido; nao esta' mais assim no `.ioc`/codigo atuais
-  (regressao entre regeneracoes, mesmo padrao de `feedback_cubemx_regeneration_hazards`). Os pinos
-  `PC14-OSC32_IN`/`PC15-OSC32_OUT` continuam em `LSE-External-Oscillator`, mas o bloco `RCC` do
-  `.ioc` nao tem `LSEState` nem `RTCClockSelection` — e `stm32h7xx_hal_msp.c` gera
-  `RTCClockSelection = RCC_RTCCLKSOURCE_LSI`. LSI vive no dominio VDD (nao VBAT): sem alimentacao
-  principal o calendario **congela** mesmo com a bateria presente, o que anula o proposito do
-  hardware (cristal + bateria confirmados pelo usuario). Correcao e detalhe completo em
-  `00-auditoria.md` §2.3 (instrucoes de CubeMX + firmware ja pronto em `Core/Services/Rtc_Service`).
-- ~~H8 resolvido e configurado (2026-09-19): LSE ativado..., RTC ativado com calendário...~~
-  (nota original, ver acima — nao reflete mais o estado real do projeto).
-- Falta a aplicacao (Fase 2+) usar `HAL_RTC_GetTime`/`HAL_RTC_GetDate` de fato (Fase 5/6) alem da
-  deteccao de "hora nao ajustada"/RTC invalido, ja implementada em `Rtc_Service`.
+- **H8 — corrigido de fato (2026-10-01): RTC agora clocado por LSE.** Histórico: a nota de
+  2026-09-19 registrava LSE como resolvido, mas uma regeneração posterior reverteu para LSI sem
+  aviso (mesmo padrão de `feedback_cubemx_regeneration_hazards`) — achado e detalhado em
+  `00-auditoria.md` §2.3. Reaplicado pelo usuário no CubeMX: RCC → Low Speed Clock (LSE) =
+  Crystal/Ceramic Resonator, RTC Clock Mux = LSE. Confirmado no `.ioc`/gerado:
+  `RCC.RTCClockSelection=RCC_RTCCLKSOURCE_LSE`, `RTCFreq_Value=32768` (era 32000/LSI),
+  `stm32h7xx_hal_msp.c` com `RTCClockSelection = RCC_RTCCLKSOURCE_LSE`. LSI continua ligado
+  (exigido pelo IWDG). Build Debug/Release limpo.
+- **Efeito colateral esperado (ocorreu uma vez, no primeiro boot com a nova fonte)**: o HAL força
+  um reset do domínio de backup ao trocar `RTCSEL` — zera os registradores de backup (calendário e
+  o registro de fault do `Fault_Manager`). Normal, documentado antes da troca.
+- **Efeito colateral novo, não pedido mas desejável**: CubeMX ligou sozinho o *Clock Security
+  System* em HSE e LSE (`RCC.EnbaleCSS`/`EnableCSSLSE=true`, automático ao selecionar cristal nos
+  dois) — `HAL_RCC_EnableCSS()` + `HAL_RCCEx_EnableLSECSS()` em `SystemClock_Config()`,
+  `HAL_RCC_NMI_IRQHandler()` adicionado ao `NMI_Handler`. Se um dos cristais falhar, dispara NMI em
+  vez de deixar o clock degradar silenciosamente. **Comportamento atual do `NMI_Handler`**: cai no
+  `while(1){}` existente (USER CODE), que trava a CPU — como NMI tem prioridade máxima e não é
+  mascarável, isso impede o Supervisor de fazer check-in e o IWDG (~8,2 s) não é mais alimentado;
+  a MCU reseta por watchdog, mas só depois desse atraso (bomba/válvulas ficam congeladas no estado
+  anterior até lá). Aceitável como primeira linha de defesa; revisar na Fase 4 junto com o resto do
+  "comportamento em reset/queda de energia" (ex.: callback de CSS chamando
+  `ControlLoop_EnterFaultState()` antes do loop, se o clock ainda permitir).
+- **Efeito colateral incidental, a reverificar em bancada**: `I2C1.Timing` recalculado
+  (`0x60200716` → `0x00C0216C`) — o wizard do CubeMX passou a conhecer o clock real do I2C1 (HSI,
+  64 MHz) com mais precisão; os dois valores visam ~400 kHz (I2C Fast). Deveria ser equivalente,
+  mas a EEPROM (`CAT24C512`) depende desse timing — confirmar leitura/escrita na próxima bancada.
+- Falta a aplicação (Fase 5/6) usar `HAL_RTC_GetTime`/`HAL_RTC_GetDate` de fato nos logs/UI; a
+  detecção de "hora não ajustada"/RTC inválido já está implementada em `Rtc_Service` (Fase 2.3).
 
 ## Áudio (buzzer)
 

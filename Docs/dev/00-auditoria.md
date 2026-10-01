@@ -497,3 +497,15 @@ bloqueiam decisões de firmware:
   - `g_rtc_backup_domain_was_reset` setado dentro do `USER CODE BEGIN RTC_Init 2` (sobrevive a'
     regeneracao) — detecta que o dominio de backup acabou de ser resetado neste boot.
   - Teste de host: `bash test/host/run.sh` (pressure_core + actuators + rtc_validity).
+
+### 2.3 — correção aplicada e verificada pelo usuário (2026-10-01)
+- CubeMX ajustado: RCC → Low Speed Clock (LSE) = Crystal/Ceramic Resonator; RTC Clock Mux = LSE.
+  `RTCClockSelection` agora `RCC_RTCCLKSOURCE_LSE`, `RTCFreq_Value=32768`. Build Debug/Release limpo.
+- CubeMX ligou sozinho o Clock Security System (HSE+LSE) como efeito colateral de usar cristal nos
+  dois osciladores — ver `hardware.md` ("RTC / relógio de tempo real") para o comportamento do
+  `NMI_Handler` resultante e o item pendente de revisão na Fase 4.
+- `I2C1.Timing` recalculado pelo wizard (nao e' causado pela mudanca do RTC) — reverificar EEPROM
+  na proxima bancada.
+- Fase 2 dada como **concluida**: pressure_sensor, pwm_motor, valve, rtc feitos e testados
+  (no que depende de codigo); input (pedal/bt_user/encoder) ja funcional desde a Fase 0/1, falta so'
+  a medicao manual de latencia do pedal em bancada (nao bloqueia o avanco de fase).
