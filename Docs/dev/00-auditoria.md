@@ -653,3 +653,22 @@ bloqueiam decisões de firmware:
      manguito rapido. Documentado em `Docs/dev/sim-report.md`; retunar com T_lag/vazao REAIS medidos
      na bancada, nao mais so' no simulador — o numero exato do piso (0.30) tambem precisa confirmacao
      (foi so' o que a bancada mostrou, nao um minimo medido com precisao).
+
+## Bomba de embolo: E003 falso, V3 nao abria ao desinflar (2026-10)
+
+- **Dado novo de bancada**: a bomba e' de embolo (curso discreto), nao fluxo continuo — a pressao
+  real sobe em degraus a cada curso, nao suavemente. Isso faz o erro cruzar a banda de
+  estabilizacao repetidamente, alternando INFLATING<->STABILIZING; `inflate_elapsed_ms` soma nos
+  dois estados e passava de `t_inflar_max_ms` (60 s) antes do ensaio progredir o suficiente.
+  **Corrigido**: `t_inflar_max_ms` subiu para **180000 ms** (placeholder generoso, nao e' tuning
+  fino — a ondulacao da bomba de embolo ainda nao foi tratada de verdade, so' deixa de abortar um
+  ensaio que esta' progredindo).
+- **V3 passou a abrir tambem em DEFLATING_FAST** (pedido do usuario na bancada) — o prompt do
+  projeto ja' previa isso ("V3 e' usada para desinflar o manguito e para calibracao", secao 2.3);
+  a implementacao da Fase 3/4 tinha deixado so' V1+V2, oversight meu. Corrigido em
+  `handle_deflating()` e em todos os pontos que aplicam o estado de desinflar imediatamente
+  (abort em INFLATING/STABILIZING, timeout E003).
+- **Pendente (nao e' bug, e' tuning)**: subida ainda lenta e com ondulacao por causa do embolo.
+  Converter o piso de 30% numa estrategia melhor para bomba de embolo (ex.: banda/histerese
+  maiores para tolerar os degraus, ou um filtro na leitura antes de comparar com a banda) fica
+  para quando o resto do ensaio estiver fechado ponta a ponta.

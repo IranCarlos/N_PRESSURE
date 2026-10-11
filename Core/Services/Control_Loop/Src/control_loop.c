@@ -51,7 +51,18 @@ static const ControlCore_SafetyConfig_t s_control_safety = {
      * so' sai por intervencao explicita, ainda nao implementada) a bomba
      * nunca chegava a ligar mesmo pedindo INFLATING. */
     .sensor_fault_debounce_ms = 300u,
-    .t_inflar_max_ms = 60000u,
+    /* 180000 (nao mais 60000): achado de bancada (2026-10) — a bomba e'
+     * de embolo (pulsos discretos, nao fluxo continuo), entao a pressao
+     * oscila a cada curso do embolo; isso faz o erro cruzar a banda de
+     * estabilizacao repetidamente (INFLATING<->STABILIZING, cada
+     * transicao reinicia state_elapsed_ms mas NAO inflate_elapsed_ms, que
+     * soma em ambos os estados), demorando bem mais que 60 s pra'
+     * acumular uma janela continua de STABILIZED. Ainda e' so' um
+     * placeholder generoso pra nao abortar um ensaio que esta'
+     * progredindo de verdade — nao substitui tunar o controle para essa
+     * bomba (banda/histerese maiores, ou aceitar a ondulacao como
+     * caracteristica fisica do embolo). */
+    .t_inflar_max_ms = 180000u,
     .t_desinflar_max_ms = 15000u,
     .dp_vazamento_mmhg = 1.0f,
     .t_janela_ms = 5000u,

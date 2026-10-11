@@ -187,7 +187,7 @@ static void handle_inflating(ControlCore_t *cc, const ControlCore_Inputs_t *in,
 
     if (in->abort_request != 0u) {
         rt->state = SYSTEM_STATE_DEFLATING_FAST;
-        safe_actuators(out, 0.0f, 1u, 1u, 0u);
+        safe_actuators(out, 0.0f, 1u, 1u, 1u); // V3 tambem — ver handle_deflating
         return;
     }
 
@@ -201,7 +201,7 @@ static void handle_inflating(ControlCore_t *cc, const ControlCore_Inputs_t *in,
     if (cc->inflate_elapsed_ms >= cc->safety.t_inflar_max_ms) {
         cc->last_error = CONTROL_ERR_E003_INFLATE_TIMEOUT;
         rt->state = SYSTEM_STATE_DEFLATING_FAST;
-        safe_actuators(out, 0.0f, 1u, 1u, 0u);
+        safe_actuators(out, 0.0f, 1u, 1u, 1u); // V3 tambem — ver handle_deflating
     }
 }
 
@@ -213,7 +213,7 @@ static void handle_stabilizing(ControlCore_t *cc, const ControlCore_Inputs_t *in
 
     if (in->abort_request != 0u) {
         rt->state = SYSTEM_STATE_DEFLATING_FAST;
-        safe_actuators(out, 0.0f, 1u, 1u, 0u);
+        safe_actuators(out, 0.0f, 1u, 1u, 1u); // V3 tambem — ver handle_deflating
         return;
     }
 
@@ -232,7 +232,7 @@ static void handle_stabilizing(ControlCore_t *cc, const ControlCore_Inputs_t *in
     if (cc->inflate_elapsed_ms >= cc->safety.t_inflar_max_ms) {
         cc->last_error = CONTROL_ERR_E003_INFLATE_TIMEOUT;
         rt->state = SYSTEM_STATE_DEFLATING_FAST;
-        safe_actuators(out, 0.0f, 1u, 1u, 0u);
+        safe_actuators(out, 0.0f, 1u, 1u, 1u); // V3 tambem — ver handle_deflating
     }
 }
 
@@ -295,7 +295,11 @@ static void handle_deflating(ControlCore_t *cc, const ControlCore_Inputs_t *in,
 {
     SystemRuntime_t *rt = cc->runtime;
 
-    safe_actuators(out, 0.0f, 1u, 1u, 0u);
+    /* V3 agora tambem abre aqui (2026-10, pedido do usuario na bancada):
+     * o prompt do projeto ja' previa isso ("V3 e' usada para desinflar o
+     * manguito e para calibracao", secao 2.3) — a implementacao anterior
+     * so' abria V1+V2, deixando a via extra de descarga de fora. */
+    safe_actuators(out, 0.0f, 1u, 1u, 1u);
 
     if (rt->pressure_display < cc->safety.p_segura_mmhg) {
         cc->deflate_settle_elapsed_ms += in->dt_ms;
