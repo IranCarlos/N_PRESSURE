@@ -672,3 +672,43 @@ bloqueiam decisões de firmware:
   Converter o piso de 30% numa estrategia melhor para bomba de embolo (ex.: banda/histerese
   maiores para tolerar os degraus, ou um filtro na leitura antes de comparar com a banda) fica
   para quando o resto do ensaio estiver fechado ponta a ponta.
+
+## Decisões P1/P2 (2026-10, confirmadas pelo usuário)
+
+- **P1 — NC0x e E0xx ficam SEPARADOS**: NC0x = conformidade clínica do ciclo (ex.: ficou dentro da
+  tolerância?). E0xx = falha técnica do equipamento (Apêndice D). Um ciclo pode ser tecnicamente
+  limpo (sem E0xx) e ainda assim `Não conforme` (NC01-NC08), e vice-versa — um erro técnico durante
+  o ciclo se reflete em NC08 ("falha técnica do dispositivo") além do próprio código E0xx no log de
+  erros. Confirma a proposta já registrada em `formato-logs.md` §C1.
+- **P2 — Participante ≠ operador**: participante (`P001`, `P002`...) é o paciente/sujeito do
+  ensaio; operador é o profissional que opera o equipamento (cadastro das telas de config). Os dois
+  campos coexistem no registro do ciclo. Confirma `formato-logs.md` §C3.
+
+## Fase 5.1 — Audit_Trail: SHA-256, encadeamento de hash, NC00-NC08 (2026-10-11)
+
+- `Core/Services/Audit_Trail` (C puro, sem HAL/FatFS, testado no host):
+  - `sha256.c`: implementacao de referencia (FIPS 180-4), testada contra os vetores oficiais do
+    NIST (vazio, "abc", 56 bytes cruzando a borda do padding) — os 3 valores foram conferidos de
+    forma independente com `sha256sum`/`openssl dgst` antes de entrar no teste, nao so' de
+    memoria. O H723 tem HASH por hardware com SHA-256 (`HAL_HASHEx_SHA256_*`); migrar e' uma
+    otimizacao futura, nao bloqueia o uso desta versao (a trilha grava 1 linha por vez, nao e'
+    caminho critico de tempo).
+  - `audit_chain.c`: `hash = SHA256(prev_hash_hex || conteudo_da_linha)`, igual ao Apendice C/
+    `formato-logs.md` regra 2. `AuditChain_VerifyLine()` para auditar um arquivo existente
+    (criterio de aceitacao da Fase 5: corte de energia nao pode corromper registros anteriores).
+  - `cycle_record.c`: avalia NC00-NC08 a partir das metricas do ciclo, usando os limites
+    preliminares de `formato-logs.md` §1. Testado contra os DOIS exemplos do documento-fonte
+    (ID000123 conforme, ID000126 NC05) — ground truth real, nao inventado.
+- **Decisoes de interpretacao feitas SEM confirmacao explicita do usuario** (documentadas em
+  `cycle_record.h`, revisar antes de usar em ensaio real):
+  1. Limites "ate' Xs"/"1 a 2s" tratados como teto apenas (mais rapido nunca e' nao-conformidade)
+     — inferido do proprio exemplo ID000123 (descompressao 0,94s, abaixo de "1s", e' Conforme).
+  2. Overshoot (pico > 105% do alvo) dobra como NC02, por nao existir codigo dedicado na tabela.
+  3. NC01 (alvo nao atingido) = media do plato fora da banda; NC02 (instabilidade) = minimo/
+     maximo/pico fora da banda mesmo com a media ok.
+  4. Prioridade quando mais de um NC falha: NC08 > NC07 > NC01 > NC02 > NC03 > NC04 > NC05 > NC06.
+- **Decisoes P1/P2 confirmadas pelo usuario** (ver secao acima): NC0x e E0xx ficam separados;
+  participante != operador.
+- Pendente (Fase 5.2): `storage_task` de verdade (fila + FatFS/SDMMC), layout de arquivos do
+  Apendice C, politica de cartao ausente/cheio (E005), rotacao mensal dos logs. Nada disso foi
+  tocado ainda — hoje so' existe a logica pura de hash/NC, sem gravar em lugar nenhum.
