@@ -57,7 +57,16 @@ void ControlCore_StartInflation(ControlCore_t *cc)
         cc->last_error = CONTROL_ERR_NONE;
         cc->inflate_elapsed_ms = 0u;
         cc->state_elapsed_ms = 0u;
+
+        memset(&cc->cycle, 0, sizeof(cc->cycle));
+        cc->cycle.plateau_min_mmhg = 1.0e9f;   /* sentinela: nenhuma amostra ainda */
+        cc->cycle.plateau_max_mmhg = -1.0e9f;
     }
+}
+
+const ControlCore_CycleStats_t *ControlCore_GetCycleStats(const ControlCore_t *cc)
+{
+    return &cc->cycle;
 }
 
 /** @brief PID + feedforward + alivio de sobrepressao. Usado por INFLATING e
@@ -399,4 +408,55 @@ void ControlCore_Step(ControlCore_t *cc, const ControlCore_Inputs_t *in,
     cc->inflate_elapsed_ms = ((rt->state == SYSTEM_STATE_INFLATING) ||
                              (rt->state == SYSTEM_STATE_STABILIZING))
         ? (cc->inflate_elapsed_ms + in->dt_ms) : 0u;
+
+    /* Fase 5: estatisticas do ciclo (ver ControlCore_CycleStats_t). So'
+     * acumula enquanto o ciclo automatico esta' ativo (saiu de IDLE, ainda
+     * nao finalizou); congela ao voltar para IDLE.
+     *
+     * A checagem de finalizacao fica FORA do "if (rt->state != IDLE)" de
+     * proposito: e' exatamente no tick em que rt->state VIRA IDLE que ela
+     * precisa disparar — gate-la pelo estado atual (!= IDLE) faria o bloco
+     * inteiro ser pulado bem no tick que importa, e o ciclo nunca
+     * finalizaria (achado ao escrever o teste de host). */
+    if (cc->cycle.finalized == 0u) {
+        if (rt->state != SYSTEM_STATE_IDLE) {
+            cc->cycle.total_elapsed_ms += in->dt_ms;
+
+            if (rt->pressure_display > cc->cycle.peak_mmhg) {
+                cc->cycle.peak_mmhg = rt->pressure_display;
+            }
+
+            if ((cc->cycle.reached_setpoint == 0u) &&
+                ((rt->state == SYSTEM_STATE_STABILIZING) || (rt->state == SYSTEM_STATE_STABILIZED))) {
+                cc->cycle.reached_setpoint = 1u;
+                cc->cycle.inflate_time_ms = cc->cycle.total_elapsed_ms;
+            }
+
+            if (rt->state == SYSTEM_STATE_STABILIZED) {
+                cc->cycle.plateau_time_ms += in->dt_ms;
+                cc->cycle.plateau_sum_mmhg += rt->pressure_display;
+                cc->cycle.plateau_sample_count++;
+                if (rt->pressure_display < cc->cycle.plateau_min_mmhg) {
+                    cc->cycle.plateau_min_mmhg = rt->pressure_display;
+                }
+                if (rt->pressure_display > cc->cycle.plateau_max_mmhg) {
+                    cc->cycle.plateau_max_mmhg = rt->pressure_display;
+                }
+            }
+
+            if ((state_before != SYSTEM_STATE_DEFLATING_FAST) && (rt->state == SYSTEM_STATE_DEFLATING_FAST)) {
+                cc->cycle.deflate_start_ms = cc->cycle.total_elapsed_ms;
+                if (in->abort_request != 0u) {
+                    cc->cycle.aborted_by_operator = 1u;
+                }
+            }
+        }
+
+        if ((state_before != SYSTEM_STATE_IDLE) && (rt->state == SYSTEM_STATE_IDLE)) {
+            cc->cycle.deflate_time_ms = cc->cycle.total_elapsed_ms - cc->cycle.deflate_start_ms;
+            cc->cycle.residual_mmhg = rt->pressure_display;
+            cc->cycle.technical_fault = (cc->last_error != CONTROL_ERR_NONE) ? 1u : 0u;
+            cc->cycle.finalized = 1u;
+        }
+    }
 }

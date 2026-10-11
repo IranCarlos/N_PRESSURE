@@ -70,6 +70,33 @@ typedef struct {
     uint8_t valve3_open;
 } ControlCore_Actuators_t;
 
+/*
+ * Metricas de um ciclo completo (Fase 5: alimenta CycleRecord_Evaluate() em
+ * Audit_Trail/cycle_record.h). Zeradas em ControlCore_StartInflation();
+ * acumulam enquanto o estado != IDLE; `finalized` vira 1 ao voltar para
+ * IDLE (congela ali ate' o proximo StartInflation). Um ciclo que termina em
+ * SYSTEM_STATE_FAULT nunca finaliza por este mecanismo — FAULT hoje nao
+ * tem saida automatica (ver ControlCore_EnterFaultState); a camada de
+ * storage deve tratar esse caso lendo o estado diretamente.
+ */
+typedef struct {
+    float    peak_mmhg;
+    float    plateau_sum_mmhg;
+    uint32_t plateau_sample_count;  /* 0 = nunca chegou a STABILIZED */
+    float    plateau_min_mmhg;
+    float    plateau_max_mmhg;
+    uint32_t total_elapsed_ms;      /* desde StartInflation */
+    uint32_t inflate_time_ms;       /* ate' a 1a vez em STABILIZING/STABILIZED */
+    uint32_t plateau_time_ms;       /* tempo total acumulado em STABILIZED */
+    uint32_t deflate_start_ms;      /* uso interno — snapshot ao entrar em DEFLATING_FAST */
+    uint32_t deflate_time_ms;       /* DEFLATING_FAST ate' IDLE */
+    float    residual_mmhg;         /* pressao no instante de voltar a IDLE */
+    uint8_t  reached_setpoint;      /* chegou a STABILIZING/STABILIZED ao menos 1x */
+    uint8_t  aborted_by_operator;   /* abort_request iniciou o desinflar (nao timeout/vazamento) */
+    uint8_t  technical_fault;       /* last_error != NONE ao finalizar */
+    uint8_t  finalized;             /* 1 = ciclo completo, campos acima prontos para ler */
+} ControlCore_CycleStats_t;
+
 typedef struct {
     SystemConfig_t             *cfg;     /* pid/stabilization/leak_test/setpoint (EEPROM) */
     SystemRuntime_t            *runtime; /* state/pressure_display/setpoint_mmhg/bt_user_pressed */
@@ -89,6 +116,8 @@ typedef struct {
     uint32_t relief_recheck_remaining_ms;
 
     ControlCore_Error_t last_error;   /* ultimo erro latched; Init/novo ensaio zera */
+
+    ControlCore_CycleStats_t cycle;   /* Fase 5 — ver ControlCore_CycleStats_t */
 } ControlCore_t;
 
 void ControlCore_Init(ControlCore_t *cc, SystemConfig_t *cfg, SystemRuntime_t *runtime,
@@ -107,6 +136,11 @@ void ControlCore_StartInflation(ControlCore_t *cc);
  * ControlLoop_EnterFaultState) — usar para falhas detectadas fora desta
  * malha (ex.: watchdog, heartbeat USB perdido). */
 void ControlCore_EnterFaultState(ControlCore_t *cc, ControlCore_Actuators_t *out);
+
+/* Metricas do ciclo em andamento ou do ultimo ciclo completo (ver
+ * ControlCore_CycleStats_t.finalized). Ponteiro para dentro de cc — valido
+ * ate' o proximo ControlCore_StartInflation(). */
+const ControlCore_CycleStats_t *ControlCore_GetCycleStats(const ControlCore_t *cc);
 
 #ifdef __cplusplus
 }

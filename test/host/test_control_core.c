@@ -315,6 +315,65 @@ static void test_abort_request_deflates_to_idle(void)
     CHECK(r.final_state == SYSTEM_STATE_IDLE);
 }
 
+/* Fase 5: ControlCore_GetCycleStats() — alimenta CycleRecord_Evaluate(). */
+static void test_cycle_stats_full_run(void)
+{
+    SystemConfig_t cfg = default_cfg();
+    SystemRuntime_t rt;
+    ControlCore_SafetyConfig_t safety = default_safety();
+    ControlCore_t cc;
+    SimPlant_t plant;
+    SimPlant_Config_t pcfg = plant_small_cuff();
+    float measured_kpa;
+    const ControlCore_CycleStats_t *stats;
+    uint32_t tick;
+
+    memset(&rt, 0, sizeof(rt));
+    rt.setpoint_mmhg = 40.0f;
+    ControlCore_Init(&cc, &cfg, &rt, &safety);
+    SimPlant_Init(&plant, &pcfg, 42u);
+    ControlCore_StartInflation(&cc);
+    SimPlant_Step(&plant, 0.0f, 0u, 0u, &measured_kpa);
+
+    stats = ControlCore_GetCycleStats(&cc);
+    CHECK(stats->finalized == 0u); /* mal comecou */
+
+    for (tick = 1; tick <= 60000u; tick++) {
+        ControlCore_Inputs_t in;
+        ControlCore_Actuators_t out;
+
+        in.pressure_kpa = measured_kpa;
+        in.sensor_ok = 1u;
+        in.abort_request = (tick == 5000u) ? 1u : 0u; /* aborta ja' estabilizado (inflate_time < 1s) */
+        in.dt_ms = 1u;
+
+        ControlCore_Step(&cc, &in, &out);
+        SimPlant_Step(&plant, out.pump_power,
+                     (uint8_t)(out.valve1_open + out.valve2_open + out.valve3_open),
+                     1u, &measured_kpa);
+
+        if (stats->finalized != 0u) { break; }
+    }
+
+    printf("  [cycle_stats] peak=%.2f plato_n=%u plato_mean=%.2f inflate_ms=%u plato_ms=%u"
+          " deflate_ms=%u residual=%.2f abort=%u fault=%u finalized=%u\n",
+          stats->peak_mmhg, stats->plateau_sample_count,
+          (stats->plateau_sample_count > 0u) ? (stats->plateau_sum_mmhg / (float)stats->plateau_sample_count) : 0.0f,
+          stats->inflate_time_ms, stats->plateau_time_ms, stats->deflate_time_ms,
+          stats->residual_mmhg, stats->aborted_by_operator, stats->technical_fault, stats->finalized);
+
+    CHECK(stats->finalized != 0u);
+    CHECK(stats->reached_setpoint != 0u);
+    CHECK(stats->plateau_sample_count > 0u);
+    CHECK(stats->peak_mmhg >= 35.0f); /* chegou perto do alvo de 40 */
+    CHECK(stats->inflate_time_ms > 0u);
+    CHECK(stats->plateau_time_ms > 0u);
+    CHECK(stats->deflate_time_ms > 0u);
+    CHECK(stats->aborted_by_operator != 0u);
+    CHECK(stats->technical_fault == 0u);
+    CHECK(stats->residual_mmhg < safety.p_segura_mmhg);
+}
+
 int main(void)
 {
     printf("Control_Core x sim_plant (Fase 3) — parametros de seguranca e PID sao placeholders\n");
@@ -326,6 +385,7 @@ int main(void)
     test_sensor_fault_triggers_e002_safe_state();
     test_overpressure_triggers_e001_immediately();
     test_abort_request_deflates_to_idle();
+    test_cycle_stats_full_run();
     printf(s_fail ? "control_core: %d FALHA(S)\n" : "control_core: OK\n", s_fail);
     return s_fail != 0;
 }

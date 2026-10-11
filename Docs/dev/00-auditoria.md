@@ -712,3 +712,26 @@ bloqueiam decisões de firmware:
 - Pendente (Fase 5.2): `storage_task` de verdade (fila + FatFS/SDMMC), layout de arquivos do
   Apendice C, politica de cartao ausente/cheio (E005), rotacao mensal dos logs. Nada disso foi
   tocado ainda — hoje so' existe a logica pura de hash/NC, sem gravar em lugar nenhum.
+
+## Fase 5.2 (inicio) — get_fattime(), estatisticas de ciclo, achado de LFN (2026-10-11)
+
+- **`get_fattime()` corrigido** (`FATFS/App/fatfs.c`, dentro de USER CODE — sobrevive a regeneracao):
+  antes retornava 0 sempre (todo arquivo gravado ficava com timestamp 1980-01-01); agora le o RTC
+  de verdade. Dependia do RTC já estar inicializado antes do 1o `f_open()`, o que ja' e' o caso
+  (`MX_RTC_Init()` roda antes de qualquer tarefa).
+- **`Control_Core` ganhou estatisticas de ciclo** (`ControlCore_CycleStats_t`, Fase 5): pico, media/
+  min/max do plato, tempo de insuflar/plato/desinflar, pressao residual, se foi abortado pelo
+  operador, se teve falha tecnica. Alimenta diretamente `CycleRecord_Evaluate()` (Fase 5.1) —
+  antes nao existia NENHUM dado real de ciclo para avaliar NC00-NC08, so' a logica de avaliacao.
+  **Bug encontrado e corrigido durante o teste de host**: a finalizacao (`finalized=1`, no instante
+  exato de voltar a IDLE) estava dentro de um `if (rt->state != IDLE)` — ou seja, o proprio tick em
+  que o estado vira IDLE era pulado, e a estatistica nunca finalizava. So' apareceu ao escrever um
+  teste que rodava o ciclo completo ate' IDLE (os testes anteriores paravam antes disso).
+- **Achado — nomes de arquivo do Apendice C nao cabem no FatFS atual**: `_USE_LFN=0` em
+  `FATFS/Target/ffconf.h` (nomes curtos, 8.3) mas o padrao `T00000123.rec` tem 9 caracteres na
+  parte do nome (T + 8 digitos), 1 a mais que o limite de 8.3. **Pendente: habilitar LFN no
+  CubeMX** (Middleware → FATFS → "Long Filename Support") antes de gravar esses nomes de verdade
+  no cartao — nao afeta a logica pura (so' formata strings), mas vai falhar/truncar quando o
+  `storage_task` real tentar `f_open()` com esse nome.
+- Pendente (resto da Fase 5.2): formatacao dos arquivos `.rec`/`.csv`/`index.csv`/logs (Apendice C),
+  `storage_task` com fila, SDMMC real (bancada do usuario), politica de cartao ausente/cheio (E005).
