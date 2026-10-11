@@ -735,3 +735,11 @@ bloqueiam decisões de firmware:
   `storage_task` real tentar `f_open()` com esse nome.
 - Pendente (resto da Fase 5.2): formatacao dos arquivos `.rec`/`.csv`/`index.csv`/logs (Apendice C),
   `storage_task` com fila, SDMMC real (bancada do usuario), politica de cartao ausente/cheio (E005).
+
+## LFN habilitado no FatFS (2026-10-11) — resolve o achado da Fase 5.2
+
+- Usuario aplicou no CubeMX: FATFS -> Set Defines -> USE_LFN = "Enabled with dynamic working
+  buffer on the STACK" (valor 2). Diff conferido: so' `_USE_LFN 0 -> 2` em `ffconf.h` e o novo
+  `ccsbcs.c` (tabela de code page, exigido pelo LFN com `LFN_UNICODE=0`/`CODE_PAGE=850`) adicionado
+  ao `cmake/stm32cubemx/CMakeLists.txt`. Nada de supply/clock/outros modulos mudou. Build Debug/
+  Release limpo. Nomes `T00000123.rec` (Apendice C) agora cabem.
