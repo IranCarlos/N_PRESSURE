@@ -100,7 +100,7 @@ typedef StaticTask_t osStaticThreadDef_t;
 // (os dois comandam os mesmos atuadores) e exige BRINGUP_ENABLE_PRESSURE=1.
 // NUNCA testado em hardware ainda — ver o aviso de bancada no bloco de
 // globais logo abaixo antes de habilitar.
-#define BRINGUP_ENABLE_CONTROL      (0)
+#define BRINGUP_ENABLE_CONTROL      (1)
 
 #define TASK_ENCODER_PERIOD_MS      (1u)
 #define TASK_CONTROL_PERIOD_MS      (1u)
@@ -503,6 +503,12 @@ int main(void)
   // Fase 1: captura de fault/reset persistente (RTC ja inicializado acima)
   // e contador de ciclos para medicao de jitter nas Fases 3/4. Rodam antes
   // de qualquer outro modulo para nao perder um fault ocorrido cedo demais.
+  // BUG (aberto, 2026-10): RTC esta' em LSI, nao LSE — o LSE voltou a falhar
+  // em startup mesmo com LSE Drive Capability = Medium High (2a falha
+  // registrada; a 1a, com Low, motivou a troca para Medium High). RTC fica
+  // sem persistencia de hora entre quedas de energia ate' isso ser resolvido
+  // de verdade (ver Docs/dev/00-auditoria.md, secao LSE, para o historico e
+  // proximos passos: inspecao fisica do cristal/capacitores de carga).
   g_boot_rsr = RCC->RSR; // antes de o FaultManager limpar: motivo do ultimo reset
   FaultManager_Init(&hrtc);
   PortDWT_Init();
@@ -797,19 +803,12 @@ void SystemClock_Config(void)
 
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
-  /** Configure LSE Drive Capability
-  */
-  HAL_PWR_EnableBkUpAccess();
-  __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_MEDIUMHIGH);
-
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_HSI
-                              |RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE
-                              |RCC_OSCILLATORTYPE_LSE;
+                              |RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
-  RCC_OscInitStruct.LSEState = RCC_LSE_ON;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = 64;
   RCC_OscInitStruct.LSIState = RCC_LSI_ON;

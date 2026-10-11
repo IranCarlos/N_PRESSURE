@@ -605,3 +605,30 @@ bloqueiam decisões de firmware:
 - Formatacao de ponto flutuante feita a mao (`format_1dp`, so' `%d`/`%s`) porque o
   projeto linka `--specs=nano.specs` sem `-u _printf_float` — `%f` em `snprintf`
   silenciosamente nao funcionaria.
+
+## LSE — BUG aberto (2026-10): falhou de novo mesmo com Medium High
+
+- **Historico**: Low (1a falha, intermitente->constante) -> Medium High (testado, **tambem falhou**) ->
+  usuario voltou RTC para LSI por enquanto para destravar o boot e continuar os testes de controle.
+- **Estado atual**: `RTCClockSelection = RCC_RTCCLKSOURCE_LSI`, sem LSE, sem CSS. RTC funciona mas
+  sem persistencia de hora entre quedas de energia (mesma limitacao pre-Fase 2.3).
+- **Hipotese**: ja' tentamos 2 niveis de drive strength sem sucesso — comeca a parecer problema de
+  hardware (cristal de 32,768 kHz ou capacitores de carga), nao so' ajuste de firmware. Proximo
+  passo (fora do escopo de firmware): inspecionar fisicamente a solda do cristal e os capacitores de
+  carga; medir a oscilacao com osciloscopio/analisador se possivel antes de tentar High (o nivel
+  mais forte restante no CubeMX).
+- **Marcado no codigo**: comentario BUG em `Core/Src/main.c`, `USER CODE BEGIN 2`, logo antes de
+  `RtcService_CheckAtBoot()` (sobrevive a regeneracao do CubeMX).
+
+## Bug corrigido: FAULT/E002 falso-positivo no boot travava o ensaio (2026-10)
+
+- **Sintoma**: tela liga direto em FAULT/E002; INFLATING nunca liga a bomba.
+- **Causa**: `sensor_fault_debounce_ms` estava em 50 ms — menor que o transiente normal de
+  inicializacao do ADC (`ADC_Acq_Init` zera o buffer do DMA antes de armar; os primeiros blocos
+  processados por `ADC_Acq_Update()` podem misturar amostras zeradas com reais ate' o buffer
+  circular ser todo renovado), disparando `OUT_OF_RANGE` falso por tempo suficiente para latchar
+  E002 — e como `SYSTEM_STATE_FAULT` so' sai por intervencao explicita (ainda nao implementada), a
+  bomba nunca tinha chance de ligar depois disso, mesmo pedindo INFLATING.
+- **Corrigido**: `sensor_fault_debounce_ms` subiu para 300 ms (`Core/Services/Control_Loop/Src/control_loop.c`).
+  Nao e' um valor medido/validado — placeholder generoso o suficiente para nao mascarar uma falha
+  real de sensor durante um ensaio (que normalmente dura segundos, nao algumas centenas de ms).

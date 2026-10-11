@@ -42,7 +42,15 @@ extern void Error_Handler(void);
  */
 static const ControlCore_SafetyConfig_t s_control_safety = {
     .p_max_abs_mmhg = 320.0f,
-    .sensor_fault_debounce_ms = 50u,
+    /* 300 (nao mais 50): achado de bancada (2026-10) — 50 ms e' menor que o
+     * transiente normal de start-up do ADC (ADC_Acq_Init zera o buffer do
+     * DMA antes de armar; os primeiros blocos processados por
+     * ADC_Acq_Update() podem misturar amostras zeradas com reais ate' o
+     * buffer circular ser todo renovado), o que gerava OUT_OF_RANGE falso
+     * logo no boot e travava em FAULT/E002 — sem saida (SYSTEM_STATE_FAULT
+     * so' sai por intervencao explicita, ainda nao implementada) a bomba
+     * nunca chegava a ligar mesmo pedindo INFLATING. */
+    .sensor_fault_debounce_ms = 300u,
     .t_inflar_max_ms = 60000u,
     .t_desinflar_max_ms = 15000u,
     .dp_vazamento_mmhg = 1.0f,
