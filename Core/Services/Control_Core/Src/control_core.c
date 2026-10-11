@@ -16,9 +16,9 @@
  * mais de uma chamada. Isso ja' existia no Control_Loop atual (nunca
  * verificado em bancada); registrado aqui, nao "corrigido" por conta
  * propria — `t_min_valvula` no Apendice E ainda esta' como "medir". */
-#define CONTROL_CORE_CONTROL_BAND_MMHG     (1.0f)
+#define CONTROL_CORE_CONTROL_BAND_MMHG     (0.5f)
 #define CONTROL_CORE_OVERPRESS_STRONG_MMHG (50.0f)
-#define CONTROL_CORE_PUMP_MIN_COMPENSATION (0.2f)
+#define CONTROL_CORE_PUMP_MIN_EFFECTIVE     (0.30f)
 #define CONTROL_CORE_RELIEF_PULSE_FAST_MS   (30u)
 #define CONTROL_CORE_RELIEF_PULSE_STRONG_MS (80u)
 #define CONTROL_CORE_RELIEF_SETTLE_MS       (10u)
@@ -109,6 +109,21 @@ static void run_pid_iteration(ControlCore_t *cc, const ControlCore_Inputs_t *in,
      * reintroduzir um piso so' ali, se a bancada mostrar necessidade, fica
      * para a Fase 4. */
     error_mmhg = error * CONTROL_CORE_MMHG_PER_KPA;
+
+    /* Piso de partida (achado de bancada, 2026-10): a bomba real so' gira de
+     * fato a partir de ~30% de duty (medido na Fase 2 pela bancada de
+     * atuadores) — bem acima do que o PID calcula para erros pequenos/
+     * moderados com os ganhos simulados atuais (ex.: ~1-4% em 40 mmHg). Sem
+     * isto a bomba nunca sai da inercia e o ensaio nunca infla de verdade.
+     * So' se aplica enquanto falta mais que a banda de estabilizacao para o
+     * alvo — nunca perto o bastante do setpoint pra reintroduzir o
+     * overshoot do piso removido acima (aquele agia ate' 5 mmHg do alvo e
+     * causava ~60 mmHg de overshoot no simulador). 0.30 ainda nao foi
+     * confirmado como o minimo exato — e' o que a bancada mostrou. */
+    if ((pump_power > 0.0f) && (pump_power < CONTROL_CORE_PUMP_MIN_EFFECTIVE) &&
+        (error_mmhg > cc->cfg->stabilization.band_mmhg)) {
+        pump_power = CONTROL_CORE_PUMP_MIN_EFFECTIVE;
+    }
 
     /* Contadores de pulso/recheck de alivio: decrementam a cada chamada. */
     cc->relief_pulse_remaining_ms = (cc->relief_pulse_remaining_ms > in->dt_ms)

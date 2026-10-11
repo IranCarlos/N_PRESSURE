@@ -632,3 +632,24 @@ bloqueiam decisões de firmware:
 - **Corrigido**: `sensor_fault_debounce_ms` subiu para 300 ms (`Core/Services/Control_Loop/Src/control_loop.c`).
   Nao e' um valor medido/validado — placeholder generoso o suficiente para nao mascarar uma falha
   real de sensor durante um ensaio (que normalmente dura segundos, nao algumas centenas de ms).
+
+## Bugs corrigidos: bomba nunca ligava + encoder nao mudava o setpoint (2026-10)
+
+1. **HUD escrevia no campo errado**: `uiTask` escrevia em `g_bringup_sys_cfg.current_setpoint_mmhg`,
+   mas o `Control_Core` so' le `g_control_runtime->setpoint_mmhg` (copiado de `current_setpoint_mmhg`
+   UMA VEZ, em `ControlLoop_Init`, nunca mais depois) — girar o encoder nao tinha efeito nenhum no
+   ensaio. Corrigido chamando `ControlLoop_SetSetpointMmHg()` (API publica certa, atualiza os dois
+   campos com o clamping devido).
+2. **Bomba nunca saia da inercia**: com os ganhos simulados (Fase 3), a saida do PID em 40 mmHg ficava
+   em ~1-4% de duty — bem abaixo dos ~30% que a bancada de atuadores (Fase 2) ja tinha medido como
+   minimo pra bomba real girar. O simulador nunca modelou esse limiar fisico (inercia/atrito estatico
+   do motor), entao o ganho "funcionava" so' no simulador. Corrigido: novo piso
+   `CONTROL_CORE_PUMP_MIN_EFFECTIVE = 0.30` em `control_core.c`, aplicado so' enquanto o erro ainda
+   esta' alem da banda de estabilizacao (nunca perto do alvo — diferente do piso removido na Fase 3,
+   que causava ~60 mmHg de overshoot por agir ate' 5 mmHg do alvo).
+   - **Efeito colateral, esperado**: overshoot do manguito pequeno/rapido no simulador piorou de
+     ~3 para ~11 mmHg — o mesmo piso que da' a bomba autoridade suficiente pra girar tambem da' mais
+     "punch" ao controlador, e a banda de alivio atual (0.5 mmHg) nao segura essa punch a tempo num
+     manguito rapido. Documentado em `Docs/dev/sim-report.md`; retunar com T_lag/vazao REAIS medidos
+     na bancada, nao mais so' no simulador — o numero exato do piso (0.30) tambem precisa confirmacao
+     (foi so' o que a bancada mostrou, nao um minimo medido com precisao).

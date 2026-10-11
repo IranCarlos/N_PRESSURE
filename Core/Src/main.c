@@ -1905,16 +1905,21 @@ void StartUiTask(void *argument)
 
 #if BRINGUP_ENABLE_CONTROL
     // HUD de bancada (ver globais acima, USER CODE 2): o arco e' o knob do
-    // setpoint, os labels mostram estado/pressao/erro. So' esta tarefa toca
-    // LVGL; escreve em g_bringup_sys_cfg.current_setpoint_mmhg (lido pela
-    // controlTask no proximo ciclo — corrida benigna de um float, aceitavel
-    // aqui, nao e' dado de seguranca).
+    // setpoint, os labels mostram estado/pressao/erro.
+    //
+    // BUG corrigido (2026-10): escrevia em
+    // g_bringup_sys_cfg.current_setpoint_mmhg, mas o Control_Core so' le
+    // g_control_runtime->setpoint_mmhg (copiado de current_setpoint_mmhg
+    // UMA VEZ, em ControlLoop_Init — nunca mais depois) — girar o encoder
+    // nao tinha efeito nenhum no ensaio, o label ficava preso em 40 mmHg.
+    // ControlLoop_SetSetpointMmHg() e' a API publica certa: atualiza os
+    // dois campos (runtime + cfg) com o clamping devido.
     {
       int16_t setpoint_knob = lv_arc_get_value(s_ctrl_arc);
       char line[48];
       uint32_t state_idx = (uint32_t)g_control_runtime->state;
 
-      g_bringup_sys_cfg.current_setpoint_mmhg = (float)setpoint_knob;
+      ControlLoop_SetSetpointMmHg((float)setpoint_knob);
 
       {
         char pres_str[16];
