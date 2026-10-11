@@ -214,6 +214,32 @@ SECTIONS
   PROVIDE( __arm32_tls_tcb_offset = MAX(8, __tls_align) );
   PROVIDE( __arm64_tls_tcb_offset = MAX(16, __tls_align) );
 
+  /* FATFS/App/fatfs.c (gerado pelo CubeMX, SEM marcadores USER CODE nas
+   * linhas "FATFS SDFatFS;"/"FIL SDFile;" — qualquer edicao la' e'
+   * revertida no proximo "Generate Code") declara esses dois globais
+   * simples, que cairiam no .bss generico abaixo => DTCMRAM. A IDMA interna
+   * do SDMMC1 (usada por HAL_SD_ReadBlocks_DMA/WriteBlocks_DMA, chamada por
+   * f_mount()/f_open() via sd_diskio.c) e' um mestre de barramento na
+   * matriz AXI, igual DMA1/DMA2 — NAO alcanca DTCM (mesmo motivo do
+   * .dma_buffer abaixo). O buffer de setor do FatFS (fs->win, dentro de
+   * SDFatFS) e' exatamente o alvo da 1a leitura do boot sector dentro de
+   * f_mount(): se cair em DTCM, a transferencia falha e f_mount() retorna
+   * FR_DISK_ERR (achado 2026-10, cartao nunca montava apesar de deteccao/
+   * clock/stack corretos). Em vez de editar fatfs.c/.h (risco de
+   * regeneracao), redireciona por nome de secao: -fdata-sections (ver
+   * cmake/gcc-arm-none-eabi.cmake) da' a cada global sua propria secao de
+   * entrada (.bss.SDFatFS, .bss.SDFile — confirmado via objdump). Esta
+   * secao precisa aparecer ANTES de .bss neste script: o ld atribui cada
+   * secao de entrada a' primeira regra de saida que casar, e a wildcard
+   * generica *(.bss*) do .bss abaixo casaria com .bss.SDFatFS tambem. */
+  .fatfs_dma_buffer (NOLOAD) : ALIGN(4)
+  {
+    . = ALIGN(4);
+    *(.bss.SDFatFS)
+    *(.bss.SDFile)
+    . = ALIGN(4);
+  } >RAM_D1
+
   .bss (NOLOAD) : ALIGN(4)
   {
     *(.bss)

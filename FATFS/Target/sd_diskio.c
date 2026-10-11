@@ -75,7 +75,17 @@ See BSP_SD_ErrorCallback() and BSP_SD_AbortCallback() below
  * Notice: This is applicable only for cortex M7 based platform.
  */
 /* USER CODE BEGIN enableSDDmaCacheMaintenance */
-/* #define ENABLE_SD_DMA_CACHE_MAINTENANCE  1 */
+// Achado em bancada (2026-10): SDFatFS/SDFile foram movidos para RAM_D1
+// (linker script) porque a IDMA do SDMMC1 nao alcanca DTCM — isso corrigiu
+// FR_DISK_ERR, mas revelou o proximo problema: o D-Cache do Cortex-M7 esta
+// habilitado (SCB_EnableDCache() em main.c) e RAM_D1 e' memoria cacheavel.
+// Sem manutencao de cache, o core pode ler uma copia obsoleta de fs->win
+// apos a IDMA escrever os dados frescos la' — o setor de boot parece
+// invalido (sem assinatura 0xAA55), dando FR_NO_FILESYSTEM mesmo com o
+// cartao formatado corretamente. Esta define ativa SCB_InvalidateDCache_by_
+// Addr()/SCB_CleanDCache_by_Addr() ao redor de cada transferencia DMA
+// abaixo (ja' implementado no template, so' estava desligado).
+#define ENABLE_SD_DMA_CACHE_MAINTENANCE  1
 /* USER CODE END enableSDDmaCacheMaintenance */
 
 /*
@@ -130,7 +140,18 @@ const Diskio_drvTypeDef  SD_Driver =
 };
 
 /* USER CODE BEGIN beforeFunctionSection */
-/* can be used to modify / undefine following code or add new code */
+// Achado em bancada (2026-10): SD_TIMEOUT (30s, definido acima) e' o tempo
+// que SD_CheckStatusWithTimeout() fica em busy-wait (sem osDelay) esperando
+// BSP_SD_GetCardState() == SD_TRANSFER_OK antes de cada leitura/escrita.
+// Como storageTask tem prioridade ACIMA de uiTask (por design — ver
+// CLAUDE.md/00-auditoria.md), enquanto ele gira nesse laço o escalonador
+// nunca da' CPU pra' UI: remover o cartao no meio de uma escrita travava a
+// IHM por ate' 30s. 1s e' generoso o bastante pra' tolerar um cartao lento
+// de verdade sem deixar a trava perceptivel; redefinido aqui (depois da
+// definicao original, resultado de ultima redefinicao vence) em vez de
+// editar a linha gerada.
+#undef SD_TIMEOUT
+#define SD_TIMEOUT (1u * 1000u)
 /* USER CODE END beforeFunctionSection */
 
 /* Private functions ---------------------------------------------------------*/

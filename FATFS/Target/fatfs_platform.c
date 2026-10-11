@@ -26,7 +26,14 @@ uint8_t	BSP_PlatformIsDetected(void) {
         status = SD_NOT_PRESENT;
     }
     /* USER CODE BEGIN 1 */
-    /* user code can be inserted here */
+    // Achado em bancada (2026-10): a logica gerada acima assume LOW =
+    // cartao presente (convencao comum de soquete SD), mas o switch de
+    // deteccao desta placa e' invertido na pratica — medido direto via
+    // g_storage_stats.card_detected: PD0 le HIGH com o cartao inserido,
+    // LOW sem cartao (ha' pull-up externo na placa, confirmado pelo
+    // usuario). Inverte aqui, dentro de USER CODE — sobrevive a
+    // regeneracao do CubeMX — em vez de editar a linha gerada acima.
+    status = (status == SD_PRESENT) ? SD_NOT_PRESENT : SD_PRESENT;
     /* USER CODE END 1 */
     return status;
 }

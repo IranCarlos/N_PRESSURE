@@ -54,6 +54,17 @@ target_link_directories(${CMAKE_PROJECT_NAME} PRIVATE
 # definido por ele, nao sobre a lista de diretorios em si.
 set_property(TARGET stm32cubemx PROPERTY SYSTEM TRUE)
 
+# cmake/gcc-arm-none-eabi.cmake passa STM32H723xG_flash.ld via "-T" nas
+# linker flags, mas isso nao basta para o Ninja saber que precisa religar
+# quando o .ld muda (CMake so' rastreia dependencias de LINK_DEPENDS
+# explicitamente) — sem isto, editar o .ld e' silenciosamente ignorado pelo
+# build incremental ("ninja: no work to do") ate alguem apagar o .elf na
+# mao. Achado 2026-10 ao mover SDFatFS/SDFile para RAM_D1 (ver comentario
+# no .ld sobre a IDMA do SDMMC1 e DTCM).
+set_target_properties(${CMAKE_PROJECT_NAME} PROPERTIES
+    LINK_DEPENDS "${CMAKE_SOURCE_DIR}/STM32H723xG_flash.ld"
+)
+
 # Add sources to executable — arquitetura em camadas (portados de
 # STM32L476/Core/Controller): Bsp (drivers de hardware desta placa),
 # Services (logica de negocio), App (orquestracao/UI). Dependencia:

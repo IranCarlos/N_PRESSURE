@@ -10,6 +10,7 @@
 #include "FreeRTOS.h"
 #include "queue.h"
 #include "cmsis_os2.h"
+#include "system_types.h"
 #include <string.h>
 
 /* Fila estatica (DTCM ja' esta' ~85% usada — ver 00-auditoria.md; manter a
@@ -57,6 +58,20 @@ static osMessageQueueId_t        s_queue;
 
 static StorageTask_Stats_t       s_stats;
 
+/* FIL._FS_TINY==0 (ffconf.h) da' a cada arquivo aberto um buffer de setor
+ * PROPRIO (fp->buf[512]), usado por f_write() pra' escritas parciais e
+ * mandado ao cartao via DMA dentro de f_sync()/f_close() (disk_write(...,
+ * fp->buf, ...), ff.c). Se este FIL fosse uma variavel local de pilha de
+ * append_line(), fp->buf cairia na pilha da storageTask — DTCMRAM,
+ * inalcancavel pela IDMA do SDMMC1 (mesmo motivo de SDFatFS/SDFile em
+ * RAM_D1, ver STM32H723xG_flash.ld). Achado em bancada (2026-10):
+ * f_write() sempre "funcionava" (so' copia pro buffer, sem DMA) mas
+ * f_close()/f_sync() sempre falhava com FR_DISK_ERR (o 1o DMA de verdade
+ * deste FIL). static + DMA_BUFFER resolve; storageTask so' abre um arquivo
+ * de cada vez (serial, sincrono), entao reaproveitar uma unica instancia
+ * entre chamadas e' seguro. */
+static FIL s_append_file DMA_BUFFER;
+
 /* Uma corrente de hash POR ARQUIVO de log do mes (events/errors/audit) —
  * cada arquivo e' encadeado independentemente (Apendice C: "o 1o registro
  * do mes referencia o ultimo hash do mes anterior", por arquivo). Carregar
@@ -75,6 +90,8 @@ void StorageTask_InitQueue(void)
     memset(&s_queue_cb, 0, sizeof(s_queue_cb));
     memset(&s_queue_buf, 0, sizeof(s_queue_buf));
     memset(&s_stats, 0, sizeof(s_stats));
+    s_stats.last_write_step = 0xFFu;   /* 0xFF = nenhuma escrita tentada ainda */
+    s_stats.last_write_fresult = 0xFFu;
 
     memset(&attr, 0, sizeof(attr));
     attr.name = "storageQueue";
@@ -169,12 +186,16 @@ StorageTask_Stats_t StorageTask_GetStats(void)
 
 /* Cria cada diretorio do caminho (menos o nome do arquivo em si). FatFS
  * nao cria subdiretorios recursivamente — precisa ir nivel por nivel.
- * f_mkdir() devolvendo FR_EXIST e' esperado e ignorado. */
+ * f_mkdir() devolvendo FR_EXIST e' esperado e ignorado; qualquer outro erro
+ * fica registrado em s_stats (ver storage_task.h) — antes era descartado
+ * (void), escondendo uma falha aqui atras de um FR_INT_ERR aparentemente
+ * vindo so' do f_open() seguinte. */
 static void ensure_dir_path(const char *file_path)
 {
     char buf[STORAGE_FORMAT_PATH_MAX];
     size_t len = strlen(file_path);
     size_t i;
+    FRESULT fr;
 
     if (len >= sizeof(buf)) { return; }
     strcpy(buf, file_path);
@@ -182,41 +203,74 @@ static void ensure_dir_path(const char *file_path)
     for (i = 1u; i < len; i++) {
         if (buf[i] == '/') {
             buf[i] = '\0';
-            (void)f_mkdir(buf);
+            fr = f_mkdir(buf);
+            if ((fr != FR_OK) && (fr != FR_EXIST)) {
+                s_stats.last_write_step = 0u;
+                s_stats.last_write_fresult = (uint8_t)fr;
+            }
             buf[i] = '/';
         }
     }
 }
 
 /* Abre em modo "append" (cria se nao existir, posiciona no fim), escreve
- * a linha + '\n', fecha. f_sync() nao e' necessario aqui porque f_close()
- * ja' sincroniza o diretorio/FAT — mantido simples; o prompt do projeto
- * pede f_sync periodico para o buffer de ENSAIO em RAM especificamente
- * (curva de pressao amostrada), nao para cada linha de log — isso ainda
- * nao esta' implementado (ver nota no fim do arquivo). */
+ * a linha + '\n', fecha.
+ *
+ * Achado em bancada (2026-10): f_close() (ff.c) faz f_sync() ANTES de
+ * liberar o lock do arquivo (dec_lock so' roda se f_sync()==FR_OK) — se o
+ * sync (gravacao da entrada de diretorio/tamanho do arquivo) falhar,
+ * f_close() retorna erro E o lock fica preso, travando a PROXIMA abertura
+ * do mesmo arquivo com FR_LOCKED. O retorno de f_close() estava sendo
+ * descartado aqui ((void)f_close(...)) — uma falha de sync silenciosa
+ * contava como sucesso (messages_processed++) mesmo a linha nunca tendo
+ * sido persistida de verdade (arquivo aparecia vazio no cartao). Agora o
+ * retorno de f_close() e' conferido e tratado como erro real. */
 static int append_line(const char *path, const char *line)
 {
-    FIL file;
+    FIL *file = &s_append_file;
     FRESULT fr;
+    FRESULT fr_close;
     UINT written;
     size_t len = strlen(line);
 
     ensure_dir_path(path);
 
-    fr = f_open(&file, path, FA_WRITE | FA_OPEN_APPEND);
+    fr = f_open(file, path, FA_WRITE | FA_OPEN_APPEND);
     if (fr != FR_OK) {
+        s_stats.last_write_step = 1u;
+        s_stats.last_write_fresult = (uint8_t)fr;
         return -1;
     }
 
-    fr = f_write(&file, line, (UINT)len, &written);
-    if ((fr != FR_OK) || (written != (UINT)len)) {
-        (void)f_close(&file);
+    fr = f_write(file, line, (UINT)len, &written);
+    if (fr != FR_OK) {
+        s_stats.last_write_step = 2u;
+        s_stats.last_write_fresult = (uint8_t)fr;
+        (void)f_close(file);
         return -1;
     }
-    fr = f_write(&file, "\n", 1u, &written);
-    (void)f_close(&file);
+    if (written != (UINT)len) {
+        s_stats.last_write_step = 4u;
+        s_stats.last_write_fresult = 0xFFu;
+        (void)f_close(file);
+        return -1;
+    }
+    fr = f_write(file, "\n", 1u, &written);
+    if (fr != FR_OK) {
+        s_stats.last_write_step = 3u;
+        s_stats.last_write_fresult = (uint8_t)fr;
+        (void)f_close(file);
+        return -1;
+    }
 
-    return (fr == FR_OK) ? 0 : -1;
+    fr_close = f_close(file);
+    if (fr_close != FR_OK) {
+        s_stats.last_write_step = 5u;
+        s_stats.last_write_fresult = (uint8_t)fr_close;
+        return -1;
+    }
+
+    return 0;
 }
 
 static int process_log_message(const StorageTask_QueueMsg_t *msg)
@@ -311,12 +365,26 @@ void StorageTask_Run(void)
     StorageTask_QueueMsg_t msg;
 
     for (;;) {
+        /* osThreadGetStackSpace() reporta a MINIMA folga ja' observada (high
+         * water mark), nao a atual — monotonicamente decrescente, serve
+         * como diagnostico permanente (ver storage_task.h). */
+        s_stats.storage_task_stack_free_bytes = osThreadGetStackSpace(osThreadGetId());
+
         if (s_stats.sd_mounted == 0u) {
             if (remount_wait_ms == 0u) {
+                FRESULT fr;
+
+                /* Diagnostico (ver nota em storage_task.h): le a deteccao
+                 * fisica direto, fora do f_mount, para separar "nao
+                 * detectou o cartao" de "detectou mas nao montou". */
+                s_stats.card_detected = (BSP_SD_IsDetected() == SD_PRESENT) ? 1u : 0u;
+
                 /* opt=1: forca montagem/deteccao agora, nao espera o 1o
                  * f_open() (quero saber do cartao ausente/corrompido logo,
                  * nao so' quando alguem tentar gravar). */
-                if (f_mount(&SDFatFS, SDPath, 1) == FR_OK) {
+                fr = f_mount(&SDFatFS, SDPath, 1);
+                s_stats.last_mount_fresult = (uint8_t)fr;
+                if (fr == FR_OK) {
                     s_stats.sd_mounted = 1u;
                 } else {
                     s_stats.remount_attempts++;

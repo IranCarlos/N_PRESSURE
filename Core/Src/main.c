@@ -112,7 +112,7 @@ typedef StaticTask_t osStaticThreadDef_t;
 // checklist de bancada em 00-auditoria.md antes de habilitar. Diagnostico:
 // g_storage_stats (Live Watch) — sd_mounted, messages_processed,
 // write_errors, etc.
-#define BRINGUP_ENABLE_STORAGE      (0)
+#define BRINGUP_ENABLE_STORAGE      (1)
 
 #define TASK_ENCODER_PERIOD_MS      (1u)
 #define TASK_CONTROL_PERIOD_MS      (1u)
@@ -247,7 +247,7 @@ const osThreadAttr_t usbProtoTask_attributes = {
 };
 /* Definitions for storageTask */
 osThreadId_t storageTaskHandle;
-uint32_t storageTaskBuffer[ 512 ];
+uint32_t storageTaskBuffer[ 1024 ];
 osStaticThreadDef_t storageTaskControlBlock;
 const osThreadAttr_t storageTask_attributes = {
   .name = "storageTask",
@@ -371,7 +371,6 @@ static void format_1dp(float v, char *buf, size_t n) {
 #endif
 #if (APP_MODE_BRINGUP && BRINGUP_ENABLE_STORAGE)
 StorageTask_Stats_t g_storage_stats;
-static uint32_t s_storage_test_seq;
 #endif
 volatile uint32_t g_supervisor_last_mask;
 volatile uint32_t g_supervisor_missed_windows;
@@ -472,9 +471,6 @@ int main(void)
   /* Enable I-Cache---------------------------------------------------------*/
   SCB_EnableICache();
 
-  /* Enable D-Cache---------------------------------------------------------*/
-  SCB_EnableDCache();
-
   /* MCU Configuration--------------------------------------------------------*/
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
@@ -565,10 +561,6 @@ int main(void)
     Pedal_Init(&htim4); // nao chamado em nenhum outro lugar do bring-up
     ControlLoop_Init(&g_bringup_sys_cfg, &htim3, g_control_runtime, &valve_pins);
   }
-#endif
-
-#if BRINGUP_ENABLE_STORAGE
-  StorageTask_InitQueue(); // cria a fila; storageTask monta o SD sozinha ao rodar
 #endif
 
 #if BRINGUP_ENABLE_ACTUATORS
@@ -746,7 +738,18 @@ int main(void)
   /* USER CODE END RTOS_TIMERS */
 
   /* USER CODE BEGIN RTOS_QUEUES */
-  /* add queues, ... */
+#if BRINGUP_ENABLE_STORAGE
+  // BUG corrigido (2026-10): esta chamada estava la' em cima, dentro de
+  // USER CODE 2 — rodava ANTES de osKernelInitialize() (linha acima).
+  // osMessageQueueNew() chamando xQueueCreateStatic() antes do kernel
+  // CMSIS-RTOS2 estar inicializado deixou algo em estado invalido (a
+  // causa exata nao foi isolada) que travava HAL_Delay() mais adiante,
+  // dentro de ST7789_Init() — nunca mais retornava de HAL_GetTick()
+  // (TIM6 parou de incrementar uwTick). Aqui e' o lugar certo: depois de
+  // osKernelInitialize(), antes dos osThreadNew() — mesmo marcador que o
+  // CubeMX ja' reserva para filas (USER CODE BEGIN/END RTOS_QUEUES).
+  StorageTask_InitQueue(); // cria a fila; storageTask monta o SD sozinha ao rodar
+#endif
   /* USER CODE END RTOS_QUEUES */
 
   /* Create the thread(s) */
@@ -838,7 +841,7 @@ void SystemClock_Config(void)
   RCC_OscInitStruct.PLL.PLLM = 2;
   RCC_OscInitStruct.PLL.PLLN = 32;
   RCC_OscInitStruct.PLL.PLLP = 1;
-  RCC_OscInitStruct.PLL.PLLQ = 2;
+  RCC_OscInitStruct.PLL.PLLQ = 20;
   RCC_OscInitStruct.PLL.PLLR = 2;
   RCC_OscInitStruct.PLL.PLLRGE = RCC_PLL1VCIRANGE_3;
   RCC_OscInitStruct.PLL.PLLVCOSEL = RCC_PLL1VCOWIDE;
@@ -1113,10 +1116,10 @@ static void MX_SDMMC1_SD_Init(void)
   /* USER CODE END SDMMC1_Init 1 */
   hsd1.Instance = SDMMC1;
   hsd1.Init.ClockEdge = SDMMC_CLOCK_EDGE_RISING;
-  hsd1.Init.ClockPowerSave = SDMMC_CLOCK_POWER_SAVE_ENABLE;
+  hsd1.Init.ClockPowerSave = SDMMC_CLOCK_POWER_SAVE_DISABLE;
   hsd1.Init.BusWide = SDMMC_BUS_WIDE_4B;
   hsd1.Init.HardwareFlowControl = SDMMC_HARDWARE_FLOW_CONTROL_DISABLE;
-  hsd1.Init.ClockDiv = 5;
+  hsd1.Init.ClockDiv = 0;
   if (HAL_SD_Init(&hsd1) != HAL_OK)
   {
     Error_Handler();
@@ -1838,47 +1841,17 @@ void StartAppTask(void *argument)
     }
   }
 #endif
-#if BRINGUP_ENABLE_STORAGE
-  uint32_t storage_test_ms = 0u;
-#endif
   for(;;)
   {
 #if !APP_MODE_BRINGUP
     HMI_Update();
 #endif
 #if BRINGUP_ENABLE_STORAGE
-    // Exercita fila -> gravacao -> hash encadeado sem depender do ensaio
-    // completo: 1 evento de teste a cada ~3 s, mensagem crescente (da'
-    // pra' conferir a sequencia/encadeamento abrindo o arquivo no PC).
-    storage_test_ms += TASK_HMI_PERIOD_MS;
-    if (storage_test_ms >= 3000u) {
-      RTC_TimeTypeDef rtc_time;
-      RTC_DateTypeDef rtc_date;
-      StorageFormat_LogEntry_t entry;
-      char msg[48];
-
-      storage_test_ms = 0u;
-      (void)HAL_RTC_GetTime(&hrtc, &rtc_time, RTC_FORMAT_BIN);
-      (void)HAL_RTC_GetDate(&hrtc, &rtc_date, RTC_FORMAT_BIN);
-
-      memset(&entry, 0, sizeof(entry));
-      entry.datetime.year = (uint16_t)(2000 + rtc_date.Year);
-      entry.datetime.month = rtc_date.Month;
-      entry.datetime.day = rtc_date.Date;
-      entry.datetime.hour = rtc_time.Hours;
-      entry.datetime.minute = rtc_time.Minutes;
-      entry.datetime.second = rtc_time.Seconds;
-      entry.tz_offset_hours = -3; // America/Sao_Paulo; sem suporte a horario de verao aqui
-      entry.seq = s_storage_test_seq++;
-      entry.code = "";
-      entry.state_name = "BRINGUP";
-      entry.pressure_mmhg = 0.0f;
-      snprintf(msg, sizeof(msg), "Teste de bancada #%lu", (unsigned long)entry.seq);
-      entry.message = msg;
-
-      (void)StorageTask_LogEvent(&entry);
-      g_storage_stats = StorageTask_GetStats();
-    }
+    // g_storage_stats fica disponivel no Live Watch para bancada (campos
+    // documentados em storage_task.h) enquanto a app real (producao) ainda
+    // nao chama StorageTask_Log*()/SubmitTestRecord() a partir do ciclo de
+    // ensaio de verdade (Fase 6+).
+    g_storage_stats = StorageTask_GetStats();
 #endif
     Supervisor_CheckIn(SUPERVISOR_TASK_APP);
     osDelay(TASK_HMI_PERIOD_MS);

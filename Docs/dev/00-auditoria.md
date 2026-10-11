@@ -796,3 +796,95 @@ bloqueiam decisões de firmware:
   amostrada; `f_sync` periodico (so' sincroniza no `f_close` de cada linha); wiring de
   `StorageTask_Log*()` em pontos reais do sistema (Fault_Manager, Control_Loop via appTask, EEPROM —
   nenhum deles enfileira nada ainda, so' o teste de bancada acima).
+
+## Fase 5.4 (bancada) — 1a vez com SDMMC real: 3 bugs de DMA/memoria encadeados (2026-10-11/12)
+
+Primeira sessao de bancada do `storage_task`. O cartao nao montava, depois montava mas nao
+escrevia, depois escrevia "com sucesso" mas o arquivo ficava vazio — tres sintomas, tres causas
+raiz DIFERENTES, todas da mesma familia (buffer usado como alvo de DMA em memoria que a DMA/IDMA
+nao alcanca). Fixes aplicados nesta ordem:
+
+1. **`f_mount()` falhava com `FR_DISK_ERR`**: `FATFS/App/fatfs.c` (gerado, SEM marcador `USER CODE`
+   nas linhas `FATFS SDFatFS;`/`FIL SDFile;`) declara esses globais como `.bss` simples ⇒
+   `DTCMRAM` por padrao no linker script. A IDMA interna do SDMMC1 e' um mestre de barramento na
+   matriz AXI, igual DMA1/DMA2 — NAO alcanca DTCM (mesmo motivo do `.dma_buffer` ja' existente para
+   LVGL/ADC). `fs->win` (buffer de setor do FatFS, dentro de `SDFatFS`) e' o alvo da 1a leitura do
+   boot sector em `f_mount()`. **Fix**: nova secao `.fatfs_dma_buffer` em `STM32H723xG_flash.ld`,
+   ANTES de `.bss` no script, capturando `*(.bss.SDFatFS)`/`*(.bss.SDFile)` (nomes de secao
+   individuais por causa de `-fdata-sections`, ja' ligado no projeto) e mapeando para `RAM_D1` — sem
+   tocar nos arquivos gerados. **Efeito colateral**: CMake nao religava sozinho quando so' o `.ld`
+   mudava (`LINK_DEPENDS` nao estava setado) — adicionado em `CMakeLists.txt` (arquivo raiz, nunca
+   regenerado pelo CubeMX, comentario explica o "generated only once" no topo do arquivo).
+2. **Passou a montar (`FR_OK`) mas ficava `FR_NO_FILESYSTEM`**: D-Cache do Cortex-M7 habilitado
+   (`SCB_EnableDCache()`) + `RAM_D1` cacheavel + `sd_diskio.c` com manutencao de cache DESLIGADA
+   (`ENABLE_SD_DMA_CACHE_MAINTENANCE` comentado no template) — o core lia copia obsoleta de
+   `fs->win` logo apos a IDMA escrever dados frescos la'. **Fix inicial**: habilitar essa define
+   (USER CODE, sobrevive a regeneracao). **Depois revertido** (ver item 6) — o usuario ja' tinha
+   passado por um caso parecido em outro projeto e resolveu so' desabilitando D-Cache de vez
+   (`SCB_EnableDCache()` comentado em `main.c`); reabilitar D-Cache foi testado de novo nesta sessao
+   e NAO funcionou — D-Cache fica desabilitado neste projeto por ora, causa raiz exata nao
+   totalmente explicada (possivelmente MPU_Config()/regiao de RAM_D1 sem atributo cacheavel
+   configurado corretamente para coerencia total). **Pendente**: investigar reabilitar D-Cache
+   corretamente (MPU + cache maintenance) quando performance de renderizacao exigir.
+3. **`SD_TIMEOUT` (sd_diskio.c) 30s de busy-wait sem `osDelay`**: com `storageTask` acima de
+   `uiTask` em prioridade (por design), um cartao removido no meio de uma escrita travava a IHM por
+   ate' 30s (o escalonador nunca da' CPU pra' tarefa de prioridade mais baixa enquanto a de cima
+   gira em busy-wait). **Fix**: `SD_TIMEOUT` redefinido para 1s (USER CODE, `beforeFunctionSection`,
+   depois da definicao original — `#undef`+`#define`, unica forma de sobrepor um `#define` sem
+   marcador proprio ao redor dele).
+4. **Falso-positivo investigado e descartado — `ClockDiv` do SDMMC1**: ao tentar isolar o problema
+   acima do SD_TIMEOUT, cheguei a reverter `SDMMC1.ClockDiv` de volta a 5 (20MHz) achando que
+   `ClockDiv=0` (bypass) estava aplicando 200MHz direto no barramento do cartao — **errado**: o
+   usuario ja' tinha configurado `RCC.SDMMCFreq_Value=20000000` direto no Clock Configuration, entao
+   `ClockDiv=0` (bypass) ja' dava exatamente 20MHz, config deliberada e correta. Revertido de volta.
+   Licao: conferir o `RCC.SDMMCFreq_Value` no `.ioc` antes de mexer no `ClockDiv` isoladamente.
+5. **Falso-positivo investigado e descartado — `_FS_LOCK`**: `f_open()` retornando `FR_INT_ERR`
+   (tabela de locks do FatFS, `ffconf.h` `_FS_LOCK=2`) parecia apontar para a tabela esgotada;
+   aumentar para 4 nao resolveu sozinho (a causa real era o item 6) — reusuario reverteu para 2 via
+   CubeMX e ficou assim, sem necessidade do aumento.
+6. **"Sucesso" falso + `FR_LOCKED` alternado — a causa raiz real**: duas descobertas que se
+   encadeiam:
+   - `append_line()` (`storage_task.c`) descartava o retorno de `f_close()` (`(void)f_close(...)`)
+     — `f_close()` faz `f_sync()` (grava a entrada de diretorio/tamanho do arquivo) ANTES de
+     liberar o lock do arquivo (`ff.c`: `dec_lock()` so' roda se `f_sync()==FR_OK`); uma falha de
+     sync silenciosa contava como sucesso (`messages_processed++`) e deixava o lock PRESO, travando
+     a proxima abertura do MESMO arquivo com `FR_LOCKED`. Corrigido: retorno de `f_close()` agora
+     conferido, erro real (`last_write_step=5`).
+   - Com o retorno conferido, ficou claro que `f_sync()` sempre falhava com `FR_DISK_ERR` — causa:
+     `_FS_TINY=0` (`ffconf.h`) da' a cada `FIL` aberto um buffer de setor PROPRIO (`fp->buf[512]`),
+     usado por `f_write()` para escritas parciais e mandado ao cartao via DMA dentro de
+     `f_sync()`/`f_close()` (`disk_write(fs->drv, fp->buf, ...)`, `ff.c`). `append_line()` declarava
+     `FIL file;` como variavel LOCAL (pilha da `storageTask` = DTCM) — mesmo problema do item 1,
+     agora no objeto `FIL`. `f_write()` "funcionava" sempre (so' copia pro buffer, sem DMA); so' no
+     `f_sync()` (1o DMA de verdade deste `FIL`) e' que falhava. **Fix**: `FIL` movido para
+     `static ... DMA_BUFFER` (um unico objeto reaproveitado — `storageTask` so' abre um arquivo por
+     vez, serial). Confirmado via `nm` (`0x24003xxx`, RAM_D1). Varredura no resto do projeto: nenhum
+     outro `FIL`/`DIR` toca o cartao (driver de FS do LVGL existe mas `LV_USE_FS_FATFS=0`).
+7. **HardFault separado em `disp_flush()` (display, nao storage)**: apos os fixes acima, com o
+   sistema sob mais carga (SD + render concorrentes), `uiTask` estourou pilha (`r12=0xA5A5A5A5`,
+   assinatura ja' conhecida desta sessao) dentro de `SCB_CleanDCache_by_Addr()` chamada em
+   `lv_port_disp.c`. **Fix**: `uiTask` 1024 -> 2048 palavras de pilha (CubeMX, FREERTOS -> Tasks).
+
+**Resultado final confirmado em bancada**: cartao monta, `/logs/events/AAAA-MM.log` grava linhas
+reais com encadeamento de hash correto (`prev` de cada linha bate com o `hash` da anterior,
+primeira linha referencia o genesis de 64 zeros).
+
+**Limpeza pos-validacao**: removido da `appTask` o bloco de teste periodico ("Teste de bancada
+#N", a cada 3s) que so' existia para exercitar fila->gravacao->hash sem depender do ensaio
+completo — `g_storage_stats` continua atualizado no loop (diagnostico permanente de bancada, nao
+e' teste). `BRINGUP_ENABLE_STORAGE` fica `1` (storage validado, mesmo padrao das outras flags de
+bring-up ja' confirmadas).
+
+**Pendente, achado nesta sessao mas NAO corrigido (fora de escopo, mexe com timing de
+atuador/ADC — precisa validacao de bancada dedicada)**: TIM3 (PWM da bomba) e TIM15 (gatilho do
+ADC) ainda estao com os valores da era ~275MHz (TIM3 Period=13749, TIM15 Prescaler=274), nao
+retunados para o clock de 400MHz atual (clock timer = 200MHz). Valores corretos para as mesmas
+frequencias-alvo (20kHz/1kHz): TIM3 Period=9999 (Prescaler=0 mantido), TIM15 Prescaler=199
+(Period=999 mantido). Uma tentativa anterior de aplicar isso via CubeMX nao "pegou" (motivo nao
+investigado). Bench-verificar frequencia real com osciloscopio antes/depois de aplicar.
+
+**Decisao permanente deste projeto**: clock do sistema fica em **400MHz** (nao 550MHz, que era o
+alvo original) — mais estavel neste hardware especifico ao longo de toda a sessao de depuracao
+(HardFaults, SDMMC/PLL2 side-effects ao mirar 550MHz). D-Cache do Cortex-M7 fica **desabilitado**
+(`SCB_EnableDCache()` comentado em `main.c`) — reabilitar causa HardFault em `disp_flush()`, ja'
+tentado duas vezes nesta sessao.
