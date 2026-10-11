@@ -585,3 +585,23 @@ bloqueiam decisões de firmware:
   Desacoplar isso exigiria editar `SystemClock_Config()` fora de marcador USER CODE (sera' sobrescrito
   na proxima regeneracao do CubeMX, que nao oferece opcao de separar os osciladores) — avaliar com o
   usuario se vale a pena antes da Fase 4 continuar, dado o que acabou de acontecer.
+
+## HUD de bancada no display (2026-10-11) — alternativa ao Live Watch
+
+- **Achado**: a extensao STM32 do VS Code em uso (`stm32-vscode-extension 3.11.0`,
+  `stm32cube-ide-debug-core 1.5.0`) tem Live Watch **somente leitura** — inspecionei o `.js`
+  compilado e o `.d.ts`: so' existe `addWatchExpr`/`removeWatchExpr`/`getCopyValue`, nenhum
+  `setValue`/`setVariable`. Nao e' configuracao de `launch.json`; a feature de editar
+  valor em execucao nao existe nesta versao (diferente do CubeIDE classico/Eclipse).
+  `-exec set var` pelo Debug Console tambem nao funcionou para o usuario (causa nao
+  diagnosticada — pode ser a mesma limitacao do adapter).
+- **Solucao**: HUD no proprio display (bring-up LVGL, `BRINGUP_ENABLE_CONTROL=1`), sem
+  depender do debugger. O arco ja usado no bring-up vira o knob do setpoint (0 a
+  `ARC_SETPOINT_MAX_MMHG`=150 mmHg, girar o encoder ajusta direto); labels mostram
+  estado (`s_state_names`), pressao atual/setpoint e ultimo erro (`E0xx`). Atualizado
+  so' pela uiTask (unico lugar que toca LVGL). Escrita em
+  `g_bringup_sys_cfg.current_setpoint_mmhg` sem lock (corrida benigna de 1 float entre
+  tarefas, nao e' dado de seguranca).
+- Formatacao de ponto flutuante feita a mao (`format_1dp`, so' `%d`/`%s`) porque o
+  projeto linka `--specs=nano.specs` sem `-u _printf_float` — `%f` em `snprintf`
+  silenciosamente nao funcionaria.

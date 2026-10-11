@@ -34,6 +34,7 @@
 #include "control_loop.h"
 #include "encoder.h"
 #include "pedal.h"
+#include <stdio.h>
 #include "hmi_ui.h"
 #include "hmi_encoder_group.h"
 #include "st7789.h"
@@ -327,6 +328,34 @@ SystemConfig_t   g_bringup_sys_cfg;
 SystemRuntime_t *g_control_runtime; // aponta para s_bringup_runtime (compartilhado com ADC_Acq)
 volatile uint32_t g_control_last_error;
 volatile uint32_t g_control_jitter_us;
+// HUD de bancada (display+encoder) para nao depender do Live Watch/Debug
+// Console (a extensao do VS Code usada neste projeto nao suporta editar
+// variavel: stm32cube-ide-debug-core 1.5.0 so' tem addWatchExpr/getCopyValue,
+// sem setValue). O arco ja usado no bring-up do LVGL vira o knob do setpoint
+// (girar o encoder = sobe/desce o setpoint, ate' ARC_SETPOINT_MAX_MMHG);
+// os labels abaixo mostram estado/pressao/erro. Atualizados so' pela uiTask
+// (unico lugar que toca LVGL, ja documentado nao-thread-safe).
+#define ARC_SETPOINT_MAX_MMHG (150)
+static lv_obj_t *s_ctrl_arc;
+static lv_obj_t *s_ctrl_label_state;
+static lv_obj_t *s_ctrl_label_pressure;
+static lv_obj_t *s_ctrl_label_error;
+static const char *const s_state_names[] = {
+    "BOOT", "IDLE", "INFLATING", "STABILIZING", "STABILIZED",
+    "DEFLATING", "LEAK_TEST", "CONFIG", "FAULT"
+};
+
+/** @brief 1 casa decimal sem usar %f (newlib-nano/--specs=nano.specs nao
+ *         linka printf_float por padrao neste projeto — ver cmake/gcc-arm-
+ *         none-eabi.cmake). So' %d/%s, funciona sem mudar o toolchain. */
+static void format_1dp(float v, char *buf, size_t n) {
+    uint8_t neg = (v < 0.0f) ? 1u : 0u;
+    float av = neg ? -v : v;
+    int whole = (int)av;
+    int frac = (int)(((av - (float)whole) * 10.0f) + 0.5f);
+    if (frac >= 10) { frac = 0; whole += 1; }
+    snprintf(buf, n, "%s%d.%d", neg ? "-" : "", whole, frac);
+}
 #endif
 volatile uint32_t g_supervisor_last_mask;
 volatile uint32_t g_supervisor_missed_windows;
@@ -582,8 +611,28 @@ int main(void)
 
     lv_obj_set_size(arc, 180, 180);
     lv_obj_align(arc, LV_ALIGN_CENTER, 0, 10);
+#if BRINGUP_ENABLE_CONTROL
+    // HUD de bancada: o arco vira o knob do setpoint (ver uiTask), em mmHg.
+    lv_label_set_text(title, "Fase 4: ensaio de controle");
+    lv_arc_set_range(arc, 0, ARC_SETPOINT_MAX_MMHG);
+    lv_arc_set_value(arc, (int16_t)g_bringup_sys_cfg.current_setpoint_mmhg);
+    s_ctrl_arc = arc;
+
+    s_ctrl_label_state = lv_label_create(scr);
+    lv_obj_set_style_text_color(s_ctrl_label_state, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(s_ctrl_label_state, LV_ALIGN_TOP_MID, 0, 30);
+
+    s_ctrl_label_pressure = lv_label_create(scr);
+    lv_obj_set_style_text_color(s_ctrl_label_pressure, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_align(s_ctrl_label_pressure, LV_ALIGN_BOTTOM_MID, 0, -30);
+
+    s_ctrl_label_error = lv_label_create(scr);
+    lv_obj_set_style_text_color(s_ctrl_label_error, lv_color_hex(0xFF4040), 0);
+    lv_obj_align(s_ctrl_label_error, LV_ALIGN_BOTTOM_MID, 0, -10);
+#else
     lv_arc_set_range(arc, 0, 50);
     lv_arc_set_value(arc, 25);
+#endif
 
     HMI_EncoderGroup_Init();
     HMI_EncoderGroup_BindIndev(lv_port_indev_get_default());
@@ -744,14 +793,14 @@ void SystemClock_Config(void)
 
   /** Configure the main internal regulator output voltage
   */
-  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE1);
+  __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
 
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
   /** Configure LSE Drive Capability
   */
   HAL_PWR_EnableBkUpAccess();
-  __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_LOW);
+  __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_MEDIUMHIGH);
 
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
@@ -797,14 +846,6 @@ void SystemClock_Config(void)
   {
     Error_Handler();
   }
-
-  /** Enables the Clock Security System
-  */
-  HAL_RCC_EnableCSS();
-
-  /** Enables the Clock Security System
-  */
-  HAL_RCCEx_EnableLSECSS();
 }
 
 /**
@@ -1862,6 +1903,41 @@ void StartUiTask(void *argument)
       mem_probe_ms = 0u;
       lv_mem_monitor(&g_lv_mem); // na propria uiTask: o LVGL nao e' thread-safe
     }
+
+#if BRINGUP_ENABLE_CONTROL
+    // HUD de bancada (ver globais acima, USER CODE 2): o arco e' o knob do
+    // setpoint, os labels mostram estado/pressao/erro. So' esta tarefa toca
+    // LVGL; escreve em g_bringup_sys_cfg.current_setpoint_mmhg (lido pela
+    // controlTask no proximo ciclo — corrida benigna de um float, aceitavel
+    // aqui, nao e' dado de seguranca).
+    {
+      int16_t setpoint_knob = lv_arc_get_value(s_ctrl_arc);
+      char line[48];
+      uint32_t state_idx = (uint32_t)g_control_runtime->state;
+
+      g_bringup_sys_cfg.current_setpoint_mmhg = (float)setpoint_knob;
+
+      {
+        char pres_str[16];
+        char sp_str[16];
+        format_1dp(g_control_runtime->pressure_display, pres_str, sizeof(pres_str));
+        format_1dp(g_control_runtime->setpoint_mmhg, sp_str, sizeof(sp_str));
+        snprintf(line, sizeof(line), "%s",
+                (state_idx < (sizeof(s_state_names) / sizeof(s_state_names[0])))
+                    ? s_state_names[state_idx] : "?");
+        lv_label_set_text(s_ctrl_label_state, line);
+        snprintf(line, sizeof(line), "%s / %s mmHg", pres_str, sp_str);
+        lv_label_set_text(s_ctrl_label_pressure, line);
+      }
+
+      if (g_control_last_error != 0u) {
+        snprintf(line, sizeof(line), "ERRO E%03u", (unsigned)g_control_last_error);
+      } else {
+        snprintf(line, sizeof(line), " ");
+      }
+      lv_label_set_text(s_ctrl_label_error, line);
+    }
+#endif
 #endif
     osDelay(TASK_LVGL_HANDLER_PERIOD_MS);
   }
