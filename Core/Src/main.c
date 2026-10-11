@@ -1960,6 +1960,36 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 void Error_Handler(void)
 {
   /* USER CODE BEGIN Error_Handler_Debug */
+  /* Error_Handler() e' chamado por QUALQUER MX_*_Init()/HAL_*Init() que
+   * falhe em main() — inclusive ANTES de MX_GPIO_Init() rodar (ex.:
+   * SystemClock_Config() travando porque o LSE nao partiu a tempo, 2026-10:
+   * bomba ficou ligada direto porque o pino nunca saiu do estado de reset,
+   * flutuante — mesmo achado da bancada de atuadores da Fase 2, so' que
+   * permanente desta vez porque o while(1) abaixo nunca devolve o controle).
+   * Forca bomba off + valvulas abertas (NA) AQUI, direto, sem depender de
+   * nenhum init anterior ja ter rodado — so' entao trava. Nao resolve a
+   * causa raiz de cada chamador, mas garante que falhar bem cedo no boot
+   * nunca deixa o atuador em estado indefinido. */
+  __HAL_RCC_GPIOC_CLK_ENABLE();
+  __HAL_RCC_GPIOD_CLK_ENABLE();
+
+  HAL_GPIO_WritePin(PUMP_CTRL_GPIO_Port, PUMP_CTRL_Pin, GPIO_PIN_RESET); // bomba off (PWM LOW = 0%)
+  HAL_GPIO_WritePin(VALVE_1_GPIO_Port, VALVE_1_Pin, GPIO_PIN_RESET);     // valvulas NA: LOW = aberta
+  HAL_GPIO_WritePin(VALVE_2_GPIO_Port, VALVE_2_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(VALVE_3_GPIO_Port, VALVE_3_Pin, GPIO_PIN_RESET);
+  {
+    GPIO_InitTypeDef gpio_init = {0};
+    gpio_init.Mode = GPIO_MODE_OUTPUT_PP;
+    gpio_init.Pull = GPIO_NOPULL;
+    gpio_init.Speed = GPIO_SPEED_FREQ_LOW;
+
+    gpio_init.Pin = PUMP_CTRL_Pin;
+    HAL_GPIO_Init(PUMP_CTRL_GPIO_Port, &gpio_init);
+
+    gpio_init.Pin = VALVE_1_Pin | VALVE_2_Pin | VALVE_3_Pin; // mesma porta (GPIOD)
+    HAL_GPIO_Init(VALVE_1_GPIO_Port, &gpio_init);
+  }
+
   /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)

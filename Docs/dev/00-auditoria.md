@@ -559,3 +559,29 @@ bloqueiam decisões de firmware:
   6. Registrar overshoot, tempo ao setpoint e `g_control_jitter_us` em cada degrau — isso vira o
      proximo ajuste do simulador e, depois, da EEPROM.
 - Build Debug/Release limpo com a flag em 0 (default) e em 1 (testado so' por compilacao).
+
+## Incidente: boot travado em SystemClock_Config, bomba ligada sem parar (2026-10-11)
+
+- **O que aconteceu**: apos a correcao do RTC (LSE, Fase 2.3), um power-on frio real (nao so' reset
+  de debugger) comecou a falhar em `HAL_RCC_OscConfig()` (LSE nao fica pronto dentro do timeout de
+  5000 ms configurado) — comecou intermitente, depois passou a falhar sempre. Como isso acontece
+  ANTES de `MX_GPIO_Init()` rodar, o pino da bomba (PC6) nunca e' configurado e fica no estado de
+  reset (alta impedancia) — igual ao achado de reset da Fase 2, so' que permanente, porque
+  `Error_Handler()` trava para sempre em `while(1)` sem IWDG ativo ainda (so' inicia depois, em
+  `MX_IWDG1_Init()`). **Bomba ficou ligada continuamente, sem controle.** Usuario cortou a
+  alimentacao fisicamente.
+- **Corrigido (defesa em profundidade, generica)**: `Error_Handler()` agora forca bomba off e
+  V1/V2/V3 abertas (GPIO direto, sem depender de nenhum init anterior ja ter rodado) ANTES de travar
+  — cobre qualquer chamador futuro de `Error_Handler()`, nao so' este caso. Dentro de `USER CODE
+  BEGIN/END Error_Handler_Debug`, sobrevive a regeneracao do CubeMX.
+- **Causa raiz (hardware, pendente)**: capacidade de drive do LSE ficou em `RCC_LSEDRIVE_LOW`
+  (minimo) quando o CubeMX gerou a config do RTC. Instrucao dada ao usuario: RCC -> LSE Drive
+  Capability -> Medium Low (ou mais, se persistir). O padrao intermitente->constante tambem pode
+  indicar problema fisico no cristal/capacitores de carga — avaliar se o drive mais forte nao
+  resolver.
+- **Risco estrutural ainda aberto**: `SystemClock_Config()` gerado pelo CubeMX configura HSE+HSI+
+  HSI48+LSI+LSE numa unica chamada a `HAL_RCC_OscConfig()` — uma falha do LSE (RTC) bloqueia TODO o
+  boot, inclusive HSE/PLL, GPIO e watchdog, que nao tem nenhuma relacao funcional com o RTC.
+  Desacoplar isso exigiria editar `SystemClock_Config()` fora de marcador USER CODE (sera' sobrescrito
+  na proxima regeneracao do CubeMX, que nao oferece opcao de separar os osciladores) — avaliar com o
+  usuario se vale a pena antes da Fase 4 continuar, dado o que acabou de acontecer.
