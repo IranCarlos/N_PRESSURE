@@ -21,4 +21,7 @@ run test_rtc_validity test/host/test_rtc_validity.c Core/Services/Rtc_Service/Sr
 run test_control_core test/host/test_control_core.c Core/Services/Control_Core/Src/control_core.c test/host/sim_plant.c
 run test_audit_trail test/host/test_audit_trail.c Core/Services/Audit_Trail/Src/sha256.c \
     Core/Services/Audit_Trail/Src/audit_chain.c Core/Services/Audit_Trail/Src/cycle_record.c
+run test_storage_format test/host/test_storage_format.c Core/Services/Audit_Trail/Src/sha256.c \
+    Core/Services/Audit_Trail/Src/audit_chain.c Core/Services/Audit_Trail/Src/cycle_record.c \
+    Core/Services/Audit_Trail/Src/storage_format.c
 exit $fail

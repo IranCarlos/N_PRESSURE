@@ -743,3 +743,21 @@ bloqueiam decisões de firmware:
   `ccsbcs.c` (tabela de code page, exigido pelo LFN com `LFN_UNICODE=0`/`CODE_PAGE=850`) adicionado
   ao `cmake/stm32cubemx/CMakeLists.txt`. Nada de supply/clock/outros modulos mudou. Build Debug/
   Release limpo. Nomes `T00000123.rec` (Apendice C) agora cabem.
+
+## Fase 5.3 — formatacao dos arquivos do SD (2026-10-11)
+
+- `Core/Services/Audit_Trail/storage_format.c` (C puro, testado no host): monta os caminhos e o
+  conteudo de `.rec`, `.csv` (so' o caminho — a curva de pressao amostrada em si fica para quando o
+  `storage_task` existir), `index.csv` e os 3 logs (`events`/`errors`/`audit`), seguindo o Apendice C
+  + `formato-logs.md`.
+- Decisoes de unificacao (documentadas em `storage_format.h`, revisar antes de ensaio real):
+  contador de 8 digitos (`T00000123`) adotado em todo lugar, nao so' no nome do arquivo; numeros com
+  PONTO decimal (nao virgula do exemplo PT-BR do documento-fonte); `index.csv` segue o Apendice C
+  literal (`;`-separado, com hash) — a "Exportação CSV" de `formato-logs.md` §5 e' um artefato
+  diferente (provavel Fase 7, ferramenta de PC), nao o que o firmware grava a cada ensaio.
+- Testado contra os 2 exemplos reais do documento-fonte (NC00 e NC05 — mesmos usados no
+  `cycle_record`) e contra o exemplo de linha de log do Apendice C (campos e encadeamento de hash).
+- Build Debug/Release limpo, cppcheck sem achados.
+- Pendente: `storage_task` de verdade (fila + FatFS), geracao do `.csv` da curva de pressao
+  amostrada, politica de cartao ausente/cheio (E005), rotacao mensal — precisa da bancada do
+  usuario com cartao SD.
