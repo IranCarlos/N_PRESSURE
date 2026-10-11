@@ -34,6 +34,7 @@
 #include "control_loop.h"
 #include "encoder.h"
 #include "pedal.h"
+#include "storage_task.h"
 #include <stdio.h>
 #include "hmi_ui.h"
 #include "hmi_encoder_group.h"
@@ -101,6 +102,17 @@ typedef StaticTask_t osStaticThreadDef_t;
 // NUNCA testado em hardware ainda — ver o aviso de bancada no bloco de
 // globais logo abaixo antes de habilitar.
 #define BRINGUP_ENABLE_CONTROL      (1)
+
+// 1 = storage_task de verdade (Fase 5): monta o cartao SD, processa a fila
+// (StorageTask_Log*/SubmitTestRecord) e grava nos arquivos do Apendice C.
+// NUNCA testado em hardware — primeira vez que este projeto escreve no
+// SD. Com a flag ligada, appTask tambem enfileira um evento de teste a
+// cada ~3 s (string crescente), so' para exercitar o caminho fila ->
+// gravacao -> hash encadeado sem depender do ensaio completo. Ver
+// checklist de bancada em 00-auditoria.md antes de habilitar. Diagnostico:
+// g_storage_stats (Live Watch) — sd_mounted, messages_processed,
+// write_errors, etc.
+#define BRINGUP_ENABLE_STORAGE      (0)
 
 #define TASK_ENCODER_PERIOD_MS      (1u)
 #define TASK_CONTROL_PERIOD_MS      (1u)
@@ -357,6 +369,10 @@ static void format_1dp(float v, char *buf, size_t n) {
     snprintf(buf, n, "%s%d.%d", neg ? "-" : "", whole, frac);
 }
 #endif
+#if (APP_MODE_BRINGUP && BRINGUP_ENABLE_STORAGE)
+StorageTask_Stats_t g_storage_stats;
+static uint32_t s_storage_test_seq;
+#endif
 volatile uint32_t g_supervisor_last_mask;
 volatile uint32_t g_supervisor_missed_windows;
 
@@ -549,6 +565,10 @@ int main(void)
     Pedal_Init(&htim4); // nao chamado em nenhum outro lugar do bring-up
     ControlLoop_Init(&g_bringup_sys_cfg, &htim3, g_control_runtime, &valve_pins);
   }
+#endif
+
+#if BRINGUP_ENABLE_STORAGE
+  StorageTask_InitQueue(); // cria a fila; storageTask monta o SD sozinha ao rodar
 #endif
 
 #if BRINGUP_ENABLE_ACTUATORS
@@ -1818,10 +1838,47 @@ void StartAppTask(void *argument)
     }
   }
 #endif
+#if BRINGUP_ENABLE_STORAGE
+  uint32_t storage_test_ms = 0u;
+#endif
   for(;;)
   {
 #if !APP_MODE_BRINGUP
     HMI_Update();
+#endif
+#if BRINGUP_ENABLE_STORAGE
+    // Exercita fila -> gravacao -> hash encadeado sem depender do ensaio
+    // completo: 1 evento de teste a cada ~3 s, mensagem crescente (da'
+    // pra' conferir a sequencia/encadeamento abrindo o arquivo no PC).
+    storage_test_ms += TASK_HMI_PERIOD_MS;
+    if (storage_test_ms >= 3000u) {
+      RTC_TimeTypeDef rtc_time;
+      RTC_DateTypeDef rtc_date;
+      StorageFormat_LogEntry_t entry;
+      char msg[48];
+
+      storage_test_ms = 0u;
+      (void)HAL_RTC_GetTime(&hrtc, &rtc_time, RTC_FORMAT_BIN);
+      (void)HAL_RTC_GetDate(&hrtc, &rtc_date, RTC_FORMAT_BIN);
+
+      memset(&entry, 0, sizeof(entry));
+      entry.datetime.year = (uint16_t)(2000 + rtc_date.Year);
+      entry.datetime.month = rtc_date.Month;
+      entry.datetime.day = rtc_date.Date;
+      entry.datetime.hour = rtc_time.Hours;
+      entry.datetime.minute = rtc_time.Minutes;
+      entry.datetime.second = rtc_time.Seconds;
+      entry.tz_offset_hours = -3; // America/Sao_Paulo; sem suporte a horario de verao aqui
+      entry.seq = s_storage_test_seq++;
+      entry.code = "";
+      entry.state_name = "BRINGUP";
+      entry.pressure_mmhg = 0.0f;
+      snprintf(msg, sizeof(msg), "Teste de bancada #%lu", (unsigned long)entry.seq);
+      entry.message = msg;
+
+      (void)StorageTask_LogEvent(&entry);
+      g_storage_stats = StorageTask_GetStats();
+    }
 #endif
     Supervisor_CheckIn(SUPERVISOR_TASK_APP);
     osDelay(TASK_HMI_PERIOD_MS);
@@ -1857,11 +1914,17 @@ void StartUsbProtoTask(void *argument)
 void StartStorageTask(void *argument)
 {
   /* USER CODE BEGIN StartStorageTask */
+#if BRINGUP_ENABLE_STORAGE
+  // StorageTask_Run() e' o loop (for(;;) — nunca retorna): monta o SD,
+  // tenta de novo periodicamente se falhar (E005), processa a fila.
+  StorageTask_Run();
+#else
   // Reservado para FatFS/log/ensaio (Fase 5). Nada ainda.
   for(;;)
   {
     osDelay(100);
   }
+#endif
   /* USER CODE END StartStorageTask */
 }
 

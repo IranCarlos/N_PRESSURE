@@ -761,3 +761,38 @@ bloqueiam decisões de firmware:
 - Pendente: `storage_task` de verdade (fila + FatFS), geracao do `.csv` da curva de pressao
   amostrada, politica de cartao ausente/cheio (E005), rotacao mensal — precisa da bancada do
   usuario com cartao SD.
+
+## Fase 5.4 — storage_task real (fila + FatFS), nunca testada em hardware (2026-10-11)
+
+- `Core/Services/Audit_Trail/storage_task.c`: fila estatica (`osMessageQueueNew` com `StaticQueue_t`,
+  profundidade 8 — DTCM ja' esta' ~85% usada, mantida modesta), API `StorageTask_Log{Event,Error,
+  Audit}()`/`SubmitTestRecord()` (copiam os dados para a mensagem, seguro usar buffer de pilha do
+  chamador), `StorageTask_Run()` (corpo da tarefa: monta o SD com `f_mount(..., 1)`, tenta de novo a
+  cada 2 s se falhar — E005, nunca trava; processa a fila com `osMessageQueueGet` com timeout de
+  200 ms, cria diretorios faltantes com `f_mkdir` nivel a nivel, grava em modo append).
+- Confirmado (nao e' pendencia): `_FS_REENTRANT=1` ja' tem os callbacks de sincronizacao
+  implementados (`syscall.c`, mutex/semaforo CMSIS-RTOS2 criado dentro do `f_mount()`).
+- **`BRINGUP_ENABLE_STORAGE`** (default 0, NUNCA testado em hardware): liga `StorageTask_Run()` de
+  verdade na `storageTask` e faz a `appTask` enfileirar 1 evento de teste a cada ~3 s (mensagem
+  numerada, timestamp do RTC) so' para exercitar fila -> gravacao -> hash encadeado, sem depender do
+  ensaio completo. Diagnostico: `g_storage_stats` (Live Watch) — `sd_mounted`,
+  `messages_processed`, `write_errors`, `remount_attempts`, etc.
+- **Custo de RAM**: com a flag ligada, DTCM sobe de 84,7% para 86,8% (+2,7 KB, a fila estatica) —
+  a folga ja' era pequena (achado antigo da Fase 1); acompanhar se mais filas/buffers forem somados.
+- **Checklist de bancada**:
+  1. Cartao SD formatado em FAT32, inserido.
+  2. Ligar `BRINGUP_ENABLE_STORAGE=1`, gravar.
+  3. Acompanhar `g_storage_stats.sd_mounted` (deve virar 1) e `messages_processed` subindo a cada
+     ~3 s.
+  4. Retirar o cartao, confirmar que o sistema NAO trava — `sd_mounted` deve voltar a 0,
+     `remount_attempts` subir, sem reset nem hang.
+  5. Reinserir o cartao, confirmar que `sd_mounted` volta a 1 sozinho (remount automatico) e a
+     gravacao continua.
+  6. Tirar o cartao do equipamento, ler no PC: `/logs/events/AAAA-MM.log` deve ter as linhas
+     numeradas, cada uma com `prev=`/`hash=` corretos (conferir manualmente ou com um script que
+     recalcula SHA-256 — ainda nao temos essa ferramenta de PC, Fase 7).
+- Pendente (fora do escopo desta versao): carregar o ultimo hash do mes anterior ao trocar de mes
+  (hoje sempre reinicia do genesis); buffer de ENSAIO em RAM + gerador do `.csv` da curva de pressao
+  amostrada; `f_sync` periodico (so' sincroniza no `f_close` de cada linha); wiring de
+  `StorageTask_Log*()` em pontos reais do sistema (Fault_Manager, Control_Loop via appTask, EEPROM —
+  nenhum deles enfileira nada ainda, so' o teste de bancada acima).
