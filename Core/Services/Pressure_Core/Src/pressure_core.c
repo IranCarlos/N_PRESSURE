@@ -85,10 +85,21 @@ void PressureCore_ProcessBlock(PressureCore_t *pc, const uint16_t *raw,
     pc->raw_kpa = volts_to_kpa(pc->sensor_voltage);
 
     /* Baseline no valor bruto, para nao anular offset/escala da calibracao. */
+    if ((track_baseline == 0u) || (pc->raw_kpa >= pc->atmospheric_kpa)) {
+        pc->atm_following_down = 0u;
+    }
     if (track_baseline != 0u) {
         if (pc->atmospheric_valid == 0u) {
             pc->atmospheric_kpa = pc->raw_kpa;
             pc->atmospheric_valid = 1u;
+        } else if ((pc->raw_kpa < (pc->atmospheric_kpa - PRESSURE_ATM_DOWN_MARGIN_KPA)) ||
+                   ((pc->atm_following_down != 0u) && (pc->raw_kpa < pc->atmospheric_kpa))) {
+            /* Entra com a margem (ignora ruido) e so' sai ao alcancar a
+             * leitura — senao os ultimos 0,1 kPa ficariam para o tracking
+             * lento abaixo (~10 s). */
+            pc->atm_following_down = 1u;
+            pc->atmospheric_kpa +=
+                (pc->raw_kpa - pc->atmospheric_kpa) * PRESSURE_ATM_DOWN_ALPHA;
         } else if (fabsf(pc->raw_kpa - pc->atmospheric_kpa) <=
                    PRESSURE_ATM_TRACK_WINDOW_KPA) {
             pc->atmospheric_kpa +=

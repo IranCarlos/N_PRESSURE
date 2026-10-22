@@ -66,7 +66,7 @@ static const ControlCore_SafetyConfig_t s_control_safety = {
     .t_desinflar_max_ms = 15000u,
     .dp_vazamento_mmhg = 1.0f,
     .t_janela_ms = 5000u,
-    .p_segura_mmhg = 5.0f,
+    .p_segura_mmhg = 10.0f,
     .t_seguro_ms = 200u,
 };
 
@@ -397,6 +397,14 @@ uint32_t ControlLoop_GetMaxJitterCycles(void) {
 
 ControlCore_Error_t ControlLoop_GetLastError(void) {
     return s_control.cc.last_error;
+}
+
+const ControlCore_CycleStats_t* ControlLoop_GetCycleStats(void) {
+    return ControlCore_GetCycleStats(&s_control.cc);
+}
+
+const ControlCore_PidDiag_t* ControlLoop_GetPidDiag(void) {
+    return ControlCore_GetPidDiag(&s_control.cc);
 }
 
 void ControlLoop_SetSetpointMmHg(float setpoint_mmhg) {

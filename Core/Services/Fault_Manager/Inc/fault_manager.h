@@ -37,6 +37,11 @@ extern "C" {
  * (E009) do prompt de projeto).
  */
 
+/** @brief BKPxR usados pelo registro de fault (bit n = RTC->BKPnR: BKP0..BKP12).
+ *         Quem precisar resetar o dominio de backup deve preserva-los
+ *         (ver RtcService_ConfigureClock()). */
+#define FAULT_MANAGER_BKP_MASK (0x00001FFFu)
+
 /** @brief Snapshot de uma excecao de hard fault, tal como persistido nos BKPxR. */
 typedef struct {
     uint32_t r0;

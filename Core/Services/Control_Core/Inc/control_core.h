@@ -97,10 +97,43 @@ typedef struct {
     uint8_t  finalized;             /* 1 = ciclo completo, campos acima prontos para ler */
 } ControlCore_CycleStats_t;
 
+/*
+ * Diagnostico de bancada (2026-10, achado do usuario: "a bomba enche muito
+ * devagar e quase nunca chega ao setpoint, sempre fica abaixo"). Antes
+ * disto, nenhum termo interno do PID (P/I/D/FF, saida antes/depois do
+ * piso de partida CONTROL_CORE_PUMP_MIN_EFFECTIVE) era visivel fora de
+ * run_pid_iteration() — so' dava pra' ver o RESULTADO (pressure_display
+ * nunca alcan,ando o setpoint), nao a CAUSA (qual termo esta' segurando a
+ * saida baixa: Ki/i_max pequenos demais para vencer o "vazamento"/atrito
+ * do sistema real? out_max desproporcional ao fluxo real da bomba? o piso
+ * de 30% nao estava disparando por algum motivo?). Atualizado a cada
+ * chamada de run_pid_iteration() (INFLATING/STABILIZING); exposto via
+ * ControlCore_GetPidDiag()/ControlLoop_GetPidDiag() pro Live Watch —
+ * puramente informativo, NAO influencia a saida (sem isso, so' dava pra'
+ * tunar por tentativa cega: mudar ganho, reflashar, testar nehum resto).
+ */
+typedef struct {
+    float   error_mmhg;
+    float   p_term_kpa;
+    float   i_term_kpa;       /* cc->pid_integral, ja' com o clamp i_min/i_max aplicado */
+    float   d_term_kpa;
+    float   ff_term_kpa;
+    float   output_kpa;       /* soma P+I+D+FF, antes de dividir por out_max */
+    float   pump_power_pid;   /* output/out_max, ja' saturado em [0,1] — o que o PID "pediu" */
+    float   pump_power_final; /* depois do piso de partida e do alivio — o que REALMENTE foi pra' PWM */
+    uint8_t floor_applied;    /* 1 = CONTROL_CORE_PUMP_MIN_EFFECTIVE substituiu o valor do PID */
+    uint8_t relief_active;    /* 1 = valvula de alivio (V1) aberta neste passo */
+    uint8_t fast_approach;    /* 1 = aproximacao a potencia maxima (PID ainda nao assumiu) */
+    float   rise_rate_mmhg_s; /* taxa de subida filtrada (usada na previsao de corte) */
+    float   predicted_mmhg;   /* pressao + taxa * antecipacao — dispara a troca p/ o PID */
+} ControlCore_PidDiag_t;
+
 typedef struct {
     SystemConfig_t             *cfg;     /* pid/stabilization/leak_test/setpoint (EEPROM) */
     SystemRuntime_t            *runtime; /* state/pressure_display/setpoint_mmhg/bt_user_pressed */
     ControlCore_SafetyConfig_t  safety;
+
+    ControlCore_PidDiag_t pid_diag;   /* ver comentario acima */
 
     /* --- estado interno (equivalente ao s_control do Control_Loop atual) --- */
     float    pid_integral;
@@ -111,9 +144,23 @@ typedef struct {
     uint32_t leak_window_elapsed_ms;
     float    leak_window_start_mmhg;
     uint32_t stabilized_out_of_band_calls; /* chamadas CONSECUTIVAS fora da banda, em STABILIZED */
+    uint32_t stabilizing_out_of_band_ms;   /* tempo CONSECUTIVO fora da banda larga, em STABILIZING */
     uint32_t deflate_settle_elapsed_ms;    /* 0 = ainda acima de P_SEGURA */
-    uint32_t relief_pulse_remaining_ms;
-    uint32_t relief_recheck_remaining_ms;
+
+    /* Aproximacao rapida (bomba a 100% longe do setpoint) — ver
+     * update_fast_approach() em control_core.c. */
+    uint8_t  fast_approach;           /* 1 = ainda na aproximacao a potencia maxima */
+    uint32_t rearm_elapsed_ms;        /* tempo consecutivo muito abaixo do alvo (re-arma a aproximacao) */
+    float    p_filt_mmhg;             /* pressao filtrada (base da taxa de subida) */
+    float    rise_rate_mmhg_s;        /* taxa de subida filtrada */
+    uint8_t  rate_valid;              /* 0 = filtro ainda nao inicializado */
+
+    /* Valvula de alivio com histerese + tempos minimos — ver
+     * update_relief_valve() em control_core.c. */
+    uint8_t  relief_open;
+    uint32_t relief_on_ms;            /* ha' quanto tempo esta' aberta */
+    uint32_t relief_off_ms;           /* ha' quanto tempo esta' fechada */
+    uint32_t relief_pulse_ms;         /* duracao do pulso atual */
 
     ControlCore_Error_t last_error;   /* ultimo erro latched; Init/novo ensaio zera */
 
@@ -141,6 +188,11 @@ void ControlCore_EnterFaultState(ControlCore_t *cc, ControlCore_Actuators_t *out
  * ControlCore_CycleStats_t.finalized). Ponteiro para dentro de cc — valido
  * ate' o proximo ControlCore_StartInflation(). */
 const ControlCore_CycleStats_t *ControlCore_GetCycleStats(const ControlCore_t *cc);
+
+/* Termos internos do PID no ultimo passo de run_pid_iteration() — ver
+ * ControlCore_PidDiag_t. So' atualizado durante INFLATING/STABILIZING;
+ * fora disso mantem o ultimo valor calculado (nao e' zerado). */
+const ControlCore_PidDiag_t *ControlCore_GetPidDiag(const ControlCore_t *cc);
 
 #ifdef __cplusplus
 }

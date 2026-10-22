@@ -9,19 +9,64 @@
 #include <string.h>
 #include <math.h>
 
-/* Constantes do estagio de alivio de sobrepressao (PID ativo), portadas
- * sem alteracao de Core/Services/Control_Loop — ver 00-auditoria.md D4.
- * NOTA: RELIEF_PULSE_*_MS = 1 ms e' menor ou igual ao proprio periodo do
- * loop de controle (1 ms): na pratica o pulso raramente fica visivel por
- * mais de uma chamada. Isso ja' existia no Control_Loop atual (nunca
- * verificado em bancada); registrado aqui, nao "corrigido" por conta
- * propria — `t_min_valvula` no Apendice E ainda esta' como "medir". */
-#define CONTROL_CORE_CONTROL_BAND_MMHG     (0.5f)
-#define CONTROL_CORE_OVERPRESS_STRONG_MMHG (50.0f)
 #define CONTROL_CORE_PUMP_MIN_EFFECTIVE     (0.30f)
-#define CONTROL_CORE_RELIEF_PULSE_FAST_MS   (30u)
-#define CONTROL_CORE_RELIEF_PULSE_STRONG_MS (80u)
-#define CONTROL_CORE_RELIEF_SETTLE_MS       (10u)
+
+/*
+ * Aproximacao rapida (2026-10, pedido do usuario na bancada): longe do
+ * setpoint a bomba roda a 100% com as valvulas fechadas; o PID so' assume
+ * dentro da zona de regulacao. A troca e' PREDITIVA: corta quando
+ *     pressao + taxa_de_subida * ANTECIPACAO >= setpoint - ZONA
+ * — a taxa medida ja' embute o tamanho do manguito (manguito pequeno sobe
+ * rapido -> troca mais cedo), e ANTECIPACAO cobre a inercia da bomba/
+ * pneumatica depois do corte (T_lag do Apendice E). Valores iniciais, NAO
+ * medidos: ajustar na bancada observando pid_diag.predicted_mmhg e o
+ * overshoot real.
+ */
+#define CONTROL_CORE_APPROACH_LOOKAHEAD_S   (1.0f)
+#define CONTROL_CORE_APPROACH_ZONE_MMHG     (10.0f)
+/* So' volta a 100% se cair MUITO abaixo do alvo e ficar la' (vazamento
+ * grande) — histerese larga para nao alternar 100%/PID perto do alvo. */
+#define CONTROL_CORE_APPROACH_REARM_MMHG    (30.0f)
+#define CONTROL_CORE_APPROACH_REARM_MS      (500u)
+/* Filtros da taxa de subida: a bomba e' de embolo (ondulacao a cada curso),
+ * entao a derivada crua e' inutil. Pressao filtrada (tau curto) e depois a
+ * taxa filtrada (tau maior). */
+#define CONTROL_CORE_RATE_P_TAU_S           (0.05f)
+#define CONTROL_CORE_RATE_TAU_S             (0.08f)
+
+/*
+ * Valvula de alivio (V1) na regulacao: PULSO + ACOMODACAO (2026-10-17).
+ *
+ * Achado de bancada: ao abrir a valvula, o sensor ve uma queda LOCAL de
+ * ~20 mmHg (a tubulacao perto da valvula esvazia rapido; o manguito, maior,
+ * ainda esta' cheio). Reagir a essa leitura era o problema: a valvula
+ * fechava cedo pela queda falsa, o PID via "20 mmHg abaixo" e ligava a
+ * bomba, e na reequalizacao a pressao passava do setpoint de novo — ciclo.
+ * Versoes anteriores: pulsos de 30 ms a cada 40 ms com 0,5 mmHg de banda
+ * (metralhava) e depois histerese pura (abria ate' voltar ao setpoint).
+ *
+ * Agora:
+ *   - so' avalia com a pressao ACOMODADA (filtrada, fora da janela abaixo);
+ *   - se sobrepressao >= RELIEF_ON_FRACTION * banda: abre UM pulso de
+ *     duracao proporcional ao excesso (RELIEF_MS_PER_MMHG, limitado a
+ *     [RELIEF_PULSE_MIN_MS, RELIEF_PULSE_MAX_MS]) — leitura ignorada
+ *     durante o pulso;
+ *   - fecha e espera RELIEF_SETTLE_MS (reequalizacao da tubulacao) antes de
+ *     reavaliar. Durante pulso + acomodacao: bomba desligada, integrador do
+ *     PID congelado e STABILIZING nao volta para INFLATING.
+ * Valores iniciais (nao medidos) — ajustar na bancada: se ainda cair abaixo
+ * do alvo, diminuir RELIEF_MS_PER_MMHG/RELIEF_PULSE_MAX_MS; se a pressao
+ * demorar a reequalizar, aumentar RELIEF_SETTLE_MS.
+ */
+#define CONTROL_CORE_RELIEF_ON_FRACTION     (0.5f)
+#define CONTROL_CORE_RELIEF_MS_PER_MMHG     (10.0f)
+#define CONTROL_CORE_RELIEF_PULSE_MIN_MS    (20u)
+#define CONTROL_CORE_RELIEF_PULSE_MAX_MS    (150u)
+#define CONTROL_CORE_RELIEF_SETTLE_MS       (400u)
+
+/* STABILIZING so' volta para INFLATING se ficar fora de 2x a banda por
+ * este tempo seguido (mesmo criterio de histerese de STABILIZED). */
+#define CONTROL_CORE_STABILIZING_EXIT_MS    (50u)
 
 static void safe_actuators(ControlCore_Actuators_t *out, float pump,
                            uint8_t v1, uint8_t v2, uint8_t v3)
@@ -57,6 +102,17 @@ void ControlCore_StartInflation(ControlCore_t *cc)
         cc->last_error = CONTROL_ERR_NONE;
         cc->inflate_elapsed_ms = 0u;
         cc->state_elapsed_ms = 0u;
+        cc->stabilizing_out_of_band_ms = 0u;
+
+        cc->fast_approach = 1u;
+        cc->rearm_elapsed_ms = 0u;
+        cc->rate_valid = 0u;
+        cc->rise_rate_mmhg_s = 0.0f;
+
+        cc->relief_open = 0u;
+        cc->relief_on_ms = 0u;
+        cc->relief_off_ms = CONTROL_CORE_RELIEF_SETTLE_MS; /* 1a abertura liberada */
+        cc->relief_pulse_ms = 0u;
 
         memset(&cc->cycle, 0, sizeof(cc->cycle));
         cc->cycle.plateau_min_mmhg = 1.0e9f;   /* sentinela: nenhuma amostra ainda */
@@ -67,6 +123,130 @@ void ControlCore_StartInflation(ControlCore_t *cc)
 const ControlCore_CycleStats_t *ControlCore_GetCycleStats(const ControlCore_t *cc)
 {
     return &cc->cycle;
+}
+
+const ControlCore_PidDiag_t *ControlCore_GetPidDiag(const ControlCore_t *cc)
+{
+    return &cc->pid_diag;
+}
+
+/** @brief Valvula de alivio por pulso + acomodacao (ver constantes
+ *         CONTROL_CORE_RELIEF_*). `over_mmhg` = pressao filtrada - setpoint.
+ *         Devolve 1 se a valvula deve ficar aberta neste passo. */
+static uint8_t update_relief_valve(ControlCore_t *cc, float over_mmhg, uint32_t dt_ms)
+{
+    float on_threshold = CONTROL_CORE_RELIEF_ON_FRACTION * cc->cfg->stabilization.band_mmhg;
+
+    if (cc->relief_open != 0u) {
+        cc->relief_on_ms += dt_ms;
+        if (cc->relief_on_ms >= cc->relief_pulse_ms) {
+            cc->relief_open = 0u;
+            cc->relief_off_ms = 0u;
+        }
+    } else if (cc->relief_off_ms < CONTROL_CORE_RELIEF_SETTLE_MS) {
+        cc->relief_off_ms += dt_ms; /* acomodando: leitura nao confiavel */
+    } else if (over_mmhg >= on_threshold) {
+        float pulse = over_mmhg * CONTROL_CORE_RELIEF_MS_PER_MMHG;
+
+        if (pulse < (float)CONTROL_CORE_RELIEF_PULSE_MIN_MS) {
+            pulse = (float)CONTROL_CORE_RELIEF_PULSE_MIN_MS;
+        }
+        if (pulse > (float)CONTROL_CORE_RELIEF_PULSE_MAX_MS) {
+            pulse = (float)CONTROL_CORE_RELIEF_PULSE_MAX_MS;
+        }
+        cc->relief_pulse_ms = (uint32_t)pulse;
+        cc->relief_open = 1u;
+        cc->relief_on_ms = 0u;
+    } else {
+        /* dentro da faixa: nada a fazer */
+    }
+
+    return cc->relief_open;
+}
+
+/* 1 = pulso de alivio em andamento ou pressao ainda acomodando depois dele
+ * (leitura distorcida pela reequalizacao da tubulacao). */
+static uint8_t relief_window_active(const ControlCore_t *cc)
+{
+    return ((cc->relief_open != 0u) || (cc->relief_off_ms < CONTROL_CORE_RELIEF_SETTLE_MS)) ? 1u : 0u;
+}
+
+/* Fecha a valvula de alivio fora da regulacao; a proxima abertura ainda
+ * espera CONTROL_CORE_RELIEF_SETTLE_MS. */
+static void close_relief_valve(ControlCore_t *cc)
+{
+    if (cc->relief_open != 0u) {
+        cc->relief_open = 0u;
+        cc->relief_off_ms = 0u;
+    }
+}
+
+/** @brief Atualiza a taxa de subida filtrada e decide se a aproximacao a
+ *         100% continua (ver CONTROL_CORE_APPROACH_*). Chamado a cada passo
+ *         de INFLATING/STABILIZING. */
+static void update_fast_approach(ControlCore_t *cc, uint32_t dt_ms)
+{
+    SystemRuntime_t *rt = cc->runtime;
+    float dt_s = (float)dt_ms / 1000.0f;
+    float error_mmhg = rt->setpoint_mmhg - rt->pressure_display;
+    float predicted;
+
+    if (cc->rate_valid == 0u) {
+        cc->p_filt_mmhg = rt->pressure_display;
+        cc->rise_rate_mmhg_s = 0.0f;
+        cc->rate_valid = 1u;
+    } else if (dt_s > 0.0f) {
+        float a_p = dt_s / (CONTROL_CORE_RATE_P_TAU_S + dt_s);
+        float a_r = dt_s / (CONTROL_CORE_RATE_TAU_S + dt_s);
+        float p_prev = cc->p_filt_mmhg;
+        float raw_rate;
+
+        cc->p_filt_mmhg += (rt->pressure_display - cc->p_filt_mmhg) * a_p;
+        raw_rate = (cc->p_filt_mmhg - p_prev) / dt_s;
+        cc->rise_rate_mmhg_s += (raw_rate - cc->rise_rate_mmhg_s) * a_r;
+    } else {
+        /* dt = 0: nada a integrar */
+    }
+
+    predicted = rt->pressure_display;
+    if (cc->rise_rate_mmhg_s > 0.0f) {
+        predicted += cc->rise_rate_mmhg_s * CONTROL_CORE_APPROACH_LOOKAHEAD_S;
+    }
+    cc->pid_diag.rise_rate_mmhg_s = cc->rise_rate_mmhg_s;
+    cc->pid_diag.predicted_mmhg = predicted;
+
+    if (cc->fast_approach != 0u) {
+        if (predicted >= (rt->setpoint_mmhg - CONTROL_CORE_APPROACH_ZONE_MMHG)) {
+            /* Entra na regulacao: PID parte sem integral acumulada durante
+             * a subida e sem "chute" de derivada. */
+            cc->fast_approach = 0u;
+            cc->rearm_elapsed_ms = 0u;
+            cc->pid_integral = 0.0f;
+            cc->pid_prev_error = error_mmhg / CONTROL_CORE_MMHG_PER_KPA;
+        }
+    } else {
+        if (error_mmhg > CONTROL_CORE_APPROACH_REARM_MMHG) {
+            cc->rearm_elapsed_ms += dt_ms;
+            if (cc->rearm_elapsed_ms >= CONTROL_CORE_APPROACH_REARM_MS) {
+                cc->fast_approach = 1u;
+                cc->rearm_elapsed_ms = 0u;
+            }
+        } else {
+            cc->rearm_elapsed_ms = 0u;
+        }
+    }
+
+    cc->pid_diag.fast_approach = cc->fast_approach;
+}
+
+/** @brief Bomba a 100%, valvulas fechadas (aproximacao rapida). */
+static void run_fast_approach(ControlCore_t *cc, ControlCore_Actuators_t *out)
+{
+    close_relief_valve(cc);
+    cc->pid_diag.pump_power_final = 1.0f;
+    cc->pid_diag.relief_active = 0u;
+    cc->pid_diag.floor_applied = 0u;
+    safe_actuators(out, 1.0f, 0u, 0u, 0u);
 }
 
 /** @brief PID + feedforward + alivio de sobrepressao. Usado por INFLATING e
@@ -91,9 +271,14 @@ static void run_pid_iteration(ControlCore_t *cc, const ControlCore_Inputs_t *in,
 
     p_term = pid_cfg->kp * error;
 
-    cc->pid_integral += pid_cfg->ki * error * dt_s;
-    if (cc->pid_integral > pid_cfg->i_max) { cc->pid_integral = pid_cfg->i_max; }
-    if (cc->pid_integral < pid_cfg->i_min) { cc->pid_integral = pid_cfg->i_min; }
+    /* Integrador congelado durante pulso/acomodacao do alivio: a queda
+     * falsa vista pelo sensor nessa janela enchia o integral e a bomba
+     * empurrava a pressao acima do setpoint na reequalizacao. */
+    if (relief_window_active(cc) == 0u) {
+        cc->pid_integral += pid_cfg->ki * error * dt_s;
+        if (cc->pid_integral > pid_cfg->i_max) { cc->pid_integral = pid_cfg->i_max; }
+        if (cc->pid_integral < pid_cfg->i_min) { cc->pid_integral = pid_cfg->i_min; }
+    }
 
     derivative = (dt_s > 0.0f) ? ((error - cc->pid_prev_error) / dt_s) : 0.0f;
     d_term = pid_cfg->kd * derivative / 10.0f;
@@ -105,6 +290,18 @@ static void run_pid_iteration(ControlCore_t *cc, const ControlCore_Inputs_t *in,
     pump_power = (pid_cfg->out_max > 0.0f) ? (output / pid_cfg->out_max) : output;
     if (pump_power < 0.0f) { pump_power = 0.0f; }
     if (pump_power > 1.0f) { pump_power = 1.0f; }
+
+    /* Diagnostico (ver ControlCore_PidDiag_t) — capturado AQUI, antes do
+     * piso de partida/alivio mexerem em pump_power, pra' mostrar o que o
+     * PID "pediu" de verdade antes de qualquer correcao. */
+    cc->pid_diag.error_mmhg = error * CONTROL_CORE_MMHG_PER_KPA;
+    cc->pid_diag.p_term_kpa = p_term;
+    cc->pid_diag.i_term_kpa = cc->pid_integral;
+    cc->pid_diag.d_term_kpa = d_term;
+    cc->pid_diag.ff_term_kpa = ff_term;
+    cc->pid_diag.output_kpa = output;
+    cc->pid_diag.pump_power_pid = pump_power;
+    cc->pid_diag.floor_applied = 0u;
 
     /* NAO porta o piso de PUMP_MIN_COMPENSATION_POWER do Control_Loop atual
      * aqui. No codigo original ele e' aplicado dentro de run_pid_iteration()
@@ -132,53 +329,26 @@ static void run_pid_iteration(ControlCore_t *cc, const ControlCore_Inputs_t *in,
     if ((pump_power > 0.0f) && (pump_power < CONTROL_CORE_PUMP_MIN_EFFECTIVE) &&
         (error_mmhg > cc->cfg->stabilization.band_mmhg)) {
         pump_power = CONTROL_CORE_PUMP_MIN_EFFECTIVE;
+        cc->pid_diag.floor_applied = 1u;
     }
 
-    /* Contadores de pulso/recheck de alivio: decrementam a cada chamada. */
-    cc->relief_pulse_remaining_ms = (cc->relief_pulse_remaining_ms > in->dt_ms)
-        ? (cc->relief_pulse_remaining_ms - in->dt_ms) : 0u;
-    cc->relief_recheck_remaining_ms = (cc->relief_recheck_remaining_ms > in->dt_ms)
-        ? (cc->relief_recheck_remaining_ms - in->dt_ms) : 0u;
+    /* Acima do alvo a bomba nao ajuda em nada: corta. Quem tira o excesso
+     * e' a valvula de alivio (com histerese, abaixo) ou o proprio
+     * vazamento natural do manguito, se o excesso for pequeno. */
+    {
+        float over_filt_mmhg = cc->p_filt_mmhg - cc->runtime->setpoint_mmhg;
 
-    if (cc->relief_pulse_remaining_ms > 0u) {
-        relief_on = 1u;
-        pump_power *= 0.1f;
-    }
-
-    if (error_mmhg < -CONTROL_CORE_CONTROL_BAND_MMHG) {
-        float over_mmhg = -error_mmhg;
-
-        /* Achado desta fase (presente tambem no Control_Loop atual, linhas
-         * 161-183): o piso de PUMP_MIN_COMPENSATION_POWER era reaplicado
-         * AQUI, dentro do proprio ramo de sobrepressao leve — forcando a
-         * bomba de volta a pelo menos 20% (12% apos o fator 0.6) bem
-         * quando ela deveria estar sendo cortada para permitir a sangria
-         * vencer. Em vez de so' atenuar, corta a bomba (a sangria e' quem
-         * deve reduzir a pressao); sem isso o simulador mostra "corrida"
-         * de sobrepressao em manguitos pequenos/rapidos (C baixo), onde o
-         * fluxo residual da bomba supera o que a valvula consegue sangrar
-         * nos pulsos curtos. Ver sim-report.md e 00-auditoria.md. */
-        if (over_mmhg >= CONTROL_CORE_OVERPRESS_STRONG_MMHG) {
-            if (cc->relief_recheck_remaining_ms == 0u) {
-                cc->relief_pulse_remaining_ms = CONTROL_CORE_RELIEF_PULSE_STRONG_MS;
-                cc->relief_recheck_remaining_ms =
-                    CONTROL_CORE_RELIEF_PULSE_STRONG_MS + CONTROL_CORE_RELIEF_SETTLE_MS;
-                relief_on = 1u;
-            }
+        if (over_filt_mmhg > 0.0f) {
             pump_power = 0.0f;
-        } else {
-            if (cc->relief_recheck_remaining_ms == 0u) {
-                cc->relief_pulse_remaining_ms = CONTROL_CORE_RELIEF_PULSE_FAST_MS;
-                cc->relief_recheck_remaining_ms =
-                    CONTROL_CORE_RELIEF_PULSE_FAST_MS + CONTROL_CORE_RELIEF_SETTLE_MS;
-                relief_on = 1u;
-            }
-            pump_power *= 0.3f;
         }
-    } else {
-        cc->relief_pulse_remaining_ms = 0u;
-        cc->relief_recheck_remaining_ms = 0u;
+        relief_on = update_relief_valve(cc, over_filt_mmhg, in->dt_ms);
     }
+    if (relief_window_active(cc) != 0u) {
+        pump_power = 0.0f; /* pulso ou acomodacao: bomba fora */
+    }
+
+    cc->pid_diag.pump_power_final = pump_power;
+    cc->pid_diag.relief_active = relief_on;
 
     safe_actuators(out, pump_power, relief_on, 0u, 0u);
 }
@@ -200,11 +370,17 @@ static void handle_inflating(ControlCore_t *cc, const ControlCore_Inputs_t *in,
         return;
     }
 
-    run_pid_iteration(cc, in, out);
+    update_fast_approach(cc, in->dt_ms);
+    if (cc->fast_approach != 0u) {
+        run_fast_approach(cc, out);
+    } else {
+        run_pid_iteration(cc, in, out);
+    }
 
     error_mmhg = rt->setpoint_mmhg - rt->pressure_display;
     if (fabsf(error_mmhg) <= cc->cfg->stabilization.band_mmhg) {
         rt->state = SYSTEM_STATE_STABILIZING;
+        cc->stabilizing_out_of_band_ms = 0u;
     }
 
     if (cc->inflate_elapsed_ms >= cc->safety.t_inflar_max_ms) {
@@ -226,15 +402,35 @@ static void handle_stabilizing(ControlCore_t *cc, const ControlCore_Inputs_t *in
         return;
     }
 
+    update_fast_approach(cc, in->dt_ms);
     run_pid_iteration(cc, in, out);
 
+    /* Histerese: entra com |erro| <= banda (handle_inflating), mas so' sai
+     * com |erro| > 2x banda por CONTROL_CORE_STABILIZING_EXIT_MS seguidos —
+     * a ondulacao do embolo cruzava a banda a cada curso e reiniciava a
+     * contagem de estabilizacao sem parar. */
     error_mmhg = rt->setpoint_mmhg - rt->pressure_display;
-    if (fabsf(error_mmhg) > cc->cfg->stabilization.band_mmhg) {
-        rt->state = SYSTEM_STATE_INFLATING;
-        return;
+    if (relief_window_active(cc) != 0u) {
+        /* transitorio do pulso de alivio: leitura nao representa o manguito */
+        cc->stabilizing_out_of_band_ms = 0u;
+    } else if (fabsf(error_mmhg) > (2.0f * cc->cfg->stabilization.band_mmhg)) {
+        cc->stabilizing_out_of_band_ms += in->dt_ms;
+        if (cc->stabilizing_out_of_band_ms >= CONTROL_CORE_STABILIZING_EXIT_MS) {
+            cc->stabilizing_out_of_band_ms = 0u;
+            rt->state = SYSTEM_STATE_INFLATING;
+            return;
+        }
+    } else {
+        cc->stabilizing_out_of_band_ms = 0u;
     }
 
-    if (cc->state_elapsed_ms >= cc->cfg->stabilization.time_ms) {
+    /* So' estabiliza com a pressao DENTRO da banda e fora da janela do
+     * alivio: a saida acima e' suspensa durante pulso/acomodacao, entao sem
+     * esta condicao pulsos seguidos deixavam o tempo correr e o estado
+     * virava STABILIZED muito acima do alvo. */
+    if ((cc->state_elapsed_ms >= cc->cfg->stabilization.time_ms) &&
+        (fabsf(error_mmhg) <= cc->cfg->stabilization.band_mmhg) &&
+        (relief_window_active(cc) == 0u)) {
         rt->state = SYSTEM_STATE_STABILIZED;
     }
 
@@ -258,6 +454,7 @@ static void handle_stabilized(ControlCore_t *cc, const ControlCore_Inputs_t *in,
     float drop_mmhg;
 
     safe_actuators(out, 0.0f, 0u, 0u, 0u);
+    close_relief_valve(cc);
 
     if (in->abort_request != 0u) {
         rt->state = SYSTEM_STATE_DEFLATING_FAST;
@@ -446,7 +643,14 @@ void ControlCore_Step(ControlCore_t *cc, const ControlCore_Inputs_t *in,
 
             if ((state_before != SYSTEM_STATE_DEFLATING_FAST) && (rt->state == SYSTEM_STATE_DEFLATING_FAST)) {
                 cc->cycle.deflate_start_ms = cc->cycle.total_elapsed_ms;
-                if (in->abort_request != 0u) {
+                /* NC07 so' se o pedal cortou o ensaio ANTES do plato: em
+                 * STABILIZED ("pronto p/ desinflar") o pedal e' o fim
+                 * NORMAL do ensaio, nao uma interrupcao (achado de bancada
+                 * 2026-10-17: todo ensaio saia NC07). Plato curto demais e'
+                 * avaliado a parte pelo NC do tempo de plato. */
+                if ((in->abort_request != 0u) &&
+                    ((state_before == SYSTEM_STATE_INFLATING) ||
+                     (state_before == SYSTEM_STATE_STABILIZING))) {
                     cc->cycle.aborted_by_operator = 1u;
                 }
             }

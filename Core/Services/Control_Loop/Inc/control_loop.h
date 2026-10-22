@@ -92,6 +92,27 @@ uint32_t ControlLoop_GetMaxJitterCycles(void);
 ControlCore_Error_t ControlLoop_GetLastError(void);
 
 /**
+ * @brief Metricas do ciclo em andamento ou do ultimo ciclo completo.
+ *
+ * So' repassa ControlCore_GetCycleStats() (control_core.h) para quem nao
+ * tem acesso ao ControlCore_t interno (ex.: a IHM, Core/App) — ver
+ * ControlCore_CycleStats_t.finalized antes de usar os campos (so' ficam
+ * validos quando finalized==1; o ponteiro retornado e' valido ate' o
+ * proximo ControlLoop_StartInflation()).
+ */
+const ControlCore_CycleStats_t* ControlLoop_GetCycleStats(void);
+
+/**
+ * @brief Termos internos do PID (P/I/D/FF/saida, antes e depois do piso de
+ *        partida/alivio) no ultimo passo de INFLATING/STABILIZING — ver
+ *        ControlCore_PidDiag_t em control_core.h. So' repassa
+ *        ControlCore_GetPidDiag(), mesmo criterio de GetCycleStats() acima.
+ *        Diagnostico de bancada (achado 2026-10: ensaio nunca alcancando o
+ *        setpoint) — sem efeito na saida, so' leitura.
+ */
+const ControlCore_PidDiag_t* ControlLoop_GetPidDiag(void);
+
+/**
  * @brief Define um novo setpoint de pressão para o controlador.
  *
  * @param setpoint_mmhg O valor de pressão desejado, em mmHg.

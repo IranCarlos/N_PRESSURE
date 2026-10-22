@@ -46,6 +46,15 @@ extern "C" {
  * acompanha desvios pequenos: pressao aplicada (> janela) nunca vira "zero". */
 #define PRESSURE_ATM_ALPHA           (0.0002f)
 #define PRESSURE_ATM_TRACK_WINDOW_KPA (0.5f)
+/* Leitura ABAIXO do zero por mais que isto = o zero estava alto (pressao
+ * relativa negativa num manguito aberto para o ar nao existe): o zero desce
+ * rapido ate' a leitura, sem limite de janela. Cobre o boot com o tubo ja'
+ * pressurizado (a 1a amostra vira o zero e, quando a pressao escoa pelas
+ * valvulas abertas, saia da janela acima e o zero nunca mais corrigia —
+ * achado 2026-10-17). Margem acima do ruido para nao puxar o zero pelos
+ * picos negativos; ALPHA rapido (~100 blocos de constante de tempo). */
+#define PRESSURE_ATM_DOWN_MARGIN_KPA (0.1f)
+#define PRESSURE_ATM_DOWN_ALPHA      (0.01f)
 
 typedef enum {
     PRESSURE_FLAG_NONE       = 0u,
@@ -66,6 +75,7 @@ typedef struct {
     float   sensor_voltage;      /* V no sensor, antes do clamp */
     float   atmospheric_kpa;
     uint8_t atmospheric_valid;
+    uint8_t atm_following_down; /* 1 = zero descendo ate' a leitura (ver PRESSURE_ATM_DOWN_*) */
 
     uint16_t last_mean_counts;
     uint16_t last_min_counts;

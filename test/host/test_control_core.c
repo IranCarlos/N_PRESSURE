@@ -162,10 +162,9 @@ static ScenarioResult_t run_scenario(const SimPlant_Config_t *plant_cfg, uint32_
         /* So' conta chattering DEPOIS de SYSTEM_STATE_STABILIZED de verdade
          * (handle_stabilized() e' estatico — bomba e valvulas fechadas o
          * tempo todo — entao qualquer transicao aqui so' pode vir de sair
-         * e voltar a STABILIZED, ex.: vazamento). A fase de aproximacao
-         * (STABILIZING) chaveia a valvula de alivio por design hoje — ver
-         * achado documentado em sim-report.md/00-auditoria.md (falta
-         * histerese/t_min_valvula do Apendice E, ainda "a definir"). */
+         * e voltar a STABILIZED, ex.: vazamento). O chaveamento durante a
+         * aproximacao/regulacao e' coberto por
+         * test_relief_valve_hysteresis_with_ripple(). */
         if ((count_chatter_from_tick != 0u) && (res.stabilized_ms != 0u)) {
             mask = (uint8_t)((out.valve1_open << 0) | (out.valve2_open << 1) | (out.valve3_open << 2));
             if (last_valve_mask == 0xFFu) { last_valve_mask = mask; }
@@ -200,8 +199,14 @@ static void test_small_cuff_reaches_setpoint(void)
      * num manguito rapido. Documentado como achado aberto em sim-report.md;
      * usa 12 mmHg de limite aqui so' para nao mascarar uma regressao maior
      * ainda, nao como meta — o alvo de verdade (<=2 mmHg) exige retunar
-     * com T_lag/vazao medidos na bancada (Fase 4). */
-    CHECK(r.overshoot_mmhg <= 12.0f);
+     * com T_lag/vazao medidos na bancada (Fase 4).
+     * 2026-10-17: alivio virou pulso+acomodacao por achado de BANCADA
+     * (valvula aberta derrubava ~20 mmHg na tubulacao e a pressao voltava
+     * acima do setpoint). A valvula deste modelo sangra devagar (k_valve
+     * generico), entao pulsos limitados seguram menos o excesso aqui:
+     * ~26 mmHg. Limite afrouxado por decisao do usuario (priorizar a
+     * bancada); so' pega regressao grosseira. */
+    CHECK(r.overshoot_mmhg <= 30.0f);
     CHECK(r.final_error == (uint32_t)CONTROL_ERR_NONE);
 }
 
@@ -215,7 +220,10 @@ static void test_large_cuff_reaches_setpoint(void)
           (int)r.final_state, r.final_error);
     CHECK(r.reached_setpoint != 0u);
     CHECK(r.stabilized_ms != 0u);
-    CHECK(r.overshoot_mmhg <= 2.0f);
+    /* Placeholder do Apendice E era 2 mmHg; com o alivio por pulso (ver
+     * test_small_cuff_reaches_setpoint) este modelo da' ~5 mmHg. Afrouxado
+     * por decisao do usuario — o valor real vem da bancada. */
+    CHECK(r.overshoot_mmhg <= 6.0f);
 }
 
 /*
@@ -224,12 +232,8 @@ static void test_large_cuff_reaches_setpoint(void)
  * valvulas ficam estaticas (handle_stabilized nao chama o PID/alivio) ate'
  * um vazamento ou abort tirar o sistema de la'. Esse teste cobre essa
  * garantia (0 transicoes depois de estabilizar, neste cenario sem
- * vazamento). A fase de APROXIMACAO (STABILIZING) chaveia a valvula de
- * alivio continuamente ate' assentar — achado registrado em
- * Docs/sim-report.md e 00-auditoria.md: falta histerese/`t_min_valvula`
- * (Apendice E, "medir") para parar de chavear tao cedo quanto a prompt
- * pede; nao e' coberto por um CHECK aqui de proposito, para nao mascarar o
- * achado com um limite arbitrario.
+ * vazamento). A fase de regulacao (STABILIZING) tem teste proprio:
+ * test_relief_valve_hysteresis_with_ripple().
  */
 static void test_no_chattering_once_stabilized(void)
 {
@@ -327,6 +331,7 @@ static void test_cycle_stats_full_run(void)
     float measured_kpa;
     const ControlCore_CycleStats_t *stats;
     uint32_t tick;
+    uint32_t stabilized_at = 0u;
 
     memset(&rt, 0, sizeof(rt));
     rt.setpoint_mmhg = 40.0f;
@@ -344,7 +349,9 @@ static void test_cycle_stats_full_run(void)
 
         in.pressure_kpa = measured_kpa;
         in.sensor_ok = 1u;
-        in.abort_request = (tick == 5000u) ? 1u : 0u; /* aborta ja' estabilizado (inflate_time < 1s) */
+        /* pedal 500 ms depois de chegar em STABILIZED = fim normal */
+        if ((rt.state == SYSTEM_STATE_STABILIZED) && (stabilized_at == 0u)) { stabilized_at = tick; }
+        in.abort_request = ((stabilized_at != 0u) && (tick == stabilized_at + 500u)) ? 1u : 0u;
         in.dt_ms = 1u;
 
         ControlCore_Step(&cc, &in, &out);
@@ -369,9 +376,139 @@ static void test_cycle_stats_full_run(void)
     CHECK(stats->inflate_time_ms > 0u);
     CHECK(stats->plateau_time_ms > 0u);
     CHECK(stats->deflate_time_ms > 0u);
-    CHECK(stats->aborted_by_operator != 0u);
+    CHECK(stats->aborted_by_operator == 0u); /* fim normal, nao NC07 */
     CHECK(stats->technical_fault == 0u);
     CHECK(stats->residual_mmhg < safety.p_segura_mmhg);
+}
+
+/* Pedal durante a INFLACAO (antes do plato) = interrupcao pelo operador. */
+static void test_abort_during_inflation_sets_nc07_flag(void)
+{
+    SystemConfig_t cfg = default_cfg();
+    SystemRuntime_t rt;
+    ControlCore_SafetyConfig_t safety = default_safety();
+    ControlCore_t cc;
+    SimPlant_t plant;
+    SimPlant_Config_t pcfg = plant_large_cuff();
+    float measured_kpa;
+    const ControlCore_CycleStats_t *stats;
+    uint32_t tick;
+
+    memset(&rt, 0, sizeof(rt));
+    rt.setpoint_mmhg = 120.0f;
+    ControlCore_Init(&cc, &cfg, &rt, &safety);
+    SimPlant_Init(&plant, &pcfg, 7u);
+    ControlCore_StartInflation(&cc);
+    SimPlant_Step(&plant, 0.0f, 0u, 0u, &measured_kpa);
+    stats = ControlCore_GetCycleStats(&cc);
+
+    for (tick = 1; tick <= 30000u; tick++) {
+        ControlCore_Inputs_t in;
+        ControlCore_Actuators_t out;
+
+        in.pressure_kpa = measured_kpa;
+        in.sensor_ok = 1u;
+        in.abort_request = (tick == 300u) ? 1u : 0u; /* ainda subindo */
+        in.dt_ms = 1u;
+        if (tick == 300u) { CHECK(rt.state == SYSTEM_STATE_INFLATING); }
+
+        ControlCore_Step(&cc, &in, &out);
+        SimPlant_Step(&plant, out.pump_power,
+                     (uint8_t)(out.valve1_open + out.valve2_open + out.valve3_open),
+                     1u, &measured_kpa);
+        if (stats->finalized != 0u) { break; }
+    }
+
+    printf("  [abort_inflating] finalized=%u abort=%u plato_n=%u\n",
+           stats->finalized, stats->aborted_by_operator, stats->plateau_sample_count);
+    CHECK(stats->finalized != 0u);
+    CHECK(stats->aborted_by_operator != 0u);
+}
+
+/*
+ * Achado de bancada (2026-10): "na estabilizacao as valvulas ficam loucas".
+ * Bomba de embolo = ondulacao a cada curso; aqui aproximada por ruido de
+ * +-2 mmHg na leitura. Conta TODAS as trocas de valvula do ciclo inteiro
+ * (aproximacao + regulacao + espera), nao so' depois de STABILIZED. A
+ * logica anterior (pulso de 30 ms a cada 40 ms com 0,5 mmHg de banda)
+ * dava 300-1150 trocas em 8 s neste cenario; com histerese + tempo minimo
+ * fechada (RELIEF_MIN_OFF_MS) fica em poucas unidades.
+ */
+static uint32_t count_valve_transitions_with_ripple(float c_manguito, uint32_t ms)
+{
+    SystemConfig_t cfg = default_cfg();
+    SystemRuntime_t rt;
+    ControlCore_SafetyConfig_t safety = default_safety();
+    ControlCore_t cc;
+    SimPlant_Config_t pc = plant_small_cuff();
+    SimPlant_t plant;
+    float measured_kpa;
+    uint8_t last_mask = 0xFFu;
+    uint32_t transitions = 0u;
+
+    pc.C_manguito = c_manguito;
+    pc.sensor_noise_amplitude_kpa = 2.0f / MMHG_PER_KPA;
+    memset(&rt, 0, sizeof(rt));
+    rt.setpoint_mmhg = 120.0f;
+    ControlCore_Init(&cc, &cfg, &rt, &safety);
+    SimPlant_Init(&plant, &pc, 11u);
+    ControlCore_StartInflation(&cc);
+    SimPlant_Step(&plant, 0.0f, 0u, 0u, &measured_kpa);
+
+    for (uint32_t tick = 1; tick <= ms; tick++) {
+        ControlCore_Inputs_t in = { measured_kpa, 1u, 0u, 1u };
+        ControlCore_Actuators_t out;
+        uint8_t mask;
+
+        ControlCore_Step(&cc, &in, &out);
+        mask = (uint8_t)((out.valve1_open << 0) | (out.valve2_open << 1) | (out.valve3_open << 2));
+        if ((last_mask != 0xFFu) && (mask != last_mask)) { transitions++; }
+        last_mask = mask;
+        SimPlant_Step(&plant, out.pump_power,
+                     (uint8_t)(out.valve1_open + out.valve2_open + out.valve3_open), 1u, &measured_kpa);
+    }
+    return transitions;
+}
+
+static void test_relief_valve_hysteresis_with_ripple(void)
+{
+    uint32_t small = count_valve_transitions_with_ripple(1.0f, 8000u);
+    uint32_t large = count_valve_transitions_with_ripple(4.0f, 8000u);
+
+    printf("  [ripple] valve_transitions em 8 s: small_cuff=%u large_cuff=%u\n", small, large);
+    /* Teto de RELIEF_MIN_OFF_MS (300 ms): no maximo ~27 aberturas em 8 s
+     * mesmo no pior caso; o limite aqui pega uma volta do chaveamento. */
+    CHECK(small <= 20u);
+    CHECK(large <= 20u);
+}
+
+/* Longe do setpoint a bomba roda a 100% com as valvulas fechadas. */
+static void test_fast_approach_full_power_far_from_setpoint(void)
+{
+    SystemConfig_t cfg = default_cfg();
+    SystemRuntime_t rt;
+    ControlCore_SafetyConfig_t safety = default_safety();
+    ControlCore_t cc;
+    ControlCore_Inputs_t in = { 0.0f, 1u, 0u, 1u };
+    ControlCore_Actuators_t out;
+
+    memset(&rt, 0, sizeof(rt));
+    rt.setpoint_mmhg = 120.0f;
+    ControlCore_Init(&cc, &cfg, &rt, &safety);
+    ControlCore_StartInflation(&cc);
+
+    ControlCore_Step(&cc, &in, &out);
+    printf("  [fast_approach] pump=%.2f v=%u%u%u fast=%u\n", (double)out.pump_power,
+           out.valve1_open, out.valve2_open, out.valve3_open, cc.fast_approach);
+    CHECK(out.pump_power == 1.0f);
+    CHECK((out.valve1_open | out.valve2_open | out.valve3_open) == 0u);
+    CHECK(cc.fast_approach != 0u);
+
+    /* Ja' dentro da zona de regulacao: PID assume (sai da potencia maxima). */
+    in.pressure_kpa = 115.0f / MMHG_PER_KPA;
+    ControlCore_Step(&cc, &in, &out);
+    CHECK(cc.fast_approach == 0u);
+    CHECK(out.pump_power < 1.0f);
 }
 
 int main(void)
@@ -386,6 +523,9 @@ int main(void)
     test_overpressure_triggers_e001_immediately();
     test_abort_request_deflates_to_idle();
     test_cycle_stats_full_run();
+    test_abort_during_inflation_sets_nc07_flag();
+    test_relief_valve_hysteresis_with_ripple();
+    test_fast_approach_full_power_far_from_setpoint();
     printf(s_fail ? "control_core: %d FALHA(S)\n" : "control_core: OK\n", s_fail);
     return s_fail != 0;
 }

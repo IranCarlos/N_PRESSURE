@@ -240,6 +240,28 @@ SECTIONS
     . = ALIGN(4);
   } >RAM_D1
 
+  /* .bss da IHM (LVGL + telas + port) em RAM_D1 em vez de DTCMRAM (2026-10-21):
+   * so' o heap interno do LVGL (work_mem_int, LV_MEM_SIZE em lv_conf.h) sao
+   * 64 KB, e a DTCMRAM (128 KB) chegou a 97,9%. A IHM roda na uiTask, de
+   * prioridade baixa, e nao precisa da latencia zero da DTCM — a AXI SRAM
+   * e' rapida o bastante para ela (mesmo sem a D-Cache, que este projeto
+   * ainda nao liga — ver main()); a DTCM fica para o controle e as pilhas. Selecao pelo caminho do objeto (sem editar o LVGL vendorizado):
+   * tem que aparecer ANTES de .bss abaixo, pelo mesmo motivo da secao
+   * .fatfs_dma_buffer acima (o ld usa a 1a regra que casar). So' .bss:
+   * o .data dessas pastas (~220 B) continua em DTCM, copiado pela startup.
+   * NOLOAD: zerada junto com toda a RAM_D1 por PortRamEcc_InitAxiSram() no
+   * inicio de main(), antes de lv_init() (mesma premissa do .dma_buffer).
+   * NAO e' DMA: buffers de DMA continuam marcados com DMA_BUFFER. */
+  .ui_bss (NOLOAD) : ALIGN(8)
+  {
+    . = ALIGN(8);
+    *ThirdParty/lvgl/*(.bss .bss.* COMMON)
+    *App/HMI_UI/*(.bss .bss.* COMMON)
+    *App/HMI_Port/*(.bss .bss.* COMMON)
+    *Bsp/LvglPort/*(.bss .bss.* COMMON)
+    . = ALIGN(8);
+  } >RAM_D1
+
   .bss (NOLOAD) : ALIGN(4)
   {
     *(.bss)
@@ -261,9 +283,10 @@ SECTIONS
    * apenas ao core Cortex-M7 e NAO e' alcancavel pelos controladores DMA
    * do STM32H7 — um buffer la' faria o DMA ler/escrever lixo. RAM_D1 (AXI
    * SRAM) esta' na matriz de barramento e e' alcancavel por DMA1/DMA2.
-   * NOLOAD: nao e' zerada no boot (a startup so' zera _sbss.._ebss); os
-   * usos atuais sempre escrevem o buffer antes de le-lo (LVGL renderiza
-   * antes do flush, ADC recebe amostra nova antes da leitura). */
+   * NOLOAD: a startup nao zera (so' _sbss.._ebss, em DTCM). Toda a RAM_D1
+   * e' zerada com escritas de 64 bits por PortRamEcc_InitAxiSram() no
+   * inicio de main() — obrigatorio por causa do ECC da AXI SRAM (escrita
+   * parcial em palavra com ECC aleatorio = BusFault). Ver port_ram_ecc.h. */
   .dma_buffer (NOLOAD) : ALIGN(32)
   {
     . = ALIGN(32);

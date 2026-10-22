@@ -56,6 +56,20 @@ static void test_baseline_ignores_applied_pressure(void)
     NEAR(pc.pressure_kpa, 2.0f, 0.02f);
 }
 
+/* Boot com o tubo ja' pressurizado (bomba ligou durante o reset): a 1a
+ * amostra fixa o zero alto; quando a pressao escoa ate' a atmosfera, o zero
+ * tem que descer junto (antes ficava preso fora da janela para sempre). */
+static void test_baseline_recovers_from_prepressurized_boot(void)
+{
+    PressureCore_t pc; uint16_t b[16];
+    PressureCore_Init(&pc, NULL);
+    fill(b, 16, counts_for_sensor_v(2.50f + 0.45f));  /* +5 kPa no boot */
+    PressureCore_ProcessBlock(&pc, b, 16, 1);
+    fill(b, 16, counts_for_sensor_v(2.50f));          /* escoou: atmosfera */
+    for (int i = 0; i < 1000; i++) { PressureCore_ProcessBlock(&pc, b, 16, 1); }
+    NEAR(pc.pressure_kpa, 0.0f, 0.02f);
+}
+
 static void test_baseline_follows_slow_drift(void)
 {
     PressureCore_t pc; uint16_t b[16];
@@ -136,6 +150,7 @@ int main(void)
     test_baseline_and_diff();
     test_baseline_ignores_applied_pressure();
     test_baseline_follows_slow_drift();
+    test_baseline_recovers_from_prepressurized_boot();
     test_calibration_applied();
     test_two_point();
     test_out_of_range();
