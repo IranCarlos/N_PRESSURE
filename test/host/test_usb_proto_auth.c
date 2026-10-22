@@ -172,8 +172,72 @@ static void test_new_challenge_invalidates_previous_pending_nonce(void)
     CHECK(st == USB_PROTO_AUTH_ERR_HMAC_MISMATCH);
 }
 
+/* Fase 7.4: sessao DEV expira por inatividade; comandos renovam. */
+static void elevate(UsbProtoAuthSession_t *sess, uint32_t at_ms)
+{
+    uint8_t nonce[USB_PROTO_AUTH_NONCE_LEN];
+    UsbProtoRole_t role;
+
+    UsbProtoAuth_Init(sess, KEY, 1U);
+    UsbProtoAuth_HandleChallenge(sess, at_ms, NONCE_SRC, nonce);
+    (void)UsbProtoAuth_HandleResponse(sess, at_ms, SERIAL, VALID_MAC, &role);
+    CHECK(role == USB_PROTO_ROLE_DEV);
+}
+
+static void test_dev_session_expires_after_inactivity(void)
+{
+    UsbProtoAuthSession_t sess;
+
+    elevate(&sess, 1000U);
+    CHECK(UsbProtoAuth_CheckExpiry(&sess, 1000U + USB_PROTO_AUTH_SESSION_TIMEOUT_MS) == 0U);
+    CHECK(UsbProtoAuth_GetRole(&sess) == USB_PROTO_ROLE_DEV);
+    CHECK(UsbProtoAuth_CheckExpiry(&sess, 1000U + USB_PROTO_AUTH_SESSION_TIMEOUT_MS + 1U) == 1U);
+    CHECK(UsbProtoAuth_GetRole(&sess) == USB_PROTO_ROLE_USER);
+    /* avisa uma vez so' */
+    CHECK(UsbProtoAuth_CheckExpiry(&sess, 1000U + 2U * USB_PROTO_AUTH_SESSION_TIMEOUT_MS) == 0U);
+}
+
+static void test_touch_renews_dev_session(void)
+{
+    UsbProtoAuthSession_t sess;
+    uint32_t t = 1000U + USB_PROTO_AUTH_SESSION_TIMEOUT_MS - 5U;
+
+    elevate(&sess, 1000U);
+    UsbProtoAuth_Touch(&sess, t);
+    CHECK(UsbProtoAuth_CheckExpiry(&sess, t + USB_PROTO_AUTH_SESSION_TIMEOUT_MS) == 0U);
+    CHECK(UsbProtoAuth_GetRole(&sess) == USB_PROTO_ROLE_DEV);
+}
+
+static void test_expiry_with_tick_wraparound(void)
+{
+    UsbProtoAuthSession_t sess;
+
+    elevate(&sess, 0xFFFFFF00U); /* HAL_GetTick() perto de dar a volta */
+    CHECK(UsbProtoAuth_CheckExpiry(&sess, 0x00000100U) == 0U); /* so' 512 ms depois */
+    CHECK(UsbProtoAuth_GetRole(&sess) == USB_PROTO_ROLE_DEV);
+}
+
+static void test_reset_drops_dev_and_pending_nonce(void)
+{
+    UsbProtoAuthSession_t sess;
+    uint8_t nonce[USB_PROTO_AUTH_NONCE_LEN];
+    UsbProtoRole_t role;
+
+    elevate(&sess, 1000U);
+    UsbProtoAuth_Reset(&sess);
+    CHECK(UsbProtoAuth_GetRole(&sess) == USB_PROTO_ROLE_USER);
+
+    UsbProtoAuth_HandleChallenge(&sess, 2000U, NONCE_SRC, nonce);
+    UsbProtoAuth_Reset(&sess); /* desconectou com challenge pendente */
+    CHECK(UsbProtoAuth_HandleResponse(&sess, 2100U, SERIAL, VALID_MAC, &role) == USB_PROTO_AUTH_ERR_NO_CHALLENGE);
+}
+
 int main(void)
 {
+    test_dev_session_expires_after_inactivity();
+    test_touch_renews_dev_session();
+    test_expiry_with_tick_wraparound();
+    test_reset_drops_dev_and_pending_nonce();
     test_challenge_then_valid_response_elevates_to_dev();
     test_wrong_hmac_rejected();
     test_expired_nonce_rejected();

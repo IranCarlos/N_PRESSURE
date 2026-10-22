@@ -46,6 +46,10 @@ uint32_t RtcService_ReevaluateAfterSet(RTC_HandleTypeDef *hrtc);
  */
 uint8_t RtcService_SetDateTime(RTC_HandleTypeDef *hrtc, const RtcValidity_DateTime_t *dt);
 
+/* Data/hora atual (GetTime antes de GetDate, exigencia do HAL). Em falha do
+ * HAL devolve tudo zerado. */
+void RtcService_Now(RTC_HandleTypeDef *hrtc, RtcValidity_DateTime_t *out);
+
 /* Ultimo resultado de RtcService_CheckAtBoot()/ReevaluateAfterSet() (Live Watch / diagnostico). */
 uint32_t RtcService_GetFlags(void);
 

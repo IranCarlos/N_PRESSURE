@@ -285,6 +285,28 @@ uint8_t RtcService_SetDateTime(RTC_HandleTypeDef *hrtc, const RtcValidity_DateTi
     return 1u;
 }
 
+void RtcService_Now(RTC_HandleTypeDef *hrtc, RtcValidity_DateTime_t *out)
+{
+    RTC_TimeTypeDef t = { 0 };
+    RTC_DateTypeDef d = { 0 };
+
+    if (out == NULL) {
+        return;
+    }
+    if ((hrtc == NULL) ||
+        (HAL_RTC_GetTime(hrtc, &t, RTC_FORMAT_BIN) != HAL_OK) ||   /* trava os registradores-sombra... */
+        (HAL_RTC_GetDate(hrtc, &d, RTC_FORMAT_BIN) != HAL_OK)) {   /* ...ate' esta leitura */
+        t = (RTC_TimeTypeDef){ 0 };
+        d = (RTC_DateTypeDef){ 0 };
+    }
+    out->year_2d = d.Year;
+    out->month = d.Month;
+    out->day = d.Date;
+    out->hour = t.Hours;
+    out->minute = t.Minutes;
+    out->second = t.Seconds;
+}
+
 uint32_t RtcService_GetFlags(void)
 {
     return s_flags;

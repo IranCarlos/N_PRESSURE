@@ -55,6 +55,10 @@
 #include "usb_proto_frame.h"
 #include "usb_proto_dispatch.h"
 #include "usb_actions_stm32.h"
+#include "usb_telemetry.h"
+#include "usb_proto_events.h"
+#include "event_watch.h"
+#include "app_event_log.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -275,7 +279,7 @@ const osThreadAttr_t inputTask_attributes = {
 };
 /* Definitions for appTask */
 osThreadId_t appTaskHandle;
-uint32_t appTaskBuffer[ 256 ];
+uint32_t appTaskBuffer[ 512 ];
 osStaticThreadDef_t appTaskControlBlock;
 const osThreadAttr_t appTask_attributes = {
   .name = "appTask",
@@ -425,6 +429,9 @@ uint8_t g_dev_key[USB_PROTO_AUTH_DEV_KEY_LEN];
 uint8_t g_dev_key_valid;
 volatile uint32_t g_eeprom_i2c_error; // hi2c1.ErrorCode apos carregar a chave DEV (diagnostico de bancada)
 UsbProtoAuthSession_t g_usb_auth_session;
+// Fase 7.4: fila de telemetria - controlTask produz (1 kHz), usbProtoTask
+// consome (usb_telemetry.h). ~2 KB.
+UsbTelemetry_t g_usb_telemetry;
 #endif
 volatile uint32_t g_supervisor_last_mask;
 volatile uint32_t g_supervisor_missed_windows;
@@ -543,6 +550,122 @@ static void build_log_datetime_now(StorageFormat_DateTime_t *out)
     out->minute = t.Minutes;
     out->second = t.Seconds;
 }
+
+/* ---- Fase 7.4: transmissao serializada, eventos e conexao logica -------- */
+
+/* Quanto esperar a transmissao anterior terminar antes de desistir de um
+ * frame. CDC_Transmit_HS devolve BUSY enquanto o hardware ainda usa o buffer
+ * anterior - antes (so' respostas) o frame era descartado em silencio; com
+ * stream + eventos + respostas disputando o mesmo IN endpoint, toda saida
+ * passa por usb_send_frame(), que espera (com teto) e so' entao reescreve o
+ * buffer. */
+#define USB_TX_WAIT_MS (20U)
+
+static uint8_t s_usb_tx_frame[USB_PROTO_FRAME_MAX_LEN];
+static uint8_t s_usb_tx_encoded[COBS_MAX_ENCODED_LEN(USB_PROTO_FRAME_MAX_LEN) + 1U]; /* +1 = delimitador 0x00 */
+
+/* 1 depois que o PC mandou um REQ valido nesta conexao: so' entao o
+ * equipamento manda EVT/STREAM sozinho (um terminal qualquer aberto na porta
+ * nao recebe binario sem ter falado o protocolo). */
+static uint8_t s_usb_host_active;
+static EventWatch_t s_usb_watch;
+
+static uint8_t usb_send_frame(UsbProtoType_t type, uint16_t seq, uint16_t cmd,
+                              const uint8_t *payload, size_t len)
+{
+  UsbProtoFrame_t f;
+  size_t frame_len = 0U;
+  size_t enc_len = 0U;
+  uint32_t t0 = HAL_GetTick();
+
+  while (CDC_IsTxBusy_HS() != 0U)
+  {
+    if ((HAL_GetTick() - t0) > USB_TX_WAIT_MS)
+    {
+      return 0U; /* PC parou de ler (porta aberta sem leitor) - descarta */
+    }
+    osDelay(1);
+  }
+  if (CDC_IsReady_HS() == 0U)
+  {
+    return 0U;
+  }
+
+  f.ver = USB_PROTO_VERSION;
+  f.type = type;
+  f.seq = seq;
+  f.cmd = cmd;
+  f.len = (uint16_t)len;
+  f.payload = payload;
+  if (UsbProtoFrame_Build(&f, s_usb_tx_frame, sizeof(s_usb_tx_frame), &frame_len) != USB_PROTO_FRAME_OK)
+  {
+    return 0U;
+  }
+  if (Cobs_Encode(s_usb_tx_frame, frame_len, s_usb_tx_encoded, sizeof(s_usb_tx_encoded) - 1U, &enc_len) != COBS_OK)
+  {
+    return 0U;
+  }
+  // Delimitador 0x00 no MESMO buffer/chamada: uma 2a chamada so' para ele
+  // podia voltar BUSY e quebrar o framing do lado do PC.
+  s_usb_tx_encoded[enc_len] = 0x00U;
+  return (CDC_Transmit_HS(s_usb_tx_encoded, (uint16_t)(enc_len + 1U)) == USBD_OK) ? 1U : 0U;
+}
+
+static void usb_host_seen(void)
+{
+  if (s_usb_host_active == 0U)
+  {
+    s_usb_host_active = 1U;
+    EventWatch_Init(&s_usb_watch); /* 1a foto so' memoriza - sem evento falso ao conectar */
+  }
+}
+
+static void usb_host_disconnected(void)
+{
+  s_usb_host_active = 0U;
+#if BRINGUP_ENABLE_CONTROL
+  UsbTelemetry_Stop(&g_usb_telemetry);
+#endif
+  UsbProtoAuth_Reset(&g_usb_auth_session); /* o proximo PC nao herda a sessao DEV */
+}
+
+#if BRINGUP_ENABLE_CONTROL
+/* Eventos assincronos (usb_proto_events.h) a partir do que mudou desde a
+ * volta anterior. `buf` = buffer de payload da task (>= USB_PROTO_EVT_MAX_PAYLOAD). */
+static void usb_poll_events(uint8_t *buf)
+{
+  EventWatch_Snapshot_t now;
+  EventWatch_Snapshot_t prev;
+  uint32_t mask;
+  size_t n;
+
+  UsbActionsStm32_FillWatchSnapshot(&now);
+  mask = EventWatch_Poll(&s_usb_watch, &now, &prev);
+
+  if ((mask & EVENT_WATCH_STATE_CHANGED) != 0U)
+  {
+    n = UsbProtoEvt_StateChanged(buf, (uint8_t)prev.state, (uint8_t)now.state);
+    (void)usb_send_frame(USB_PROTO_TYPE_EVT, 0U, USB_PROTO_EVT_ESTADO_MUDOU, buf, n);
+  }
+  if ((mask & (EVENT_WATCH_ERROR_RAISED | EVENT_WATCH_ERROR_CLEARED)) != 0U)
+  {
+    n = UsbProtoEvt_Error(buf, now.error);
+    (void)usb_send_frame(USB_PROTO_TYPE_EVT, 0U, USB_PROTO_EVT_ERRO, buf, n);
+  }
+  if ((mask & (EVENT_WATCH_SD_INSERTED | EVENT_WATCH_SD_REMOVED)) != 0U)
+  {
+    n = UsbProtoEvt_Sd(buf, now.sd_mounted);
+    (void)usb_send_frame(USB_PROTO_TYPE_EVT, 0U, USB_PROTO_EVT_SD, buf, n);
+  }
+  if ((mask & EVENT_WATCH_CYCLE_FINISHED) != 0U)
+  {
+    UsbProtoEvtCycle_t c;
+    UsbActionsStm32_FillCycleEvent(&c);
+    n = UsbProtoEvt_CycleFinished(buf, &c);
+    (void)usb_send_frame(USB_PROTO_TYPE_EVT, 0U, USB_PROTO_EVT_ENSAIO_CONCLUIDO, buf, n);
+  }
+}
+#endif /* BRINGUP_ENABLE_CONTROL */
 #endif /* APP_MODE_BRINGUP && BRINGUP_ENABLE_USB */
 
 /* USER CODE END 0 */
@@ -734,6 +857,10 @@ int main(void)
     // BRINGUP_ENABLE_CONTROL a tabela fica sem bind e esses comandos
     // respondem OCUPADO (ver StartUsbProtoTask).
     UsbActionsStm32_Bind(g_control_runtime, &g_bringup_sys_cfg);
+#endif
+#if BRINGUP_ENABLE_STORAGE
+    // Fase 7.4: estado/erros/SD/fim de ensaio no log do SD (appTask).
+    AppEventLog_Init(g_control_runtime);
 #endif
   }
 #endif
@@ -930,6 +1057,7 @@ int main(void)
 #endif
 #if BRINGUP_ENABLE_USB
   UsbRxRing_Init(&g_usb_rx_ring); // nao depende do kernel, mas fica junto por simetria
+  UsbTelemetry_Init(&g_usb_telemetry);
 
   read_device_uid(g_device_serial);
 
@@ -1841,6 +1969,15 @@ void StartControlTask(void *argument)
     g_control_last_error = (uint32_t)ControlLoop_GetLastError();
     g_control_jitter_us = ControlLoop_GetMaxJitterCycles() / (SystemCoreClock / 1000000u);
     g_control_pid_diag = *ControlLoop_GetPidDiag();
+#if BRINGUP_ENABLE_USB
+    // Fase 7.4: amostra de telemetria quando a decimacao pede (so' um
+    // contador nos outros ticks). Nunca bloqueia: fila cheia descarta.
+    if (UsbTelemetry_TickDue(&g_usb_telemetry) != 0u) {
+      UsbTelemetrySample_t sample;
+      UsbActionsStm32_FillTelemetrySample(&sample);
+      UsbTelemetry_Push(&g_usb_telemetry, &sample);
+    }
+#endif
 #elif BRINGUP_ENABLE_PRESSURE
     ADC_Acq_Update();
 #if BRINGUP_ENABLE_ACTUATORS
@@ -2039,6 +2176,9 @@ void StartAppTask(void *argument)
     // nao chama StorageTask_Log*()/SubmitTestRecord() a partir do ciclo de
     // ensaio de verdade (Fase 6+).
     g_storage_stats = StorageTask_GetStats();
+#if BRINGUP_ENABLE_CONTROL
+    AppEventLog_Poll(); // Fase 7.4: registra estado/erros/SD/fim de ensaio
+#endif
 #endif
     Supervisor_CheckIn(SUPERVISOR_TASK_APP);
     osDelay(TASK_HMI_PERIOD_MS);
@@ -2057,22 +2197,35 @@ void StartUsbProtoTask(void *argument)
 {
   /* USER CODE BEGIN StartUsbProtoTask */
 #if (APP_MODE_BRINGUP && BRINGUP_ENABLE_USB)
-  // Buffers estaticos (fora da pilha da task - so' 2KB, ver usbProtoTaskBuffer)
-  // dimensionados para os comandos desta entrega (HELLO/GET_STATUS, payload
-  // pequeno/vazio). Vai precisar crescer quando FS_READ/PARAM_* (payload ate'
-  // 1024B, Fase 7.5+) entrarem — ver USB_PROTO_MAX_PAYLOAD em usb_proto_frame.h.
-#define USB_PROTO_BRINGUP_BUF_LEN (256U)
-  static uint8_t s_usb_raw_frame[USB_PROTO_BRINGUP_BUF_LEN];   /* COBS-encoded acumulado entre 0x00 */
-  static uint8_t s_usb_decoded[USB_PROTO_BRINGUP_BUF_LEN];     /* header+payload+crc decodificado */
-  static uint8_t s_usb_rsp_payload[USB_PROTO_BRINGUP_BUF_LEN]; /* payload montado pelo dispatch */
-  static uint8_t s_usb_rsp_frame[USB_PROTO_BRINGUP_BUF_LEN];   /* header+payload+crc da resposta */
-  static uint8_t s_usb_rsp_encoded[COBS_MAX_ENCODED_LEN(USB_PROTO_BRINGUP_BUF_LEN) + 1U]; /* +1 = delimitador 0x00 */
+  // Buffers estaticos (fora da pilha da task - so' 2KB, ver usbProtoTaskBuffer),
+  // dimensionados para o maior frame do Apendice A (payload ate'
+  // USB_PROTO_MAX_PAYLOAD = 1024 B: GET_LOG_TAIL/STREAM agora, FS_READ na 7.5).
+  // DTCM serve: o OTG roda com dma_enable=DISABLE (usbd_conf.c), a copia para
+  // a FIFO e' feita pela CPU.
+  static uint8_t s_usb_raw_frame[COBS_MAX_ENCODED_LEN(USB_PROTO_FRAME_MAX_LEN)]; /* COBS acumulado entre 0x00 */
+  static uint8_t s_usb_decoded[USB_PROTO_FRAME_MAX_LEN];                        /* header+payload+crc decodificado */
+  static uint8_t s_usb_rsp_payload[USB_PROTO_MAX_PAYLOAD];                      /* payload de RSP/EVT/STREAM */
   size_t raw_len = 0U;
   uint8_t raw_overflow = 0U;
 
   for (;;)
   {
     uint8_t byte;
+    uint32_t now_ms;
+
+    // Cabo desconectado / ainda nao enumerado: encerra a "conexao" logica -
+    // para o stream, derruba a sessao DEV (o proximo PC nao herda) e para
+    // de mandar eventos ate' alguem falar o protocolo de novo.
+    if (CDC_IsReady_HS() == 0U)
+    {
+      if (s_usb_host_active != 0U)
+      {
+        usb_host_disconnected();
+      }
+      raw_len = 0U;
+      raw_overflow = 0U;
+    }
+
     while (UsbRxRing_Pop(&g_usb_rx_ring, &byte, 1U) == 1U)
     {
       if (byte == 0x00U)
@@ -2088,14 +2241,20 @@ void StartUsbProtoTask(void *argument)
             {
               UsbProtoStatusSnapshot_t snap;
               UsbProtoDispatchCtx_t ctx;
-              UsbProtoFrame_t rsp_frame;
               uint8_t challenge_random[USB_PROTO_AUTH_NONCE_LEN];
               size_t rsp_payload_len;
-              size_t rsp_frame_len = 0U;
-              size_t rsp_encoded_len = 0U;
 
+              now_ms = HAL_GetTick();
+              usb_host_seen();
+              UsbProtoAuth_Touch(&g_usb_auth_session, now_ms); /* renova a sessao DEV (Fase 7.4) */
+
+              memset(&ctx, 0, sizeof(ctx));
               snap.system_state = (uint8_t)g_control_runtime->state;
+#if BRINGUP_ENABLE_CONTROL
+              snap.pressure_mmhg = UsbActionsStm32_PressureMmHg(); /* sempre mmHg (pressure_display segue a unidade da IHM) */
+#else
               snap.pressure_mmhg = g_control_runtime->pressure_display;
+#endif
               snap.setpoint_mmhg = g_control_runtime->setpoint_mmhg;
               snap.rtc_valid = (RtcService_GetFlags() == 0U) ? 1U : 0U; // atualizado tambem por ajuste de hora na IHM
 #if BRINGUP_ENABLE_STORAGE
@@ -2109,12 +2268,19 @@ void StartUsbProtoTask(void *argument)
               ctx.status = &snap;
               ctx.device_serial = g_device_serial;
               ctx.auth = &g_usb_auth_session;
-              ctx.now_ms = HAL_GetTick();
+              ctx.now_ms = now_ms;
               ctx.challenge_random = challenge_random;
 #if BRINGUP_ENABLE_CONTROL
               ctx.actions = UsbActionsStm32_Get();
+              ctx.telemetry = &g_usb_telemetry;
 #else
-              ctx.actions = NULL; /* sem Control_Loop: comandos de controle -> OCUPADO */
+              ctx.actions = NULL;   /* sem Control_Loop: comandos de controle -> OCUPADO */
+              ctx.telemetry = NULL; /* sem controlTask produzindo amostras -> OCUPADO */
+#endif
+#if BRINGUP_ENABLE_STORAGE
+              ctx.get_log_entry = UsbActionsStm32_GetLogEntry;
+#else
+              ctx.get_log_entry = NULL;
 #endif
 
               rsp_payload_len = UsbProtoDispatch_Handle(req_frame.cmd, req_frame.payload, req_frame.len,
@@ -2128,42 +2294,22 @@ void StartUsbProtoTask(void *argument)
                   && ((s_usb_rsp_payload[0] == (uint8_t)USB_PROTO_RSP_SEM_PERMISSAO)
                       || (s_usb_rsp_payload[0] == (uint8_t)USB_PROTO_RSP_NAO_AUTENTICADO)))
               {
-                static uint32_t s_auth_log_seq;
                 StorageFormat_LogEntry_t entry = {0};
                 build_log_datetime_now(&entry.datetime);
                 entry.tz_offset_hours = -3; /* America/Sao_Paulo - ver storage_format.h */
-                entry.seq = ++s_auth_log_seq; /* placeholder local - nao e' a seq oficial do log (Fase 7.9?) */
-                entry.level = STORAGE_LOG_LEVEL_AUDIT;
+                entry.level = STORAGE_LOG_LEVEL_AUDIT; /* seq e' atribuida pelo StorageTask */
                 entry.code = "";
                 entry.test_id = 0U;
                 entry.state_name = "";
-                entry.pressure_mmhg = g_control_runtime->pressure_display;
+                entry.pressure_mmhg = snap.pressure_mmhg;
                 entry.message = (s_usb_rsp_payload[0] == (uint8_t)USB_PROTO_RSP_NAO_AUTENTICADO)
                                      ? "USB AUTH_RESPONSE negado (HMAC/nonce invalido)"
                                      : "USB comando negado (SEM_PERMISSAO)";
                 (void)StorageTask_LogAudit(&entry);
               }
 
-              rsp_frame.ver = USB_PROTO_VERSION;
-              rsp_frame.type = USB_PROTO_TYPE_RSP;
-              rsp_frame.seq = req_frame.seq;
-              rsp_frame.cmd = req_frame.cmd;
-              rsp_frame.len = (uint16_t)rsp_payload_len;
-              rsp_frame.payload = s_usb_rsp_payload;
-
-              if (UsbProtoFrame_Build(&rsp_frame, s_usb_rsp_frame, sizeof(s_usb_rsp_frame), &rsp_frame_len) == USB_PROTO_FRAME_OK)
-              {
-                if (Cobs_Encode(s_usb_rsp_frame, rsp_frame_len, s_usb_rsp_encoded, sizeof(s_usb_rsp_encoded), &rsp_encoded_len) == COBS_OK)
-                {
-                  // Delimitador 0x00 no MESMO buffer/chamada de transmissao:
-                  // CDC_Transmit_HS retorna USBD_BUSY se a transmissao anterior
-                  // ainda nao terminou, e sem retry uma 2a chamada separada so'
-                  // para o delimitador podia ser silenciosamente descartada,
-                  // quebrando o framing do lado do PC.
-                  s_usb_rsp_encoded[rsp_encoded_len] = 0x00U;
-                  (void)CDC_Transmit_HS(s_usb_rsp_encoded, (uint16_t)(rsp_encoded_len + 1U));
-                }
-              }
+              (void)usb_send_frame(USB_PROTO_TYPE_RSP, req_frame.seq, req_frame.cmd,
+                                   s_usb_rsp_payload, rsp_payload_len);
             }
           }
         }
@@ -2177,8 +2323,37 @@ void StartUsbProtoTask(void *argument)
       }
       else
       {
-        raw_overflow = 1U; /* frame maior que o buffer - descarta at'e o proximo 0x00 */
+        raw_overflow = 1U; /* frame maior que o buffer - descarta ate' o proximo 0x00 */
       }
+    }
+
+    // Fase 7.4: o que o equipamento manda sozinho - so' para um PC que ja'
+    // falou o protocolo nesta conexao (s_usb_host_active).
+    if (s_usb_host_active != 0U)
+    {
+      now_ms = HAL_GetTick();
+      if (UsbProtoAuth_CheckExpiry(&g_usb_auth_session, now_ms) != 0U)
+      {
+        (void)usb_send_frame(USB_PROTO_TYPE_EVT, 0U, USB_PROTO_EVT_AUTH_EXPIROU, s_usb_rsp_payload, 0U);
+#if BRINGUP_ENABLE_CONTROL
+        UsbActionsStm32_LogAuthExpired();
+#endif
+      }
+#if BRINGUP_ENABLE_CONTROL
+      usb_poll_events(s_usb_rsp_payload);
+
+      // Telemetria: um frame por volta com tudo o que acumulou (ate' 63
+      // amostras em 1024 B; a 1 kHz e volta de 2 ms sao ~2 por frame).
+      {
+        size_t stream_len = UsbTelemetry_DrainToPayload(&g_usb_telemetry, s_usb_rsp_payload,
+                                                        sizeof(s_usb_rsp_payload));
+        if (stream_len > 0U)
+        {
+          (void)usb_send_frame(USB_PROTO_TYPE_STREAM, 0U, USB_PROTO_CMD_STREAM_START,
+                               s_usb_rsp_payload, stream_len);
+        }
+      }
+#endif
     }
     osDelay(2);
   }

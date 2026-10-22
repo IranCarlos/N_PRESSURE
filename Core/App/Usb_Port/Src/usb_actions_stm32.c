@@ -11,13 +11,18 @@
 #include "rtc_service.h"
 #include "storage_task.h"
 #include "ui_backend_stm32.h"
+#include "valve.h"
+#include "pwm_motor.h"
+#include "cycle_record.h"
 #include <stdio.h>
+#include <string.h>
 
 /* App nao inclui main.h (ver CLAUDE.md): handle do CubeMX declarado extern,
  * mesmo criterio de ui_backend_stm32.c. */
 extern RTC_HandleTypeDef hrtc;
 
 #define USB_ACTIONS_TZ_OFFSET_HOURS (-3) /* America/Sao_Paulo - ver storage_format.h */
+#define USB_ACTIONS_MMHG_PER_KPA    (7.50062f)
 
 static SystemRuntime_t * s_rt;
 static const SystemConfig_t * s_cfg;
@@ -206,4 +211,116 @@ static UsbProtoRspStatus_t act_set_operator(uint16_t operator_id, uint16_t parti
                    (unsigned)operator_id, (unsigned)participant_id);
     log_usb_command(STORAGE_LOG_LEVEL_EVT, msg);
     return USB_PROTO_RSP_OK;
+}
+
+/* --- Fase 7.4 ----------------------------------------------------------- */
+
+float UsbActionsStm32_PressureMmHg(void)
+{
+    return (s_rt != NULL) ? (s_rt->pressure_kpa * USB_ACTIONS_MMHG_PER_KPA) : 0.0f;
+}
+
+void UsbActionsStm32_FillTelemetrySample(UsbTelemetrySample_t * s)
+{
+    float pump = PwmMotor_GetPower(); /* 0..1 */
+    uint8_t valves = 0u;
+
+    s->t_ms = HAL_GetTick();
+    s->pressure_mmhg = UsbActionsStm32_PressureMmHg();
+    s->setpoint_mmhg = (s_rt != NULL) ? s_rt->setpoint_mmhg : 0.0f;
+    s->state = (s_rt != NULL) ? (uint8_t)s_rt->state : 0u;
+    if (pump < 0.0f) {
+        pump = 0.0f;
+    }
+    if (pump > 1.0f) {
+        pump = 1.0f;
+    }
+    s->pump_pct = (uint8_t)((pump * 100.0f) + 0.5f);
+    /* Mascara de valvulas abertas: bit0=V1, bit1=V2, bit2=V3 (usb_telemetry.h). */
+    if (Valve_Get(VALVE_1) == VALVE_OPEN) {
+        valves |= USB_TELEMETRY_VALVE_V1;
+    }
+    if (Valve_Get(VALVE_2) == VALVE_OPEN) {
+        valves |= USB_TELEMETRY_VALVE_V2;
+    }
+    if (Valve_Get(VALVE_3) == VALVE_OPEN) {
+        valves |= USB_TELEMETRY_VALVE_V3;
+    }
+    s->valves = valves;
+    s->error = (uint8_t)ControlLoop_GetLastError();
+}
+
+void UsbActionsStm32_FillWatchSnapshot(EventWatch_Snapshot_t * snap)
+{
+    const ControlCore_CycleStats_t * stats = ControlLoop_GetCycleStats();
+
+    snap->state = (s_rt != NULL) ? s_rt->state : SYSTEM_STATE_BOOT;
+    snap->error = (uint8_t)ControlLoop_GetLastError();
+    snap->sd_mounted = StorageTask_GetStats().sd_mounted;
+    snap->cycle_finalized = (stats != NULL) ? stats->finalized : 0u;
+}
+
+void UsbActionsStm32_FillCycleEvent(UsbProtoEvtCycle_t * c)
+{
+    const ControlCore_CycleStats_t * stats = ControlLoop_GetCycleStats();
+    CycleRecord_Metrics_t m;
+
+    memset(c, 0, sizeof(*c));
+    if ((stats == NULL) || (s_rt == NULL)) {
+        return;
+    }
+
+    /* Mesmas metricas que a IHM usa para o popup/registro do ciclo
+     * (UiBackend_PollCycleResult) - o PC ve a mesma classificacao NCxx. */
+    memset(&m, 0, sizeof(m));
+    m.setpoint_mmhg = s_rt->setpoint_mmhg;
+    m.peak_mmhg = stats->peak_mmhg;
+    m.plateau_mean_mmhg = (stats->plateau_sample_count > 0u)
+        ? (stats->plateau_sum_mmhg / (float)stats->plateau_sample_count) : 0.0f;
+    m.plateau_min_mmhg = stats->plateau_min_mmhg;
+    m.plateau_max_mmhg = stats->plateau_max_mmhg;
+    m.inflate_time_s = (float)stats->inflate_time_ms / 1000.0f;
+    m.plateau_time_s = (float)stats->plateau_time_ms / 1000.0f;
+    m.deflate_time_s = (float)stats->deflate_time_ms / 1000.0f;
+    m.residual_mmhg = stats->residual_mmhg;
+    m.aborted_by_operator = stats->aborted_by_operator;
+    m.technical_fault = stats->technical_fault;
+
+    c->setpoint_mmhg = m.setpoint_mmhg;
+    c->peak_mmhg = stats->peak_mmhg;
+    c->residual_mmhg = stats->residual_mmhg;
+    c->inflate_time_ms = stats->inflate_time_ms;
+    c->plateau_time_ms = stats->plateau_time_ms;
+    c->deflate_time_ms = stats->deflate_time_ms;
+    c->aborted_by_operator = stats->aborted_by_operator;
+    c->technical_fault = stats->technical_fault;
+    c->nc_code = (uint8_t)CycleRecord_Evaluate(&m);
+}
+
+uint8_t UsbActionsStm32_GetLogEntry(uint32_t newest_offset, UsbProtoLogEntry_t * out)
+{
+    StorageTask_LogTailEntry_t e;
+
+    if ((out == NULL) || (StorageTask_GetLogTail(newest_offset, &e) == 0u)) {
+        return 0u;
+    }
+    out->seq = e.seq;
+    out->year = e.datetime.year;
+    out->month = e.datetime.month;
+    out->day = e.datetime.day;
+    out->hour = e.datetime.hour;
+    out->minute = e.datetime.minute;
+    out->second = e.datetime.second;
+    /* StorageFormat_LogLevel_t (EVT=0, ERR=1, AUDIT=2) == USB_PROTO_LOG_LEVEL_* */
+    out->level = e.level;
+    memcpy(out->code, e.code, sizeof(out->code));
+    out->code[sizeof(out->code) - 1u] = '\0';
+    memcpy(out->message, e.message, sizeof(out->message));
+    out->message[sizeof(out->message) - 1u] = '\0';
+    return 1u;
+}
+
+void UsbActionsStm32_LogAuthExpired(void)
+{
+    log_usb_command(STORAGE_LOG_LEVEL_AUDIT, "USB: sessao DEV expirada por inatividade");
 }

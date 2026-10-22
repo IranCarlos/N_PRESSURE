@@ -43,6 +43,33 @@ void UsbActionsStm32_Bind(SystemRuntime_t * runtime, const SystemConfig_t * conf
 /* Tabela para UsbProtoDispatchCtx_t.actions. */
 const UsbProtoActions_t * UsbActionsStm32_Get(void);
 
+/* --- Fase 7.4 ----------------------------------------------------------- */
+
+#include "usb_telemetry.h"
+#include "usb_proto_events.h"
+#include "event_watch.h"
+
+/* Pressao em mmHg SEMPRE (pressure_display segue a unidade escolhida pelo
+ * usuario nos estados CONFIG/LEAK_TEST - nao serve para o protocolo). */
+float UsbActionsStm32_PressureMmHg(void);
+
+/* Amostra de telemetria do instante atual. Chamada pela controlTask (1 kHz)
+ * so' quando UsbTelemetry_TickDue() pede - le estado, pressao, setpoint,
+ * bomba e valvulas (leituras simples, sem bloquear). */
+void UsbActionsStm32_FillTelemetrySample(UsbTelemetrySample_t * s);
+
+/* Foto para o Event_Watch da usbProtoTask (eventos EVT). */
+void UsbActionsStm32_FillWatchSnapshot(EventWatch_Snapshot_t * snap);
+
+/* Dados do ultimo ciclo para EVT_ENSAIO_CONCLUIDO. */
+void UsbActionsStm32_FillCycleEvent(UsbProtoEvtCycle_t * c);
+
+/* Adaptador StorageTask_GetLogTail -> UsbProtoGetLogEntryFn (GET_LOG_TAIL). */
+uint8_t UsbActionsStm32_GetLogEntry(uint32_t newest_offset, UsbProtoLogEntry_t * out);
+
+/* Linha de auditoria "sessao DEV expirou" (chamada junto com o EVT). */
+void UsbActionsStm32_LogAuthExpired(void);
+
 #ifdef __cplusplus
 }
 #endif

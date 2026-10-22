@@ -40,6 +40,29 @@ int StorageTask_LogError(const StorageFormat_LogEntry_t *entry);
 int StorageTask_LogAudit(const StorageFormat_LogEntry_t *entry);
 int StorageTask_SubmitTestRecord(const StorageFormat_RecInfo_t *info);
 
+/* Fase 7.4: o campo `seq` de StorageFormat_LogEntry_t passado acima e'
+ * IGNORADO - a numeracao e' unica, atribuida aqui na submissao (antes cada
+ * produtor tinha um contador proprio e os numeros se repetiam entre
+ * eventos/erros/auditoria). Reinicia no boot (numeracao persistente fica
+ * para quando o contador de ensaios em flash existir).
+ *
+ * Cauda do log em RAM: as ultimas STORAGE_LOG_TAIL_LEN linhas submetidas
+ * (de qualquer nivel), guardadas NA SUBMISSAO - funciona mesmo sem cartao
+ * SD e mesmo se a fila encheu. Usada por GET_LOG_TAIL (USB). */
+#define STORAGE_LOG_TAIL_LEN (24u)
+
+typedef struct {
+    StorageFormat_DateTime_t datetime;
+    uint32_t seq;
+    uint8_t  level;      /* StorageFormat_LogLevel_t */
+    char     code[8];
+    char     message[64];
+} StorageTask_LogTailEntry_t;
+
+/* newest_offset = 0 e' a mais recente. Devolve 1 e copia em *out se existe.
+ * Pode ser chamada de qualquer tarefa (secao critica curta por dentro). */
+uint8_t StorageTask_GetLogTail(uint32_t newest_offset, StorageTask_LogTailEntry_t *out);
+
 /* Corpo da tarefa (chamar de dentro de StartStorageTask() em main.c, dentro
  * do for(;;) — esta funcao JA e' o loop infinito, nunca retorna). Tenta
  * montar o cartao; se falhar, tenta de novo periodicamente (E005 — nunca

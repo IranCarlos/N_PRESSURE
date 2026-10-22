@@ -109,7 +109,12 @@ extern USBD_CDC_ItfTypeDef USBD_Interface_fops_HS;
 uint8_t CDC_Transmit_HS(uint8_t* Buf, uint16_t Len);
 
 /* USER CODE BEGIN EXPORTED_FUNCTIONS */
-
+/* Fase 7.4: 1 = enumerado pelo PC (CONFIGURED) e com a classe CDC alocada.
+ * Antes disso, ou depois de desconectar, pClassData pode ser NULL. */
+uint8_t CDC_IsReady_HS(void);
+/* 1 = a transmissao anterior ainda nao terminou (o buffer dela ainda esta'
+ * em uso pelo hardware - nao reescrever). 0 tambem quando nao esta' pronto. */
+uint8_t CDC_IsTxBusy_HS(void);
 /* USER CODE END EXPORTED_FUNCTIONS */
 
 /**

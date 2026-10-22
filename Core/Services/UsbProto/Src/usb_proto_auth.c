@@ -88,6 +88,7 @@ UsbProtoAuth_Status_t UsbProtoAuth_HandleResponse(
     }
 
     sess->role = USB_PROTO_ROLE_DEV;
+    sess->last_activity_ms = now_ms;
     *out_role = sess->role;
     return USB_PROTO_AUTH_OK;
 }
@@ -102,4 +103,28 @@ UsbProtoAuth_Status_t UsbProtoAuth_HandleLogout(UsbProtoAuthSession_t *sess,
     sess->role = USB_PROTO_ROLE_USER;
     *out_role = sess->role;
     return USB_PROTO_AUTH_OK;
+}
+
+void UsbProtoAuth_Touch(UsbProtoAuthSession_t *sess, uint32_t now_ms)
+{
+    if (sess->role == USB_PROTO_ROLE_DEV) {
+        sess->last_activity_ms = now_ms;
+    }
+}
+
+uint8_t UsbProtoAuth_CheckExpiry(UsbProtoAuthSession_t *sess, uint32_t now_ms)
+{
+    /* Diferenca sem sinal: correta mesmo com o HAL_GetTick() dando a volta. */
+    if ((sess->role == USB_PROTO_ROLE_DEV) &&
+        ((now_ms - sess->last_activity_ms) > USB_PROTO_AUTH_SESSION_TIMEOUT_MS)) {
+        sess->role = USB_PROTO_ROLE_USER;
+        return 1U;
+    }
+    return 0U;
+}
+
+void UsbProtoAuth_Reset(UsbProtoAuthSession_t *sess)
+{
+    sess->role = USB_PROTO_ROLE_USER;
+    sess->nonce_pending = 0U;
 }

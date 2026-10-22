@@ -9,6 +9,7 @@
 #include "fatfs.h"
 #include "FreeRTOS.h"
 #include "queue.h"
+#include "task.h"   /* taskENTER_CRITICAL: cauda do log em RAM */
 #include "cmsis_os2.h"
 #include "system_types.h"
 #include <string.h>
@@ -127,22 +128,60 @@ static int enqueue(const StorageTask_QueueMsg_t *msg)
     return 0;
 }
 
+/* Cauda do log em RAM (ver storage_task.h). s_tail_count = total ja'
+ * gravado (corre livre); a posicao da linha k e' k % STORAGE_LOG_TAIL_LEN. */
+static StorageTask_LogTailEntry_t s_tail[STORAGE_LOG_TAIL_LEN];
+static uint32_t s_tail_count;
+static uint32_t s_log_seq;
+
 static int submit_log(StorageTask_MsgType_t type, const StorageFormat_LogEntry_t *entry)
 {
     StorageTask_QueueMsg_t msg;
+    StorageTask_LogTailEntry_t *slot;
 
     memset(&msg, 0, sizeof(msg));
     msg.type = type;
     msg.datetime = entry->datetime;
     msg.tz_offset_hours = entry->tz_offset_hours;
-    msg.seq = entry->seq;
     copy_str(msg.code, sizeof(msg.code), entry->code);
     msg.test_id = entry->test_id;
     copy_str(msg.state_name, sizeof(msg.state_name), entry->state_name);
     msg.pressure_mmhg = entry->pressure_mmhg;
     copy_str(msg.message, sizeof(msg.message), entry->message);
 
+    /* Numeracao unica + copia para a cauda: varias tarefas chamam isto
+     * (usbProtoTask, appTask, uiTask), entao a secao critica cobre o
+     * incremento e a copia (~90 bytes, poucos microssegundos). */
+    taskENTER_CRITICAL();
+    msg.seq = ++s_log_seq;
+    slot = &s_tail[s_tail_count % STORAGE_LOG_TAIL_LEN];
+    slot->datetime = msg.datetime;
+    slot->seq = msg.seq;
+    slot->level = (type == STORAGE_MSG_LOG_ERROR) ? (uint8_t)STORAGE_LOG_LEVEL_ERR
+                : (type == STORAGE_MSG_LOG_AUDIT) ? (uint8_t)STORAGE_LOG_LEVEL_AUDIT
+                                                  : (uint8_t)STORAGE_LOG_LEVEL_EVT;
+    memcpy(slot->code, msg.code, sizeof(slot->code));
+    memcpy(slot->message, msg.message, sizeof(slot->message));
+    s_tail_count++;
+    taskEXIT_CRITICAL();
+
     return enqueue(&msg);
+}
+
+uint8_t StorageTask_GetLogTail(uint32_t newest_offset, StorageTask_LogTailEntry_t *out)
+{
+    uint8_t found = 0u;
+
+    if (out == NULL) {
+        return 0u;
+    }
+    taskENTER_CRITICAL();
+    if ((newest_offset < s_tail_count) && (newest_offset < STORAGE_LOG_TAIL_LEN)) {
+        *out = s_tail[(s_tail_count - 1u - newest_offset) % STORAGE_LOG_TAIL_LEN];
+        found = 1u;
+    }
+    taskEXIT_CRITICAL();
+    return found;
 }
 
 int StorageTask_LogEvent(const StorageFormat_LogEntry_t *entry)

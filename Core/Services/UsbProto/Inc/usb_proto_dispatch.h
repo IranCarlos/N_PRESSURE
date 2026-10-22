@@ -26,6 +26,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include "usb_proto_auth.h"
+#include "usb_telemetry.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -137,6 +138,44 @@ typedef struct {
 #define USB_PROTO_SET_OPERATOR_LEN  (4U)
 #define USB_PROTO_SESSION_ID_MAX    (9999U) /* "OP9999"/"P9999": mesma faixa da IHM */
 
+/* Fase 7.4: uma linha do log em RAM (ultimos eventos/erros, ver
+ * StorageTask_GetLogTail) - preenchida por quem implementa get_log_entry. */
+#define USB_PROTO_LOG_LEVEL_EVT   (0U)
+#define USB_PROTO_LOG_LEVEL_ERR   (1U)
+#define USB_PROTO_LOG_LEVEL_AUDIT (2U)
+#define USB_PROTO_LOG_CODE_LEN    (5U)  /* "E003" + 0x00 de preenchimento */
+#define USB_PROTO_LOG_MSG_MAX     (63U)
+
+typedef struct {
+    uint32_t seq;
+    uint16_t year;
+    uint8_t  month;
+    uint8_t  day;
+    uint8_t  hour;
+    uint8_t  minute;
+    uint8_t  second;
+    uint8_t  level;     /* USB_PROTO_LOG_LEVEL_* */
+    char     code[8];   /* "E003" ou "" */
+    char     message[USB_PROTO_LOG_MSG_MAX + 1U];
+} UsbProtoLogEntry_t;
+
+/* newest_offset = 0 e' a linha mais recente. Devolve 1 se existe. */
+typedef uint8_t (*UsbProtoGetLogEntryFn)(uint32_t newest_offset, UsbProtoLogEntry_t *out);
+
+/* GET_LOG_TAIL (U,D):
+ *   requisicao: u8 max_linhas (1..USB_PROTO_LOG_TAIL_MAX), u8 pular (paginacao)
+ *   resposta:   status, u8 n, n x linha, da MAIS RECENTE para a mais antiga:
+ *               u32 seq, u16 ano, u8 mes, dia, hora, min, seg, u8 nivel,
+ *               char codigo[5], u8 tam_msg, msg[tam_msg] (sem terminador)
+ * Sessao USER nao recebe linhas de auditoria (sessoes DEV, alteracoes de
+ * parametro) - so' eventos e erros; "pular" conta so' as linhas visiveis. */
+#define USB_PROTO_LOG_TAIL_MAX    (32U)
+
+/* STREAM_START: requisicao u16 taxa_hz; resposta status + u16 taxa efetiva.
+ * USER ate' USB_TELEMETRY_MAX_RATE_USER_HZ, DEV ate' ..._DEV_HZ (acima ->
+ * FORA_DE_FAIXA). STREAM_STOP: sem payload. Formato do frame STREAM em
+ * usb_telemetry.h. */
+
 /* status == NULL -> CMD_GET_STATUS responde OCUPADO (snapshot ainda nao
  * disponivel; nao deveria acontecer em operacao normal, mas evita servir
  * lixo se a task de protocolo rodar antes da primeira atualizacao).
@@ -152,6 +191,8 @@ typedef struct {
     const uint8_t *challenge_random; /* USB_PROTO_AUTH_NONCE_LEN (16) bytes "aleatorios"
                                        * injetados pelo chamador - so' usado por AUTH_CHALLENGE */
     const UsbProtoActions_t *actions; /* Fase 7.3 - comandos de controle (setpoint, hora, ensaio, operador) */
+    UsbTelemetry_t *telemetry;        /* Fase 7.4 - STREAM_START/STOP (NULL -> OCUPADO) */
+    UsbProtoGetLogEntryFn get_log_entry; /* Fase 7.4 - GET_LOG_TAIL (NULL -> OCUPADO) */
 } UsbProtoDispatchCtx_t;
 
 /**

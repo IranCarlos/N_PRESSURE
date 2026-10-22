@@ -292,6 +292,13 @@ uint8_t CDC_Transmit_HS(uint8_t* Buf, uint16_t Len)
   uint8_t result = USBD_OK;
   /* USER CODE BEGIN 12 */
   USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceHS.pClassData;
+  /* Fase 7.4: com o cabo desconectado/antes de enumerar a classe CDC nao
+   * existe (pClassData NULL) - o codigo gerado derreferenciava sem checar.
+   * Antes so' se transmitia em resposta a um pedido recebido (logo, com a
+   * classe viva); com telemetria/eventos o firmware transmite sozinho. */
+  if (hcdc == NULL){
+    return USBD_FAIL;
+  }
   if (hcdc->TxState != 0){
     return USBD_BUSY;
   }
@@ -325,6 +332,19 @@ static int8_t CDC_TransmitCplt_HS(uint8_t *Buf, uint32_t *Len, uint8_t epnum)
 }
 
 /* USER CODE BEGIN PRIVATE_FUNCTIONS_IMPLEMENTATION */
+uint8_t CDC_IsReady_HS(void)
+{
+  return ((hUsbDeviceHS.dev_state == USBD_STATE_CONFIGURED) && (hUsbDeviceHS.pClassData != NULL)) ? 1U : 0U;
+}
+
+uint8_t CDC_IsTxBusy_HS(void)
+{
+  USBD_CDC_HandleTypeDef *hcdc = (USBD_CDC_HandleTypeDef*)hUsbDeviceHS.pClassData;
+  if ((CDC_IsReady_HS() == 0U) || (hcdc == NULL)) {
+    return 0U;
+  }
+  return (hcdc->TxState != 0U) ? 1U : 0U;
+}
 
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */
 

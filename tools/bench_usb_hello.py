@@ -30,6 +30,7 @@ import hmac
 import hashlib
 import struct
 import sys
+import time
 
 try:
     import serial
@@ -42,6 +43,8 @@ except ImportError:
 VERSION = 0x01
 TYPE_REQ = 0x01
 TYPE_RSP = 0x02
+TYPE_EVT = 0x03
+TYPE_STREAM = 0x04
 
 CMD_HELLO = 0x0001
 CMD_GET_STATUS = 0x0002
@@ -53,6 +56,16 @@ CMD_SET_OPERATOR = 0x0007
 CMD_AUTH_CHALLENGE = 0x0040
 CMD_AUTH_RESPONSE = 0x0041
 CMD_AUTH_LOGOUT = 0x0042
+CMD_STREAM_START = 0x0010
+CMD_STREAM_STOP = 0x0011
+CMD_GET_LOG_TAIL = 0x0030
+
+# Fase 7.4: eventos assincronos (usb_proto_events.h)
+EVT_NAMES = {0x0301: "ESTADO_MUDOU", 0x0302: "ENSAIO_CONCLUIDO", 0x0303: "ERRO",
+             0x0304: "SD", 0x0305: "AUTH_EXPIROU"}
+STATE_NAMES = {0: "BOOT", 1: "STANDBY", 2: "INFLANDO", 3: "ESTABILIZANDO", 4: "MANUTENCAO",
+               5: "DESINFLANDO", 6: "TESTE_VAZAMENTO", 7: "AJUSTES", 8: "ERRO"}
+LOG_LEVEL_NAMES = {0: "EVT", 1: "ERR", 2: "AUDIT"}
 
 ROLE_NAMES = {0: "USER", 1: "DEV"}
 SERIAL_FIELD_LEN = 12
@@ -151,17 +164,151 @@ def parse_response(frame: bytes):
     return {"ver": ver, "type": typ, "seq": seq, "cmd": cmd, "len": length, "payload": payload}
 
 
+def read_frame(ser: serial.Serial, timeout_s: float):
+    """Le um frame qualquer (RSP/EVT/STREAM); None em timeout."""
+    ser.timeout = timeout_s
+    raw = ser.read_until(b"\x00")
+    if not raw or raw[-1] != 0x00:
+        return None
+    return parse_response(cobs_decode(raw[:-1]))
+
+
 def send_and_receive(ser: serial.Serial, seq: int, cmd: int, payload: bytes = b"", timeout_s: float = 2.0) -> dict:
+    """Envia um REQ e espera a RSP com o mesmo seq. EVT/STREAM que chegarem
+    no meio (Fase 7.4) sao mostrados e ignorados."""
     req = build_request(seq, cmd, payload)
     wire = cobs_encode(req) + b"\x00"
     ser.write(wire)
 
-    ser.timeout = timeout_s
-    raw = ser.read_until(b"\x00")
-    if not raw or raw[-1] != 0x00:
-        raise TimeoutError("sem resposta (timeout) ou frame sem delimitador 0x00")
-    decoded = cobs_decode(raw[:-1])
-    return parse_response(decoded)
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        frame = read_frame(ser, max(0.05, deadline - time.monotonic()))
+        if frame is None:
+            break
+        if frame["type"] == TYPE_RSP and frame["seq"] == seq:
+            return frame
+        if frame["type"] == TYPE_EVT:
+            print(f"    (evento no meio) {fmt_event(frame)}")
+    raise TimeoutError("sem resposta (timeout) ou frame sem delimitador 0x00")
+
+
+def fmt_event(frame: dict) -> str:
+    p = frame["payload"]
+    name = EVT_NAMES.get(frame["cmd"], f"0x{frame['cmd']:04x}")
+    if frame["cmd"] == 0x0301 and len(p) >= 2:
+        return f"EVT {name}: {STATE_NAMES.get(p[0], p[0])} -> {STATE_NAMES.get(p[1], p[1])}"
+    if frame["cmd"] == 0x0302 and len(p) >= 27:
+        sp, peak, resid = struct.unpack("<fff", p[0:12])
+        t_inf, t_plat, t_def = struct.unpack("<III", p[12:24])
+        return (f"EVT {name}: alvo={sp:.1f} pico={peak:.1f} residual={resid:.1f} mmHg "
+                f"inflar={t_inf} ms plato={t_plat} ms desinflar={t_def} ms "
+                f"abortado={p[24]} falha={p[25]} NC{p[26]:02d}")
+    if frame["cmd"] == 0x0303 and len(p) >= 1:
+        return f"EVT {name}: " + (f"E{p[0]:03d}" if p[0] else "limpo")
+    if frame["cmd"] == 0x0304 and len(p) >= 1:
+        return f"EVT {name}: " + ("montado" if p[0] else "REMOVIDO")
+    return f"EVT {name} payload={p.hex()}"
+
+
+def parse_stream(payload: bytes):
+    n, dropped = struct.unpack("<HI", payload[0:6])
+    samples = []
+    for i in range(n):
+        off = 6 + 16 * i
+        t_ms, p, sp = struct.unpack("<Iff", payload[off:off + 12])
+        st, pump, valves, err = payload[off + 12:off + 16]
+        samples.append((t_ms, p, sp, st, pump, valves, err))
+    return dropped, samples
+
+
+def run_stream(ser: serial.Serial, seq: int, rate_hz: int, seconds: float, timeout_s: float) -> bool:
+    """STREAM_START, recebe por `seconds`, mede a taxa real e mostra os eventos."""
+    print(f"--> STREAM_START {rate_hz} Hz (seq={seq})")
+    rsp = send_and_receive(ser, seq, CMD_STREAM_START, struct.pack("<H", rate_hz), timeout_s)
+    status = rsp["payload"][0]
+    if status != 0:
+        print(f"<-- status={RSP_STATUS_NAMES.get(status, status)}")
+        return False
+    (eff,) = struct.unpack("<H", rsp["payload"][1:3])
+    print(f"<-- status=OK taxa efetiva={eff} Hz")
+
+    total = 0
+    frames = 0
+    dropped = 0
+    first_t = last_t = None
+    gaps = 0
+    last = None
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        frame = read_frame(ser, 0.5)
+        if frame is None:
+            continue
+        if frame["type"] == TYPE_EVT:
+            print(f"    {fmt_event(frame)}")
+            continue
+        if frame["type"] != TYPE_STREAM:
+            continue
+        frames += 1
+        dropped, samples = parse_stream(frame["payload"])
+        for s in samples:
+            if last_t is not None and s[0] - last_t > 2 * (1000 // eff):
+                gaps += 1  # buraco maior que 2 periodos
+            if first_t is None:
+                first_t = s[0]
+            last_t = s[0]
+            last = s
+        total += len(samples)
+        if frames % max(1, eff // 2) == 0 and last is not None:
+            t_ms, p, sp, st, pump, valves, err = last
+            print(f"    t={t_ms} ms p={p:6.1f} sp={sp:5.1f} {STATE_NAMES.get(st, st):<13} "
+                  f"bomba={pump:3d}% V1={valves & 1} V2={(valves >> 1) & 1} V3={(valves >> 2) & 1} "
+                  f"erro={err}")
+
+    seq += 1
+    print(f"--> STREAM_STOP (seq={seq})")
+    rsp = send_and_receive(ser, seq, CMD_STREAM_STOP, b"", timeout_s)
+    print(f"<-- status={RSP_STATUS_NAMES.get(rsp['payload'][0])}")
+    span_s = ((last_t - first_t) / 1000.0) if (first_t is not None and last_t != first_t) else 0.0
+    real = (total - 1) / span_s if span_s > 0 else 0.0
+    print(f"Resumo: {total} amostras em {frames} frames, taxa medida {real:.1f} Hz "
+          f"(pedida {rate_hz}), descartadas no equipamento={dropped}, buracos={gaps}")
+    return total > 0
+
+
+def run_log_tail(ser: serial.Serial, seq: int, count: int, timeout_s: float) -> bool:
+    print(f"--> GET_LOG_TAIL {count} (seq={seq})")
+    rsp = send_and_receive(ser, seq, CMD_GET_LOG_TAIL, bytes([count, 0]), timeout_s)
+    p = rsp["payload"]
+    if p[0] != 0:
+        print(f"<-- status={RSP_STATUS_NAMES.get(p[0], p[0])}")
+        return False
+    n = p[1]
+    print(f"<-- {n} linha(s), da mais recente para a mais antiga:")
+    off = 2
+    for _ in range(n):
+        (lseq,) = struct.unpack("<I", p[off:off + 4])
+        (year,) = struct.unpack("<H", p[off + 4:off + 6])
+        mo, d, h, mi, s = p[off + 6:off + 11]
+        lvl = p[off + 11]
+        code = p[off + 12:off + 17].rstrip(b"\x00").decode("ascii", "replace")
+        mlen = p[off + 17]
+        msg = p[off + 18:off + 18 + mlen].decode("ascii", "replace")
+        off += 18 + mlen
+        print(f"    #{lseq:<5} {d:02d}/{mo:02d}/{year} {h:02d}:{mi:02d}:{s:02d} "
+              f"{LOG_LEVEL_NAMES.get(lvl, lvl):<5} {code:<5} {msg}")
+    return True
+
+
+def run_listen(ser: serial.Serial, seq: int, seconds: float, timeout_s: float) -> bool:
+    """Manda um HELLO (ativa os eventos nesta conexao) e so' escuta."""
+    send_and_receive(ser, seq, CMD_HELLO, b"", timeout_s)
+    print(f"Escutando eventos por {seconds:.0f} s (mexa no equipamento: pedal, Ajustes, SD)...")
+    end = time.monotonic() + seconds
+    while time.monotonic() < end:
+        frame = read_frame(ser, 0.5)
+        if frame is not None and frame["type"] == TYPE_EVT:
+            print(f"    {time.strftime('%H:%M:%S')} {fmt_event(frame)}")
+    return True
 
 
 def parse_hello(payload: bytes) -> dict:
@@ -199,7 +346,7 @@ def fmt_get_status(payload: bytes) -> str:
             f"active_error={active_error} cycle_number={cycle_number}")
 
 
-def run_auth_flow(ser: serial.Serial, seq: int, dev_key: bytes, timeout_s: float) -> bool:
+def run_auth_flow(ser: serial.Serial, seq: int, dev_key: bytes, timeout_s: float, logout: bool = True) -> bool:
     """CHALLENGE -> RESPONSE (eleva a DEV) -> HELLO (confirma role) -> LOGOUT."""
     print(f"--> HELLO (seq={seq})")
     rsp = send_and_receive(ser, seq, CMD_HELLO, timeout_s=timeout_s)
@@ -230,6 +377,8 @@ def run_auth_flow(ser: serial.Serial, seq: int, dev_key: bytes, timeout_s: float
         print("FALHA: AUTH_RESPONSE nao elevou a DEV (chave errada?)", file=sys.stderr)
         return False
     seq += 1
+    if not logout:
+        return True  # continua em DEV (ex.: stream a 1 kHz logo em seguida)
 
     print(f"--> AUTH_LOGOUT (seq={seq})")
     rsp = send_and_receive(ser, seq, CMD_AUTH_LOGOUT, timeout_s=timeout_s)
@@ -258,7 +407,11 @@ def main():
     parser.add_argument("--port", help="Porta serial (ex.: COM5)")
     parser.add_argument("--list", action="store_true", help="Lista as portas seriais disponiveis e sai")
     parser.add_argument("--cmd", choices=["hello", "status", "auth", "both",
-                                          "setpoint", "datetime", "operator", "start", "abort"], default="both")
+                                          "setpoint", "datetime", "operator", "start", "abort",
+                                          "stream", "logtail", "listen"], default="both")
+    parser.add_argument("--rate", type=int, default=50, help="Taxa do stream em Hz (--cmd stream; USER ate' 50)")
+    parser.add_argument("--seconds", type=float, default=10.0, help="Duracao de --cmd stream/listen")
+    parser.add_argument("--count", type=int, default=20, help="Linhas do log (--cmd logtail, 1..32)")
     parser.add_argument("--value", type=float, default=100.0, help="Setpoint em mmHg (--cmd setpoint)")
     parser.add_argument("--operator", type=int, default=1, help="ID do operador 1..9999 (--cmd operator)")
     parser.add_argument("--participant", type=int, default=1, help="ID do participante 1..9999 (--cmd operator)")
@@ -326,6 +479,21 @@ def main():
                 # Estado logo depois, para conferir o efeito
                 rsp = send_and_receive(ser, seq, CMD_GET_STATUS, timeout_s=args.timeout)
                 print(f"<-- GET_STATUS {fmt_get_status(rsp['payload'])}")
+            except (ValueError, TimeoutError) as exc:
+                print(f"FALHA: {exc}", file=sys.stderr)
+                ok = False
+
+        if args.cmd in ("stream", "logtail", "listen"):
+            try:
+                if args.cmd == "stream":
+                    if args.dev_key_hex:  # taxa DEV (> 50 Hz) exige sessao DEV nesta conexao
+                        ok = run_auth_flow(ser, seq, bytes.fromhex(args.dev_key_hex), args.timeout, logout=False)
+                        seq += 10
+                    ok = ok and run_stream(ser, seq, args.rate, args.seconds, args.timeout)
+                elif args.cmd == "logtail":
+                    ok = run_log_tail(ser, seq, args.count, args.timeout)
+                else:
+                    ok = run_listen(ser, seq, args.seconds, args.timeout)
             except (ValueError, TimeoutError) as exc:
                 print(f"FALHA: {exc}", file=sys.stderr)
                 ok = False

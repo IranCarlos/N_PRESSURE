@@ -368,8 +368,133 @@ static void test_set_operator(void)
     CHECK(s_calls == 0);
 }
 
+/* ---- Fase 7.4: STREAM e GET_LOG_TAIL ---------------------------------- */
+
+static UsbTelemetry_t s_tel;
+
+static size_t call_full(uint16_t cmd, const uint8_t *payload, uint16_t len,
+                        UsbProtoDispatchCtx_t *ctx, uint8_t *rsp, size_t cap)
+{
+    return UsbProtoDispatch_Handle(cmd, payload, len, ctx, rsp, cap);
+}
+
+static void test_stream_rate_limits_by_role(void)
+{
+    UsbProtoAuthSession_t sess;
+    UsbProtoDispatchCtx_t ctx = { .auth = &sess, .telemetry = &s_tel };
+    const uint8_t r50[2] = { 50U, 0U };
+    const uint8_t r51[2] = { 51U, 0U };
+    const uint8_t r1000[2] = { 0xE8U, 0x03U };
+    const uint8_t r0[2] = { 0U, 0U };
+    uint8_t rsp[8];
+    size_t n;
+
+    UsbTelemetry_Init(&s_tel);
+    UsbProtoAuth_Init(&sess, KEY, 1U);
+
+    n = call_full(USB_PROTO_CMD_STREAM_START, r50, 2U, &ctx, rsp, sizeof(rsp));
+    CHECK((n == 3U) && (rsp[0] == (uint8_t)USB_PROTO_RSP_OK));
+    CHECK((rsp[1] | (rsp[2] << 8)) == 50);
+    CHECK(UsbTelemetry_IsRunning(&s_tel) == 1U);
+
+    n = call_full(USB_PROTO_CMD_STREAM_START, r51, 2U, &ctx, rsp, sizeof(rsp));
+    CHECK((n == 1U) && (rsp[0] == (uint8_t)USB_PROTO_RSP_FORA_DE_FAIXA)); /* USER <= 50 Hz */
+    n = call_full(USB_PROTO_CMD_STREAM_START, r0, 2U, &ctx, rsp, sizeof(rsp));
+    CHECK((n == 1U) && (rsp[0] == (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO));
+
+    sess.role = USB_PROTO_ROLE_DEV; /* atalho: elevacao ja' coberta em test_usb_proto_auth */
+    n = call_full(USB_PROTO_CMD_STREAM_START, r1000, 2U, &ctx, rsp, sizeof(rsp));
+    CHECK((n == 3U) && (rsp[0] == (uint8_t)USB_PROTO_RSP_OK));
+    CHECK((rsp[1] | (rsp[2] << 8)) == 1000);
+
+    n = call_full(USB_PROTO_CMD_STREAM_STOP, NULL, 0U, &ctx, rsp, sizeof(rsp));
+    CHECK((n == 1U) && (rsp[0] == (uint8_t)USB_PROTO_RSP_OK));
+    CHECK(UsbTelemetry_IsRunning(&s_tel) == 0U);
+
+    ctx.telemetry = NULL;
+    n = call_full(USB_PROTO_CMD_STREAM_START, r50, 2U, &ctx, rsp, sizeof(rsp));
+    CHECK((n == 1U) && (rsp[0] == (uint8_t)USB_PROTO_RSP_OCUPADO));
+}
+
+/* Log falso: 5 linhas, a de offset 1 e' de auditoria. */
+static uint8_t fake_log(uint32_t off, UsbProtoLogEntry_t *out)
+{
+    if (off >= 5U) {
+        return 0U;
+    }
+    memset(out, 0, sizeof(*out));
+    out->seq = 100U - off; /* mais recente = 100 */
+    out->year = 2026U;
+    out->month = 10U;
+    out->day = 22U;
+    out->level = (off == 1U) ? USB_PROTO_LOG_LEVEL_AUDIT : USB_PROTO_LOG_LEVEL_EVT;
+    if (off == 2U) {
+        out->level = USB_PROTO_LOG_LEVEL_ERR;
+        strcpy(out->code, "E003");
+    }
+    strcpy(out->message, "abc");
+    return 1U;
+}
+
+static uint32_t rd32(const uint8_t *p)
+{
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+#define LOG_ENTRY_LEN(msg_len) (4U + 2U + 5U + 1U + 5U + 1U + (msg_len))
+
+static void test_log_tail_user_hides_audit(void)
+{
+    UsbProtoAuthSession_t sess;
+    UsbProtoDispatchCtx_t ctx = { .auth = &sess, .get_log_entry = fake_log };
+    const uint8_t req[2] = { 10U, 0U };
+    uint8_t rsp[512];
+    size_t n;
+
+    UsbProtoAuth_Init(&sess, KEY, 1U);
+    n = call_full(USB_PROTO_CMD_GET_LOG_TAIL, req, 2U, &ctx, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_OK);
+    CHECK(rsp[1] == 4U);                                  /* 5 linhas - 1 de auditoria */
+    CHECK(n == 2U + 4U * LOG_ENTRY_LEN(3U));
+    CHECK(rd32(&rsp[2]) == 100U);                         /* mais recente primeiro */
+    CHECK(rd32(&rsp[2 + LOG_ENTRY_LEN(3U)]) == 98U);      /* pulou a 99 (auditoria) */
+    CHECK(memcmp(&rsp[2 + LOG_ENTRY_LEN(3U) + 12U], "E003", 4U) == 0); /* codigo da linha de erro */
+
+    sess.role = USB_PROTO_ROLE_DEV;
+    (void)call_full(USB_PROTO_CMD_GET_LOG_TAIL, req, 2U, &ctx, rsp, sizeof(rsp));
+    CHECK(rsp[1] == 5U);                                  /* DEV ve a auditoria */
+}
+
+static void test_log_tail_paging_and_limits(void)
+{
+    UsbProtoDispatchCtx_t ctx = { .get_log_entry = fake_log };
+    const uint8_t page2[2] = { 2U, 2U };  /* 2 linhas, pulando 2 visiveis */
+    const uint8_t zero[2] = { 0U, 0U };
+    const uint8_t too_many[2] = { (uint8_t)(USB_PROTO_LOG_TAIL_MAX + 1U), 0U };
+    uint8_t rsp[512];
+    uint8_t small[2U + LOG_ENTRY_LEN(3U) + 3U]; /* cabe so' 1 linha */
+
+    (void)call_full(USB_PROTO_CMD_GET_LOG_TAIL, page2, 2U, &ctx, rsp, sizeof(rsp));
+    CHECK(rsp[1] == 2U);
+    CHECK(rd32(&rsp[2]) == 97U); /* visiveis (sem auth = USER): 100, 98, 97, 96 */
+
+    CHECK(call_full(USB_PROTO_CMD_GET_LOG_TAIL, zero, 2U, &ctx, rsp, sizeof(rsp)) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_FORA_DE_FAIXA);
+    (void)call_full(USB_PROTO_CMD_GET_LOG_TAIL, too_many, 2U, &ctx, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_FORA_DE_FAIXA);
+    (void)call_full(USB_PROTO_CMD_GET_LOG_TAIL, zero, 1U, &ctx, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO);
+
+    (void)call_full(USB_PROTO_CMD_GET_LOG_TAIL, (const uint8_t[2]){ 10U, 0U }, 2U, &ctx, small, sizeof(small));
+    CHECK(small[0] == (uint8_t)USB_PROTO_RSP_OK);
+    CHECK(small[1] == 1U); /* parou quando nao cabia mais */
+}
+
 int main(void)
 {
+    test_stream_rate_limits_by_role();
+    test_log_tail_user_hides_audit();
+    test_log_tail_paging_and_limits();
     test_control_cmds_without_actions_are_ocupado();
     test_set_setpoint_decodes_float_le();
     test_set_datetime_validation();

@@ -30,6 +30,9 @@ extern "C" {
 #define USB_PROTO_AUTH_DEV_KEY_LEN     (32U)
 #define USB_PROTO_AUTH_HMAC_LEN        (32U) /* HMAC_SHA256_DIGEST_SIZE */
 #define USB_PROTO_AUTH_CHALLENGE_TIMEOUT_MS (10000U)
+/* Fase 7.4: sessao DEV cai para USER apos este tempo SEM nenhum comando
+ * (Parte B 2.6, "timeout de sessao"); o PC recebe o evento AUTH_EXPIROU. */
+#define USB_PROTO_AUTH_SESSION_TIMEOUT_MS (10UL * 60UL * 1000UL)
 
 typedef enum {
     USB_PROTO_ROLE_USER = 0,
@@ -53,6 +56,7 @@ typedef struct {
     uint8_t  nonce[USB_PROTO_AUTH_NONCE_LEN];
     uint8_t  nonce_pending; /* 1 = aguardando AUTH_RESPONSE pra este nonce */
     uint32_t nonce_issued_at_ms;
+    uint32_t last_activity_ms; /* ultimo comando em sessao DEV (Fase 7.4) */
 } UsbProtoAuthSession_t;
 
 /* dev_key_valid=0 -> AUTH_RESPONSE sempre falha (ERR_NO_KEY), mesmo com a
@@ -80,6 +84,17 @@ UsbProtoAuth_Status_t UsbProtoAuth_HandleResponse(
 
 UsbProtoAuth_Status_t UsbProtoAuth_HandleLogout(UsbProtoAuthSession_t *sess,
                                                  UsbProtoRole_t *out_role);
+
+/* Fase 7.4 - chamar a cada comando valido recebido: renova a sessao DEV. */
+void UsbProtoAuth_Touch(UsbProtoAuthSession_t *sess, uint32_t now_ms);
+
+/* Fase 7.4 - chamar periodicamente: devolve 1 (uma vez) quando a sessao DEV
+ * expirou por inatividade e ja' voltou para USER. */
+uint8_t UsbProtoAuth_CheckExpiry(UsbProtoAuthSession_t *sess, uint32_t now_ms);
+
+/* Fase 7.4 - cabo desconectado/porta fechada: volta para USER na hora (o
+ * proximo PC a conectar nao herda a sessao DEV do anterior). */
+void UsbProtoAuth_Reset(UsbProtoAuthSession_t *sess);
 
 #ifdef __cplusplus
 }

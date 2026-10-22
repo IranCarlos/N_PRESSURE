@@ -338,6 +338,146 @@ static size_t handle_set_operator(const UsbProtoDispatchCtx_t *ctx,
     return rsp_status(rsp_payload, ctx->actions->set_operator(op, part));
 }
 
+/* ---- Fase 7.4: telemetria e log ---------------------------------------- */
+
+static UsbProtoRole_t ctx_role(const UsbProtoDispatchCtx_t *ctx)
+{
+    return ((ctx != NULL) && (ctx->auth != NULL)) ? UsbProtoAuth_GetRole(ctx->auth) : USB_PROTO_ROLE_USER;
+}
+
+static size_t handle_stream_start(const UsbProtoDispatchCtx_t *ctx,
+                                   const uint8_t *req_payload, uint16_t req_len,
+                                   uint8_t *rsp_payload, size_t rsp_cap)
+{
+    uint16_t rate;
+    uint32_t max_rate;
+    uint32_t divisor;
+    uint16_t effective;
+
+    if ((ctx == NULL) || (ctx->telemetry == NULL) || (rsp_cap < 3U)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_OCUPADO);
+    }
+    if ((req_payload == NULL) || (req_len != 2U)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_PARAM_INVALIDO);
+    }
+    rate = read_u16_le(req_payload);
+    max_rate = (ctx_role(ctx) == USB_PROTO_ROLE_DEV) ? USB_TELEMETRY_MAX_RATE_DEV_HZ
+                                                     : USB_TELEMETRY_MAX_RATE_USER_HZ;
+    if (rate == 0U) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_PARAM_INVALIDO);
+    }
+    if ((uint32_t)rate > max_rate) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_FORA_DE_FAIXA);
+    }
+
+    divisor = UsbTelemetry_DivisorForRate(rate);
+    UsbTelemetry_Start(ctx->telemetry, divisor);
+    effective = (uint16_t)(USB_TELEMETRY_TICK_HZ / divisor);
+    rsp_payload[0] = (uint8_t)USB_PROTO_RSP_OK;
+    rsp_payload[1] = (uint8_t)(effective & 0xFFU);
+    rsp_payload[2] = (uint8_t)((effective >> 8) & 0xFFU);
+    return 3U;
+}
+
+static size_t handle_stream_stop(const UsbProtoDispatchCtx_t *ctx, uint8_t *rsp_payload)
+{
+    if ((ctx == NULL) || (ctx->telemetry == NULL)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_OCUPADO);
+    }
+    UsbTelemetry_Stop(ctx->telemetry);
+    return rsp_status(rsp_payload, USB_PROTO_RSP_OK);
+}
+
+/* strnlen() e' POSIX, nao C11 - equivalente local. */
+static size_t bounded_strlen(const char *s, size_t max_len)
+{
+    size_t n = 0U;
+    while ((n < max_len) && (s[n] != '\0')) {
+        n++;
+    }
+    return n;
+}
+
+static size_t log_entry_wire_len(const UsbProtoLogEntry_t *e)
+{
+    return 4U + 2U + 5U + 1U + USB_PROTO_LOG_CODE_LEN + 1U + bounded_strlen(e->message, USB_PROTO_LOG_MSG_MAX);
+}
+
+static size_t put_log_entry(uint8_t *p, const UsbProtoLogEntry_t *e)
+{
+    size_t msg_len = bounded_strlen(e->message, USB_PROTO_LOG_MSG_MAX);
+    size_t idx = 0U;
+
+    write_u32_le(&p[idx], e->seq);
+    idx += 4U;
+    p[idx] = (uint8_t)(e->year & 0xFFU);
+    p[idx + 1U] = (uint8_t)((e->year >> 8) & 0xFFU);
+    idx += 2U;
+    p[idx] = e->month;
+    p[idx + 1U] = e->day;
+    p[idx + 2U] = e->hour;
+    p[idx + 3U] = e->minute;
+    p[idx + 4U] = e->second;
+    idx += 5U;
+    p[idx] = e->level;
+    idx++;
+    copy_padded_field(&p[idx], USB_PROTO_LOG_CODE_LEN, e->code);
+    idx += USB_PROTO_LOG_CODE_LEN;
+    p[idx] = (uint8_t)msg_len;
+    idx++;
+    memcpy(&p[idx], e->message, msg_len);
+    idx += msg_len;
+    return idx;
+}
+
+static size_t handle_get_log_tail(const UsbProtoDispatchCtx_t *ctx,
+                                   const uint8_t *req_payload, uint16_t req_len,
+                                   uint8_t *rsp_payload, size_t rsp_cap)
+{
+    UsbProtoLogEntry_t e;
+    uint8_t max_count;
+    uint8_t skip;
+    uint8_t count = 0U;
+    uint8_t skipped = 0U;
+    uint8_t include_audit;
+    uint32_t offset;
+    size_t idx = 2U;
+
+    if ((ctx == NULL) || (ctx->get_log_entry == NULL) || (rsp_cap < 2U)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_OCUPADO);
+    }
+    if ((req_payload == NULL) || (req_len != 2U)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_PARAM_INVALIDO);
+    }
+    max_count = req_payload[0];
+    skip = req_payload[1];
+    if ((max_count == 0U) || (max_count > USB_PROTO_LOG_TAIL_MAX)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_FORA_DE_FAIXA);
+    }
+    include_audit = (ctx_role(ctx) == USB_PROTO_ROLE_DEV) ? 1U : 0U;
+
+    /* Percorre da mais recente para a mais antiga ate' acabar o log, juntar
+     * max_count linhas ou nao caber mais nenhuma no payload. */
+    for (offset = 0U; (count < max_count) && (ctx->get_log_entry(offset, &e) != 0U); offset++) {
+        if ((e.level == USB_PROTO_LOG_LEVEL_AUDIT) && (include_audit == 0U)) {
+            continue;
+        }
+        if (skipped < skip) {
+            skipped++;
+            continue;
+        }
+        if ((idx + log_entry_wire_len(&e)) > rsp_cap) {
+            break;
+        }
+        idx += put_log_entry(&rsp_payload[idx], &e);
+        count++;
+    }
+
+    rsp_payload[0] = (uint8_t)USB_PROTO_RSP_OK;
+    rsp_payload[1] = count;
+    return idx;
+}
+
 size_t UsbProtoDispatch_Handle(uint16_t cmd,
                                 const uint8_t *req_payload, uint16_t req_len,
                                 const UsbProtoDispatchCtx_t *ctx,
@@ -368,6 +508,12 @@ size_t UsbProtoDispatch_Handle(uint16_t cmd,
             return handle_abort_test(ctx, rsp_payload);
         case USB_PROTO_CMD_SET_OPERATOR:
             return handle_set_operator(ctx, req_payload, req_len, rsp_payload);
+        case USB_PROTO_CMD_STREAM_START:
+            return handle_stream_start(ctx, req_payload, req_len, rsp_payload, rsp_cap);
+        case USB_PROTO_CMD_STREAM_STOP:
+            return handle_stream_stop(ctx, rsp_payload);
+        case USB_PROTO_CMD_GET_LOG_TAIL:
+            return handle_get_log_tail(ctx, req_payload, req_len, rsp_payload, rsp_cap);
         default:
             rsp_payload[0] = (uint8_t)USB_PROTO_RSP_CMD_DESCONHECIDO;
             return 1U;
