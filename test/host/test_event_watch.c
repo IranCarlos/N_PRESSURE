@@ -86,7 +86,7 @@ static void test_sd_edges(void)
 static void test_state_names_fit_log_field(void)
 {
     int st;
-    for (st = (int)SYSTEM_STATE_BOOT; st <= (int)SYSTEM_STATE_FAULT; st++) {
+    for (st = (int)SYSTEM_STATE_BOOT; st <= (int)SYSTEM_STATE_MANUAL; st++) {
         const char *n = EventWatch_StateName((SystemState_t)st);
         CHECK(strlen(n) <= 15U);          /* state_name[16] do StorageTask */
         CHECK(strchr(n, ';') == NULL);    /* ';' e' o delimitador do log */

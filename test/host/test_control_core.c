@@ -511,8 +511,31 @@ static void test_fast_approach_full_power_far_from_setpoint(void)
     CHECK(out.pump_power < 1.0f);
 }
 
+/* Fase 7.7: supervisao do modo manual remoto (pura). */
+static void test_manual_supervision_priorities(void)
+{
+    ControlCore_SafetyConfig_t s = default_safety();
+    const float kpa_ok = 100.0f / CONTROL_CORE_MMHG_PER_KPA;
+    const float kpa_over = (s.p_max_abs_mmhg + 1.0f) / CONTROL_CORE_MMHG_PER_KPA;
+    const uint32_t hb_ok = CONTROL_CORE_MANUAL_HEARTBEAT_TIMEOUT_MS;      /* no limite: ainda vale */
+    const uint32_t hb_lost = CONTROL_CORE_MANUAL_HEARTBEAT_TIMEOUT_MS + 1u;
+
+    CHECK(ControlCore_CheckManual(&s, kpa_ok, 1u, hb_ok, 0u) == CONTROL_MANUAL_OK);
+    CHECK(ControlCore_CheckManual(&s, kpa_ok, 1u, hb_lost, 0u) == CONTROL_MANUAL_HEARTBEAT_LOST);
+    CHECK(ControlCore_CheckManual(&s, kpa_ok, 0u, hb_ok, 0u) == CONTROL_MANUAL_SENSOR_INVALID);
+    CHECK(ControlCore_CheckManual(&s, kpa_ok, 1u, hb_ok, 1u) == CONTROL_MANUAL_LOCAL_STOP);
+    /* prioridade: sobrepressao vence tudo; parada local vence sinal de vida */
+    CHECK(ControlCore_CheckManual(&s, kpa_over, 0u, hb_lost, 1u) == CONTROL_MANUAL_OVERPRESSURE);
+    CHECK(ControlCore_CheckManual(&s, kpa_ok, 0u, hb_lost, 1u) == CONTROL_MANUAL_LOCAL_STOP);
+    CHECK(ControlCore_CheckManual(&s, kpa_ok, 0u, hb_lost, 0u) == CONTROL_MANUAL_HEARTBEAT_LOST);
+
+    CHECK(ControlCore_OverPressure(&s, kpa_ok) == 0u);
+    CHECK(ControlCore_OverPressure(&s, kpa_over) == 1u);
+}
+
 int main(void)
 {
+    test_manual_supervision_priorities();
     printf("Control_Core x sim_plant (Fase 3) — parametros de seguranca e PID sao placeholders\n");
     printf("do Apendice E ('a definir/medir'); ver Docs/sim-report.md.\n");
     test_small_cuff_reaches_setpoint();

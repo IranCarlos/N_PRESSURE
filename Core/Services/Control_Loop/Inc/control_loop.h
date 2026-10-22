@@ -185,6 +185,30 @@ void ControlLoop_SetManualActuators(float pump_power, uint8_t valve1_on, uint8_t
  */
 void ControlLoop_DisableManualActuators(void);
 
+/* ---- Fase 7.7: modo manual remoto (app DEV via USB) ---------------------
+ * Estado SYSTEM_STATE_MANUAL: bomba e valvulas seguem
+ * ControlLoop_SetManualActuators(), supervisionadas a cada 1 ms por
+ * ControlCore_CheckManual(): P_MAX_ABS (-> FAULT/E001), pedal/botao no
+ * equipamento (parada local), sinal de vida do PC ha' mais de 300 ms, sensor
+ * invalido (bomba off). Abrir os Ajustes na IHM tambem tira do manual (o
+ * operador local tem prioridade). */
+typedef enum {
+    CONTROL_REMOTE_EXIT_NONE = 0,
+    CONTROL_REMOTE_EXIT_COMMAND,      /* MANUAL_EXIT do PC / PC desconectou */
+    CONTROL_REMOTE_EXIT_HEARTBEAT,    /* E010: sinal de vida perdido */
+    CONTROL_REMOTE_EXIT_LOCAL_STOP,   /* pedal/botao no equipamento */
+    CONTROL_REMOTE_EXIT_OVERPRESSURE  /* E001 */
+} ControlLoop_RemoteExit_t;
+
+/* So' a partir de STANDBY. 1 = entrou. Comeca com bomba off e V1+V2 abertas. */
+uint8_t ControlLoop_EnterRemoteManual(void);
+/* Volta a STANDBY (bomba off, valvulas abertas). Sem efeito fora do MANUAL. */
+void ControlLoop_ExitRemoteManual(void);
+/* Renova o prazo de 300 ms (chamar a cada comando valido do PC em manual). */
+void ControlLoop_RemoteManualHeartbeat(void);
+/* Por que o ultimo manual terminou (para o log); zera ao ler. */
+ControlLoop_RemoteExit_t ControlLoop_TakeRemoteExitReason(void);
+
 #ifdef __cplusplus
 }
 #endif

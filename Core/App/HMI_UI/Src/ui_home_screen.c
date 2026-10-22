@@ -156,7 +156,8 @@ void UI_HomeScreen_TrackCycle(void)
     float pressure = UiBackend_GetPressureMmHg();
 
     if ((s_last_state == UI_STATE_IDLE) && (state != UI_STATE_IDLE) &&
-        (state != UI_STATE_CONFIG) && (state != UI_STATE_LEAK_TEST)) {
+        (state != UI_STATE_CONFIG) && (state != UI_STATE_LEAK_TEST) &&
+        (state != UI_STATE_MANUAL)) {
         s_cycle_start_tick = UiBackend_GetTickMs();
         s_cycle_peak_mmhg = pressure;
         UiSession_NextCycle();

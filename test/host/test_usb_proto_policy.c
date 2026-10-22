@@ -9,7 +9,7 @@ static int s_fail;
 static const SystemState_t ALL_STATES[] = {
     SYSTEM_STATE_BOOT, SYSTEM_STATE_IDLE, SYSTEM_STATE_INFLATING, SYSTEM_STATE_STABILIZING,
     SYSTEM_STATE_STABILIZED, SYSTEM_STATE_DEFLATING_FAST, SYSTEM_STATE_LEAK_TEST,
-    SYSTEM_STATE_CONFIG, SYSTEM_STATE_FAULT
+    SYSTEM_STATE_CONFIG, SYSTEM_STATE_FAULT, SYSTEM_STATE_MANUAL
 };
 #define N_STATES (sizeof(ALL_STATES) / sizeof(ALL_STATES[0]))
 
@@ -31,7 +31,7 @@ static void test_abort_raises_only_in_active_test(void)
         uint8_t raise = 0xAAU;
         UsbProtoRspStatus_t st = UsbProtoPolicy_AbortTest(s, &raise);
         int active = (s == SYSTEM_STATE_INFLATING) || (s == SYSTEM_STATE_STABILIZING) ||
-                     (s == SYSTEM_STATE_STABILIZED);
+                     (s == SYSTEM_STATE_STABILIZED) || (s == SYSTEM_STATE_MANUAL);
         int already_safe = (s == SYSTEM_STATE_IDLE) || (s == SYSTEM_STATE_DEFLATING_FAST) ||
                            (s == SYSTEM_STATE_FAULT);
 

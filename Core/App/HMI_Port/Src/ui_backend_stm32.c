@@ -96,6 +96,7 @@ UiState_t UiBackend_GetState(void)
         case SYSTEM_STATE_LEAK_TEST:      return UI_STATE_LEAK_TEST;
         case SYSTEM_STATE_CONFIG:         return UI_STATE_CONFIG;
         case SYSTEM_STATE_FAULT:          return UI_STATE_FAULT;
+        case SYSTEM_STATE_MANUAL:         return UI_STATE_MANUAL;
         case SYSTEM_STATE_BOOT:
         default:                          return UI_STATE_BOOT;
     }

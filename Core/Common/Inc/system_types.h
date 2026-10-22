@@ -61,7 +61,10 @@ typedef enum
     SYSTEM_STATE_DEFLATING_FAST,
     SYSTEM_STATE_LEAK_TEST,
     SYSTEM_STATE_CONFIG,
-    SYSTEM_STATE_FAULT
+    SYSTEM_STATE_FAULT,
+    SYSTEM_STATE_MANUAL   /* Fase 7.7: bomba/valvulas comandadas pelo app DEV (USB).
+                           * No fim de proposito: o numero de cada estado vai no
+                           * protocolo USB e nao pode mudar. */
 } SystemState_t;
 
 /**

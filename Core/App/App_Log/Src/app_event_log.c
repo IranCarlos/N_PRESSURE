@@ -109,6 +109,18 @@ void AppEventLog_Poll(void)
          * (GET_LOG_TAIL) e documenta o E005 do Apendice D. */
         log_line(STORAGE_LOG_LEVEL_ERR, "E005", error_text(5u));
     }
+    /* Fase 7.7: por que o modo manual remoto terminou (o "encerrado pelo
+     * PC" ja' e' registrado pelo Usb_Port; E001 sai pelo erro acima). */
+    switch (ControlLoop_TakeRemoteExitReason()) {
+        case CONTROL_REMOTE_EXIT_HEARTBEAT:
+            log_line(STORAGE_LOG_LEVEL_ERR, "E010", "Sinal de vida do PC perdido no modo manual");
+            break;
+        case CONTROL_REMOTE_EXIT_LOCAL_STOP:
+            log_line(STORAGE_LOG_LEVEL_EVT, "", "Modo manual interrompido no equipamento (pedal/botao)");
+            break;
+        default:
+            break;
+    }
     if (((mask & EVENT_WATCH_CYCLE_FINISHED) != 0u) && (stats != NULL)) {
         (void)snprintf(msg, sizeof(msg), "Ensaio concluido: pico %d mmHg, alvo %d mmHg%s",
                        (int)stats->peak_mmhg, (int)s_rt->setpoint_mmhg,

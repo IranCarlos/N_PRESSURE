@@ -858,6 +858,46 @@ static size_t handle_param_revert(const UsbProtoDispatchCtx_t *ctx,
     return 1U;
 }
 
+/* ---- Fase 7.7: MANUAL_* (so' DEV) ---------------------------------------- */
+
+static size_t handle_manual(const UsbProtoDispatchCtx_t *ctx, uint16_t cmd,
+                            const uint8_t *req_payload, uint16_t req_len,
+                            uint8_t *rsp_payload)
+{
+    const UsbProtoManualOps_t *ops;
+
+    if (ctx_role(ctx) != USB_PROTO_ROLE_DEV) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_SEM_PERMISSAO);
+    }
+    if ((ctx == NULL) || (ctx->manual == NULL)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_OCUPADO);
+    }
+    ops = ctx->manual;
+
+    if (cmd == USB_PROTO_CMD_MANUAL_SET) {
+        if ((req_payload == NULL) || (req_len != 2U)) {
+            return rsp_status(rsp_payload, USB_PROTO_RSP_PARAM_INVALIDO);
+        }
+        /* bits acima de V3 em 1 = comando malformado, nao "ignora o resto" */
+        if ((req_payload[0] > 100U) || ((req_payload[1] & (uint8_t)~USB_PROTO_MANUAL_VALVE_MASK) != 0U)) {
+            return rsp_status(rsp_payload, USB_PROTO_RSP_FORA_DE_FAIXA);
+        }
+        rsp_payload[0] = ops->set(req_payload[0], req_payload[1]);
+        return 1U;
+    }
+    if (req_len != 0U) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_PARAM_INVALIDO);
+    }
+    if (cmd == USB_PROTO_CMD_MANUAL_ENTER) {
+        rsp_payload[0] = ops->enter();
+    } else if (cmd == USB_PROTO_CMD_MANUAL_EXIT) {
+        rsp_payload[0] = ops->exit();
+    } else {
+        rsp_payload[0] = ops->heartbeat();
+    }
+    return 1U;
+}
+
 size_t UsbProtoDispatch_Handle(uint16_t cmd,
                                 const uint8_t *req_payload, uint16_t req_len,
                                 const UsbProtoDispatchCtx_t *ctx,
@@ -912,6 +952,11 @@ size_t UsbProtoDispatch_Handle(uint16_t cmd,
             return handle_param_commit(ctx, req_len, rsp_payload, rsp_cap);
         case USB_PROTO_CMD_PARAM_REVERT:
             return handle_param_revert(ctx, req_payload, req_len, rsp_payload);
+        case USB_PROTO_CMD_MANUAL_ENTER:
+        case USB_PROTO_CMD_MANUAL_EXIT:
+        case USB_PROTO_CMD_MANUAL_SET:
+        case USB_PROTO_CMD_MANUAL_HEARTBEAT:
+            return handle_manual(ctx, cmd, req_payload, req_len, rsp_payload);
         default:
             rsp_payload[0] = (uint8_t)USB_PROTO_RSP_CMD_DESCONHECIDO;
             return 1U;

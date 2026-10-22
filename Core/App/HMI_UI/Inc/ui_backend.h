@@ -43,7 +43,8 @@ typedef enum {
     UI_STATE_DEFLATING_FAST,
     UI_STATE_LEAK_TEST,
     UI_STATE_CONFIG,
-    UI_STATE_FAULT
+    UI_STATE_FAULT,
+    UI_STATE_MANUAL   /* Fase 7.7: atuadores comandados pelo app DEV (PC) */
 } UiState_t;
 
 /* Indices do roller de unidade — mesma ordem de PressureUnit_t. */

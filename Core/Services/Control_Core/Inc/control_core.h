@@ -188,6 +188,30 @@ typedef struct {
     ControlCore_CycleStats_t cycle;   /* Fase 5 — ver ControlCore_CycleStats_t */
 } ControlCore_t;
 
+/* ---- Fase 7.7: supervisao do modo manual remoto (app DEV via USB) ----
+ * O modo manual nao passa pela maquina de estados do ensaio: quem comanda e'
+ * o PC. Esta funcao (pura, testada no host) decide, a cada passo de 1 ms, se
+ * o comando ainda pode ser aplicado. Ordem de prioridade: sobrepressao >
+ * parada local (pedal/botao) > sinal de vida do PC perdido > sensor invalido. */
+#define CONTROL_CORE_MANUAL_HEARTBEAT_TIMEOUT_MS (300u) /* Parte B 2.6 */
+
+typedef enum {
+    CONTROL_MANUAL_OK = 0,          /* aplica o comando do PC */
+    CONTROL_MANUAL_SENSOR_INVALID,  /* continua em manual, mas bomba desligada */
+    CONTROL_MANUAL_HEARTBEAT_LOST,  /* sai do manual: estado seguro (E010) */
+    CONTROL_MANUAL_LOCAL_STOP,      /* pedal/botao no equipamento: sai do manual */
+    CONTROL_MANUAL_OVERPRESSURE     /* P_MAX_ABS: estado seguro + E001 */
+} ControlCore_ManualVerdict_t;
+
+ControlCore_ManualVerdict_t ControlCore_CheckManual(const ControlCore_SafetyConfig_t *safety,
+                                                    float pressure_kpa, uint8_t sensor_ok,
+                                                    uint32_t ms_since_heartbeat,
+                                                    uint8_t local_stop);
+
+/* P_MAX_ABS para os estados que nao passam pelo ensaio automatico (CONFIG,
+ * LEAK_TEST, MANUAL): 1 = acima do limite absoluto. */
+uint8_t ControlCore_OverPressure(const ControlCore_SafetyConfig_t *safety, float pressure_kpa);
+
 /* Valores de fabrica do ajuste fino (os #define de control_core.c). */
 void ControlCore_DefaultTuning(ControlCore_TuningConfig_t *t);
 

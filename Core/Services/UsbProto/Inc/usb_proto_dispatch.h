@@ -246,6 +246,27 @@ typedef struct {
  * CONFLITO, ESTADO_INVALIDO (fora de STANDBY), ERRO_SD reaproveitado como
  * "falha de gravacao" no COMMIT.
  */
+/* ---- Fase 7.7: modo manual (so' DEV) ------------------------------------
+ *
+ * MANUAL_ENTER     req: -                         rsp: status (so' em STANDBY)
+ * MANUAL_EXIT      req: -                         rsp: status (fora do manual: OK, nada a fazer)
+ * MANUAL_SET       req: bomba_pct u8 (0..100), valvulas u8 (bit0=V1 bit1=V2 bit2=V3, 1=aberta)
+ *                                                 rsp: status
+ * MANUAL_HEARTBEAT req: -                         rsp: status
+ * Todo SET/HEARTBEAT aceito renova o prazo: sem nenhum por 300 ms o
+ * equipamento sai sozinho para o estado seguro (supervisao na controlTask).
+ * Fora do manual, SET/HEARTBEAT respondem ESTADO_INVALIDO - e' assim que o
+ * PC descobre que o manual acabou (pedal, Ajustes na IHM, sobrepressao).
+ */
+#define USB_PROTO_MANUAL_VALVE_MASK (0x07U)
+
+typedef struct {
+    uint8_t (*enter)(void);
+    uint8_t (*exit)(void);
+    uint8_t (*set)(uint8_t pump_pct, uint8_t valve_mask);
+    uint8_t (*heartbeat)(void);
+} UsbProtoManualOps_t;
+
 #define USB_PROTO_PARAM_LIST_MAX (16U)
 #define USB_PROTO_PARAM_NAME_MAX (23U)
 #define USB_PROTO_PARAM_UNIT_MAX (7U)
@@ -292,6 +313,7 @@ typedef struct {
     UsbProtoGetLogEntryFn get_log_entry; /* Fase 7.4 - GET_LOG_TAIL (NULL -> OCUPADO) */
     const UsbProtoFsOps_t *fs;        /* Fase 7.5 - FS_* (NULL -> OCUPADO) */
     const UsbProtoParamOps_t *params; /* Fase 7.6 - PARAM_* (NULL -> OCUPADO) */
+    const UsbProtoManualOps_t *manual; /* Fase 7.7 - MANUAL_* (NULL -> OCUPADO) */
 } UsbProtoDispatchCtx_t;
 
 /**

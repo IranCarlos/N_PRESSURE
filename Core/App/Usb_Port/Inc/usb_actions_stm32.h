@@ -80,6 +80,11 @@ const UsbProtoFsOps_t * UsbActionsStm32_GetFsOps(void);
 /* Fase 7.6: tabela de parametros (PARAM_*, so' DEV) - Core/Services/Params. */
 const UsbProtoParamOps_t * UsbActionsStm32_GetParamOps(void);
 
+/* Fase 7.7: modo manual remoto (MANUAL_*, so' DEV). */
+const UsbProtoManualOps_t * UsbActionsStm32_GetManualOps(void);
+/* Chamar a cada volta da usbProtoTask: sem sessao DEV, encerra o manual. */
+void UsbActionsStm32_EnforceManualSession(uint8_t dev_session_active);
+
 #ifdef __cplusplus
 }
 #endif

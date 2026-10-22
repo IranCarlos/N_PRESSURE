@@ -176,6 +176,7 @@ lv_color_t UiTheme_ColorForState(UiState_t state)
         case UI_STATE_STABILIZED:     hex = UI_COLOR_OK;          break;
         case UI_STATE_DEFLATING_FAST: hex = UI_COLOR_DEFLATING;   break;
         case UI_STATE_LEAK_TEST:      hex = UI_COLOR_WARN;        break;
+        case UI_STATE_MANUAL:         hex = UI_COLOR_WARN;        break;
         case UI_STATE_FAULT:          hex = UI_COLOR_DANGER;      break;
         case UI_STATE_IDLE:
         case UI_STATE_CONFIG:
@@ -197,6 +198,7 @@ const char * UiTheme_TextForState(UiState_t state)
         case UI_STATE_LEAK_TEST:      return "Teste de vazamento";
         case UI_STATE_CONFIG:         return "Modo configuracao";
         case UI_STATE_FAULT:          return "Falha";
+        case UI_STATE_MANUAL:         return "Controle pelo PC (pedal = parar)";
         case UI_STATE_BOOT:
         default:                      return "Inicializando";
     }

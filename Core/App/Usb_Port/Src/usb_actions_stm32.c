@@ -187,7 +187,10 @@ static UsbProtoRspStatus_t act_abort_test(void)
         return USB_PROTO_RSP_OCUPADO;
     }
     st = UsbProtoPolicy_AbortTest(s_rt->state, &raise_abort);
-    if (raise_abort != 0u) {
+    if ((raise_abort != 0u) && (s_rt->state == SYSTEM_STATE_MANUAL)) {
+        ControlLoop_ExitRemoteManual(); /* bomba off, valvulas abertas, STANDBY */
+        log_usb_command(STORAGE_LOG_LEVEL_AUDIT, "USB: modo manual encerrado (ABORT)");
+    } else if (raise_abort != 0u) {
         /* Mesmo flag do pedal/bt_user (system_types.h): o Control_Loop o
          * consome no proximo tick de 1 ms e vai a DEFLATING_FAST. Escrita de
          * 1 byte = atomica; o controle so' le e zera. */
@@ -532,4 +535,64 @@ static const UsbProtoParamOps_t s_param_ops = {
 const UsbProtoParamOps_t * UsbActionsStm32_GetParamOps(void)
 {
     return &s_param_ops;
+}
+
+/* --- Fase 7.7: modo manual remoto (DEV) ---------------------------------- */
+
+static uint8_t man_enter(void)
+{
+    if (ControlLoop_EnterRemoteManual() == 0u) {
+        return (uint8_t)USB_PROTO_RSP_ESTADO_INVALIDO; /* so' a partir de STANDBY */
+    }
+    log_usb_command(STORAGE_LOG_LEVEL_AUDIT, "USB: modo manual iniciado (DEV)");
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static uint8_t man_exit(void)
+{
+    if ((s_rt != NULL) && (s_rt->state == SYSTEM_STATE_MANUAL)) {
+        ControlLoop_ExitRemoteManual();
+        log_usb_command(STORAGE_LOG_LEVEL_AUDIT, "USB: modo manual encerrado");
+    }
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static uint8_t man_set(uint8_t pump_pct, uint8_t valve_mask)
+{
+    if ((s_rt == NULL) || (s_rt->state != SYSTEM_STATE_MANUAL)) {
+        return (uint8_t)USB_PROTO_RSP_ESTADO_INVALIDO;
+    }
+    ControlLoop_SetManualActuators((float)pump_pct / 100.0f,
+                                   (uint8_t)(valve_mask & 0x01u),          /* V1 */
+                                   (uint8_t)((valve_mask >> 1) & 0x01u),   /* V2 */
+                                   (uint8_t)((valve_mask >> 2) & 0x01u));  /* V3 */
+    ControlLoop_RemoteManualHeartbeat();
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static uint8_t man_heartbeat(void)
+{
+    if ((s_rt == NULL) || (s_rt->state != SYSTEM_STATE_MANUAL)) {
+        return (uint8_t)USB_PROTO_RSP_ESTADO_INVALIDO;
+    }
+    ControlLoop_RemoteManualHeartbeat();
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static const UsbProtoManualOps_t s_manual_ops = { man_enter, man_exit, man_set, man_heartbeat };
+
+const UsbProtoManualOps_t * UsbActionsStm32_GetManualOps(void)
+{
+    return &s_manual_ops;
+}
+
+void UsbActionsStm32_EnforceManualSession(uint8_t dev_session_active)
+{
+    /* Manual so' existe dentro de uma sessao DEV: logout, expiracao, porta
+     * fechada ou cabo puxado (todos derrubam a sessao) encerram o manual na
+     * hora - sem esperar os 300 ms do sinal de vida. */
+    if ((dev_session_active == 0u) && (s_rt != NULL) && (s_rt->state == SYSTEM_STATE_MANUAL)) {
+        ControlLoop_ExitRemoteManual();
+        log_usb_command(STORAGE_LOG_LEVEL_AUDIT, "USB: modo manual encerrado (sessao DEV terminou)");
+    }
 }

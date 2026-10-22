@@ -83,6 +83,31 @@ void ControlCore_EnterFaultState(ControlCore_t *cc, ControlCore_Actuators_t *out
     safe_actuators(out, 0.0f, 1u, 1u, 1u);
 }
 
+uint8_t ControlCore_OverPressure(const ControlCore_SafetyConfig_t *safety, float pressure_kpa)
+{
+    return ((pressure_kpa * CONTROL_CORE_MMHG_PER_KPA) > safety->p_max_abs_mmhg) ? 1u : 0u;
+}
+
+ControlCore_ManualVerdict_t ControlCore_CheckManual(const ControlCore_SafetyConfig_t *safety,
+                                                    float pressure_kpa, uint8_t sensor_ok,
+                                                    uint32_t ms_since_heartbeat,
+                                                    uint8_t local_stop)
+{
+    if (ControlCore_OverPressure(safety, pressure_kpa) != 0u) {
+        return CONTROL_MANUAL_OVERPRESSURE;
+    }
+    if (local_stop != 0u) {
+        return CONTROL_MANUAL_LOCAL_STOP;
+    }
+    if (ms_since_heartbeat > CONTROL_CORE_MANUAL_HEARTBEAT_TIMEOUT_MS) {
+        return CONTROL_MANUAL_HEARTBEAT_LOST;
+    }
+    if (sensor_ok == 0u) {
+        return CONTROL_MANUAL_SENSOR_INVALID;
+    }
+    return CONTROL_MANUAL_OK;
+}
+
 void ControlCore_DefaultTuning(ControlCore_TuningConfig_t *t)
 {
     t->pump_min_effective  = CONTROL_CORE_PUMP_MIN_EFFECTIVE;

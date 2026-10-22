@@ -71,6 +71,7 @@ const char *EventWatch_StateName(SystemState_t state)
         case SYSTEM_STATE_DEFLATING_FAST: return "DESINFLANDO";
         case SYSTEM_STATE_LEAK_TEST:      return "TESTE VAZAMENTO";
         case SYSTEM_STATE_CONFIG:         return "AJUSTES";
+        case SYSTEM_STATE_MANUAL:         return "MANUAL PC";
         case SYSTEM_STATE_FAULT:          return "ERRO";
         default:                          return "?";
     }

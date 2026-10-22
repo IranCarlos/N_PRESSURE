@@ -2303,6 +2303,7 @@ void StartUsbProtoTask(void *argument)
               ctx.actions = UsbActionsStm32_Get();
               ctx.telemetry = &g_usb_telemetry;
               ctx.params = UsbActionsStm32_GetParamOps(); /* Fase 7.6 - so' DEV */
+              ctx.manual = UsbActionsStm32_GetManualOps(); /* Fase 7.7 - so' DEV */
 #else
               ctx.actions = NULL;   /* sem Control_Loop: comandos de controle -> OCUPADO */
               ctx.telemetry = NULL; /* sem controlTask produzindo amostras -> OCUPADO */
@@ -2358,6 +2359,13 @@ void StartUsbProtoTask(void *argument)
         raw_overflow = 1U; /* frame maior que o buffer - descarta ate' o proximo 0x00 */
       }
     }
+
+#if BRINGUP_ENABLE_CONTROL
+    // Fase 7.7: modo manual so' dentro de sessao DEV (logout/expiracao/porta
+    // fechada/cabo puxado encerram na hora).
+    UsbActionsStm32_EnforceManualSession(
+        (UsbProtoAuth_GetRole(&g_usb_auth_session) == USB_PROTO_ROLE_DEV) ? 1U : 0U);
+#endif
 
     // Fase 7.4: o que o equipamento manda sozinho - so' para um PC que ja'
     // falou o protocolo nesta conexao (s_usb_host_active).

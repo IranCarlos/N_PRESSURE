@@ -20,6 +20,7 @@ UsbProtoRspStatus_t UsbProtoPolicy_AbortTest(SystemState_t state, uint8_t *raise
         case SYSTEM_STATE_INFLATING:
         case SYSTEM_STATE_STABILIZING:
         case SYSTEM_STATE_STABILIZED:
+        case SYSTEM_STATE_MANUAL:   /* Fase 7.7: desinflar = sair do manual (estado seguro) */
             raise = 1u;
             st = USB_PROTO_RSP_OK;
             break;

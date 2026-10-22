@@ -68,6 +68,11 @@ CMD_PARAM_GET = 0x0101
 CMD_PARAM_SET = 0x0102
 CMD_PARAM_COMMIT = 0x0103
 CMD_PARAM_REVERT = 0x0104
+CMD_MANUAL_ENTER = 0x0110
+CMD_MANUAL_EXIT = 0x0111
+CMD_MANUAL_SET = 0x0112
+CMD_MANUAL_HEARTBEAT = 0x0113
+STATE_MANUAL = 9  # SystemState_t (system_types.h)
 PARAM_GROUP_NAMES = {0: "PID", 1: "Estabilizacao", 2: "Valvula de alivio", 3: "Aproximacao",
                      4: "Seguranca", 5: "Vazamento", 6: "Limites"}
 FS_READ_MAX = 1016
@@ -76,7 +81,7 @@ FS_READ_MAX = 1016
 EVT_NAMES = {0x0301: "ESTADO_MUDOU", 0x0302: "ENSAIO_CONCLUIDO", 0x0303: "ERRO",
              0x0304: "SD", 0x0305: "AUTH_EXPIROU"}
 STATE_NAMES = {0: "BOOT", 1: "STANDBY", 2: "INFLANDO", 3: "ESTABILIZANDO", 4: "MANUTENCAO",
-               5: "DESINFLANDO", 6: "TESTE_VAZAMENTO", 7: "AJUSTES", 8: "ERRO"}
+               5: "DESINFLANDO", 6: "TESTE_VAZAMENTO", 7: "AJUSTES", 8: "ERRO", 9: "MANUAL_PC"}
 LOG_LEVEL_NAMES = {0: "EVT", 1: "ERR", 2: "AUDIT"}
 
 ROLE_NAMES = {0: "USER", 1: "DEV"}
@@ -511,6 +516,77 @@ def run_prevert(ser: serial.Serial, seq: int, factory: bool, timeout_s: float) -
     return st == 0
 
 
+def parse_valves(text: str) -> int:
+    """'V1,V3' / 'v2' / '' / 'nenhuma' -> mascara (bit0=V1, bit1=V2, bit2=V3)."""
+    mask = 0
+    for part in text.replace(" ", "").upper().split(","):
+        if part in ("", "NENHUMA", "0"):
+            continue
+        if part not in ("V1", "V2", "V3"):
+            raise ValueError(f"valvula invalida: {part!r} (use V1, V2, V3)")
+        mask |= 1 << (int(part[1]) - 1)
+    return mask
+
+
+def get_state_pressure(ser: serial.Serial, seq: int, timeout_s: float):
+    p = send_and_receive(ser, seq, CMD_GET_STATUS, b"", timeout_s)["payload"]
+    return p[1], struct.unpack("<f", p[2:6])[0]
+
+
+def run_manual(ser: serial.Serial, seq: int, pump_pct: int, valves: int, seconds: float,
+               heartbeat: bool, timeout_s: float) -> bool:
+    """MANUAL_ENTER -> MANUAL_SET a 10 Hz por `seconds` -> MANUAL_EXIT.
+    Sem heartbeat: manda UM MANUAL_SET e para; o equipamento tem que sair
+    sozinho do manual em ~300 ms (mede o tempo pelo GET_STATUS)."""
+    names = ",".join(f"V{i + 1}" for i in range(3) if valves & (1 << i)) or "nenhuma"
+    print(f"--> MANUAL_ENTER (seq={seq})")
+    st = send_and_receive(ser, seq, CMD_MANUAL_ENTER, b"", timeout_s)["payload"][0]
+    seq += 1
+    print(f"<-- status={RSP_STATUS_NAMES.get(st, st)}")
+    if st != 0:
+        return False
+
+    print(f"--> MANUAL_SET bomba={pump_pct}% valvulas abertas={names}")
+    if not heartbeat:
+        t0 = time.monotonic()
+        send_and_receive(ser, seq, CMD_MANUAL_SET, bytes([pump_pct, valves]), timeout_s)
+        seq += 1
+        while time.monotonic() - t0 < 2.0:
+            state, p = get_state_pressure(ser, seq, timeout_s)
+            seq += 1
+            if state != STATE_MANUAL:
+                ms = (time.monotonic() - t0) * 1000.0
+                print(f"<-- saiu do manual sozinho apos ~{ms:.0f} ms sem sinal de vida (esperado ~300) "
+                      f"estado={state} pressao={p:.1f} mmHg")
+                return 250.0 <= ms <= 600.0
+            time.sleep(0.02)
+        print("FALHA: continuou em manual sem sinal de vida por 2 s", file=sys.stderr)
+        return False
+
+    end = time.monotonic() + seconds
+    next_print = 0.0
+    ok = True
+    while time.monotonic() < end:
+        st = send_and_receive(ser, seq, CMD_MANUAL_SET, bytes([pump_pct, valves]), timeout_s)["payload"][0]
+        seq += 1
+        if st != 0:
+            print(f"<-- MANUAL_SET status={RSP_STATUS_NAMES.get(st, st)} (manual encerrado no equipamento?)")
+            ok = False
+            break
+        now = time.monotonic()
+        if now >= next_print:
+            state, p = get_state_pressure(ser, seq, timeout_s)
+            seq += 1
+            print(f"    pressao={p:6.1f} mmHg estado={state}")
+            next_print = now + 0.5
+        time.sleep(0.1)  # 10 Hz (sinal de vida)
+
+    print(f"--> MANUAL_EXIT (seq={seq})")
+    st = send_and_receive(ser, seq, CMD_MANUAL_EXIT, b"", timeout_s)["payload"][0]
+    print(f"<-- status={RSP_STATUS_NAMES.get(st, st)}")
+    return ok and st == 0
+
+
 def parse_hello(payload: bytes) -> dict:
     role_idx = 2 + DEVICE_ID_FIELD_LEN + FW_VERSION_FIELD_LEN
     return {
@@ -636,7 +712,11 @@ def main():
     parser.add_argument("--cmd", choices=["hello", "status", "auth", "both",
                                           "setpoint", "datetime", "operator", "start", "abort",
                                           "stream", "logtail", "listen", "ls", "stat", "get",
-                                          "params", "pset", "pcommit", "prevert"], default="both")
+                                          "params", "pset", "pcommit", "prevert", "manual"], default="both")
+    parser.add_argument("--pump", type=int, default=0, help="--cmd manual: potencia da bomba 0..100 %%")
+    parser.add_argument("--valves", default="V1,V2", help="--cmd manual: valvulas ABERTAS, ex.: 'V1,V3' ou 'nenhuma'")
+    parser.add_argument("--no-heartbeat", action="store_true",
+                        help="--cmd manual: para o sinal de vida (testa a saida automatica em 300 ms)")
     parser.add_argument("--name", help="Parametro: nome ('pid.kp') ou id ('0x0101') (--cmd pset)")
     parser.add_argument("--factory", action="store_true", help="--cmd prevert: volta aos valores de fabrica")
     parser.add_argument("--path", default="/", help="Caminho no cartao (--cmd ls/stat/get)")
@@ -736,6 +816,19 @@ def main():
                 else:
                     out = args.out or args.path.rstrip("/").split("/")[-1] or "download.bin"
                     ok = ok and run_get(ser, seq, args.path, out, args.timeout)
+            except (ValueError, TimeoutError) as exc:
+                print(f"FALHA: {exc}", file=sys.stderr)
+                ok = False
+
+        if args.cmd == "manual":
+            if not args.dev_key_hex:
+                print("Modo manual exige sessao DEV: passe --dev-key-hex", file=sys.stderr)
+                sys.exit(1)
+            try:
+                ok = run_auth_flow(ser, seq, bytes.fromhex(args.dev_key_hex), args.timeout, logout=False)
+                seq += 10
+                ok = ok and run_manual(ser, seq, args.pump, parse_valves(args.valves), args.seconds,
+                                       not args.no_heartbeat, args.timeout)
             except (ValueError, TimeoutError) as exc:
                 print(f"FALHA: {exc}", file=sys.stderr)
                 ok = False

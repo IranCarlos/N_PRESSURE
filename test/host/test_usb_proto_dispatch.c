@@ -821,8 +821,58 @@ static void test_param_commit_revert(void)
     CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO);
 }
 
+/* ---- Fase 7.7: MANUAL_* com operacoes falsas -------------------------- */
+
+static int s_man_calls;
+static uint8_t s_man_pump;
+static uint8_t s_man_valves;
+static uint8_t m_enter(void) { s_man_calls++; return (uint8_t)USB_PROTO_RSP_OK; }
+static uint8_t m_exit(void) { s_man_calls++; return (uint8_t)USB_PROTO_RSP_OK; }
+static uint8_t m_set(uint8_t p, uint8_t v) { s_man_calls++; s_man_pump = p; s_man_valves = v; return (uint8_t)USB_PROTO_RSP_OK; }
+static uint8_t m_hb(void) { s_man_calls++; return (uint8_t)USB_PROTO_RSP_ESTADO_INVALIDO; }
+static const UsbProtoManualOps_t FAKE_MANUAL = { m_enter, m_exit, m_set, m_hb };
+
+static uint8_t man_call(uint16_t cmd, const uint8_t *req, uint16_t len, UsbProtoRole_t role)
+{
+    UsbProtoAuthSession_t sess;
+    UsbProtoDispatchCtx_t ctx = { .auth = &sess, .manual = &FAKE_MANUAL };
+    uint8_t rsp[8];
+    UsbProtoAuth_Init(&sess, KEY, 1U);
+    sess.role = role;
+    CHECK(UsbProtoDispatch_Handle(cmd, req, len, &ctx, rsp, sizeof(rsp)) == 1U);
+    return rsp[0];
+}
+
+static void test_manual_commands(void)
+{
+    const uint8_t set_ok[2] = { 55U, 0x05U };   /* 55 %, V1+V3 */
+    const uint8_t set_pump[2] = { 101U, 0U };
+    const uint8_t set_bits[2] = { 0U, 0x08U };  /* bit fora de V1..V3 */
+
+    s_man_calls = 0;
+    /* sem DEV: nada chega nas acoes */
+    CHECK(man_call(USB_PROTO_CMD_MANUAL_ENTER, NULL, 0U, USB_PROTO_ROLE_USER) == (uint8_t)USB_PROTO_RSP_SEM_PERMISSAO);
+    CHECK(man_call(USB_PROTO_CMD_MANUAL_SET, set_ok, 2U, USB_PROTO_ROLE_USER) == (uint8_t)USB_PROTO_RSP_SEM_PERMISSAO);
+    CHECK(s_man_calls == 0);
+
+    CHECK(man_call(USB_PROTO_CMD_MANUAL_ENTER, NULL, 0U, USB_PROTO_ROLE_DEV) == (uint8_t)USB_PROTO_RSP_OK);
+    CHECK(man_call(USB_PROTO_CMD_MANUAL_SET, set_ok, 2U, USB_PROTO_ROLE_DEV) == (uint8_t)USB_PROTO_RSP_OK);
+    CHECK((s_man_pump == 55U) && (s_man_valves == 0x05U));
+    CHECK(man_call(USB_PROTO_CMD_MANUAL_HEARTBEAT, NULL, 0U, USB_PROTO_ROLE_DEV) == (uint8_t)USB_PROTO_RSP_ESTADO_INVALIDO);
+    CHECK(man_call(USB_PROTO_CMD_MANUAL_EXIT, NULL, 0U, USB_PROTO_ROLE_DEV) == (uint8_t)USB_PROTO_RSP_OK);
+    CHECK(s_man_calls == 4);
+
+    /* malformados: recusados antes da acao */
+    CHECK(man_call(USB_PROTO_CMD_MANUAL_SET, set_pump, 2U, USB_PROTO_ROLE_DEV) == (uint8_t)USB_PROTO_RSP_FORA_DE_FAIXA);
+    CHECK(man_call(USB_PROTO_CMD_MANUAL_SET, set_bits, 2U, USB_PROTO_ROLE_DEV) == (uint8_t)USB_PROTO_RSP_FORA_DE_FAIXA);
+    CHECK(man_call(USB_PROTO_CMD_MANUAL_SET, set_ok, 1U, USB_PROTO_ROLE_DEV) == (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO);
+    CHECK(man_call(USB_PROTO_CMD_MANUAL_ENTER, set_ok, 2U, USB_PROTO_ROLE_DEV) == (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO);
+    CHECK(s_man_calls == 4);
+}
+
 int main(void)
 {
+    test_manual_commands();
     test_param_requires_dev();
     test_param_list_pages();
     test_param_get_set();

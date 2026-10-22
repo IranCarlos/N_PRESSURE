@@ -119,6 +119,11 @@ static struct {
     uint8_t manual_v3_on;
     float manual_pump_power;
 
+    // Fase 7.7: modo manual remoto (app DEV). Escrito pela usbProtoTask,
+    // lido aqui (controlTask) - uint32/uint8 alinhados: leitura atomica.
+    volatile uint32_t remote_hb_tick;        // HAL_GetTick() do ultimo sinal de vida do PC
+    volatile uint8_t  remote_exit_reason;    // ControlLoop_RemoteExit_t, para o log (lido e zerado)
+
     // Jitter do loop de controle (Fase 3/4: "registrar jitter maximo e
     // expor via diagnostico"). Cycles do DWT->CYCCNT entre chamadas
     // consecutivas de ControlLoop_Update(); o alvo e' CONTROL_LOOP_PERIOD_MS.
@@ -255,6 +260,54 @@ static void handle_state_config(void) {
     }
 }
 
+/* Fase 7.7 - modo manual remoto: aplica o comando do PC so' enquanto
+ * ControlCore_CheckManual() deixar (supervisao a cada 1 ms, aqui na tarefa
+ * de maior prioridade - nao depende da usbProtoTask estar viva). */
+static void leave_remote_manual(ControlLoop_RemoteExit_t reason) {
+    s_control.manual_test_enabled = 0U;
+    set_pump_power(0.0f);
+    set_valves(1, 1, 1); // estado seguro: tudo aberto; o IDLE assume no proximo passo
+    s_control.runtime_data->state = SYSTEM_STATE_IDLE;
+    s_control.remote_exit_reason = (uint8_t)reason;
+}
+
+static void handle_state_manual(void) {
+    const PressureCore_t* diag = ADC_Acq_GetDiagnostics();
+    uint8_t local_stop = s_control.runtime_data->bt_user_pressed;
+    ControlCore_ManualVerdict_t v;
+
+    s_control.runtime_data->bt_user_pressed = 0u; // consumido: nao pode sobrar para o proximo ensaio
+    v = ControlCore_CheckManual(&s_control.cc.safety,
+                                s_control.runtime_data->pressure_kpa,
+                                (diag->flags == 0u) ? 1u : 0u,
+                                HAL_GetTick() - s_control.remote_hb_tick,
+                                local_stop);
+    switch (v) {
+        case CONTROL_MANUAL_OVERPRESSURE:
+            s_control.cc.last_error = CONTROL_ERR_E001_OVERPRESSURE;
+            s_control.remote_exit_reason = (uint8_t)CONTROL_REMOTE_EXIT_OVERPRESSURE;
+            ControlLoop_EnterFaultState();
+            break;
+        case CONTROL_MANUAL_LOCAL_STOP:
+            leave_remote_manual(CONTROL_REMOTE_EXIT_LOCAL_STOP);
+            break;
+        case CONTROL_MANUAL_HEARTBEAT_LOST:
+            leave_remote_manual(CONTROL_REMOTE_EXIT_HEARTBEAT);
+            break;
+        case CONTROL_MANUAL_SENSOR_INVALID:
+            // Sem leitura confiavel nao ha' como vigiar a pressao: bomba off,
+            // valvulas como o PC pediu (o PC ve o erro do sensor no stream).
+            set_pump_power(0.0f);
+            set_valves(s_control.manual_v1_on, s_control.manual_v2_on, s_control.manual_v3_on);
+            break;
+        case CONTROL_MANUAL_OK:
+        default:
+            set_pump_power(s_control.manual_test_enabled ? s_control.manual_pump_power : 0.0f);
+            set_valves(s_control.manual_v1_on, s_control.manual_v2_on, s_control.manual_v3_on);
+            break;
+    }
+}
+
 static void handle_state_leak_test(void) {
     uint32_t now = HAL_GetTick();
     float current_mmhg = s_control.runtime_data->pressure_kpa * MMHG_PER_KPA;
@@ -363,6 +416,24 @@ void ControlLoop_Update(void) {
         s_control.runtime_data->pressure_kpa,
         s_control.sys_cfg->unit
     );
+
+    // P_MAX_ABS em TODO estado (Parte A, seguranca 2: "independente de
+    // setpoint e do estado da maquina"). O Control_Core so' cobre o ensaio
+    // automatico; CONFIG (painel de atuadores da IHM) e LEAK_TEST nao tinham
+    // protecao nenhuma - achado 2026-10-22, Fase 7.7. MANUAL checa dentro de
+    // handle_state_manual() (mesma regra, via ControlCore_CheckManual).
+    if (((s_control.runtime_data->state == SYSTEM_STATE_CONFIG) ||
+         (s_control.runtime_data->state == SYSTEM_STATE_LEAK_TEST)) &&
+        (ControlCore_OverPressure(&s_control.cc.safety, s_control.runtime_data->pressure_kpa) != 0u)) {
+        s_control.cc.last_error = CONTROL_ERR_E001_OVERPRESSURE;
+        ControlLoop_EnterFaultState();
+        return;
+    }
+
+    if (s_control.runtime_data->state == SYSTEM_STATE_MANUAL) {
+        handle_state_manual();
+        return;
+    }
 
     // CONFIG e LEAK_TEST ficam fora do Control_Core (ver sim-report.md item 10).
     if (s_control.runtime_data->state == SYSTEM_STATE_CONFIG) {
@@ -498,6 +569,40 @@ void ControlLoop_SetManualActuators(float pump_power, uint8_t valve1_on, uint8_t
         set_pump_power(s_control.manual_pump_power);
         set_valves(s_control.manual_v1_on, s_control.manual_v2_on, s_control.manual_v3_on);
     }
+    // MANUAL: aplicado no proximo passo de 1 ms, ja' passando pela
+    // supervisao (handle_state_manual).
+}
+
+uint8_t ControlLoop_EnterRemoteManual(void) {
+    if (s_control.runtime_data->state != SYSTEM_STATE_IDLE) {
+        return 0u;
+    }
+    // Comeca seguro: bomba off, V1+V2 abertas (igual ao IDLE), V3 fechada.
+    s_control.manual_test_enabled = 1U;
+    s_control.manual_pump_power = 0.0f;
+    s_control.manual_v1_on = 1U;
+    s_control.manual_v2_on = 1U;
+    s_control.manual_v3_on = 0U;
+    s_control.remote_hb_tick = HAL_GetTick();
+    s_control.runtime_data->bt_user_pressed = 0u; // pedal de antes nao conta como parada
+    s_control.runtime_data->state = SYSTEM_STATE_MANUAL;
+    return 1u;
+}
+
+void ControlLoop_ExitRemoteManual(void) {
+    if (s_control.runtime_data->state == SYSTEM_STATE_MANUAL) {
+        leave_remote_manual(CONTROL_REMOTE_EXIT_COMMAND);
+    }
+}
+
+void ControlLoop_RemoteManualHeartbeat(void) {
+    s_control.remote_hb_tick = HAL_GetTick();
+}
+
+ControlLoop_RemoteExit_t ControlLoop_TakeRemoteExitReason(void) {
+    ControlLoop_RemoteExit_t r = (ControlLoop_RemoteExit_t)s_control.remote_exit_reason;
+    s_control.remote_exit_reason = (uint8_t)CONTROL_REMOTE_EXIT_NONE;
+    return r;
 }
 
 void ControlLoop_DisableManualActuators(void) {
