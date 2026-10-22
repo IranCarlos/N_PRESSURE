@@ -495,9 +495,36 @@ def build_control_request(args):
     return "ABORT_TEST", CMD_ABORT_TEST, b""
 
 
+# Identificacao do equipamento na USB (USB_DEVICE/App/usbd_desc.c):
+# VID/PID filtram as portas candidatas; o HELLO confirma que e' mesmo o
+# equipamento (o par VID/PID padrao da ST tambem aparece em outras placas
+# STM32 com CDC).
+USB_VID = 0x0483
+USB_PID = 0x5740
+DEVICE_ID_PREFIX = "myPRESSURE"
+
+
+def find_device(timeout_s: float = 0.5):
+    """Devolve (porta, hello) do primeiro equipamento que responder, ou (None, None)."""
+    for p in serial.tools.list_ports.comports():
+        if (p.vid, p.pid) != (USB_VID, USB_PID):
+            continue
+        try:
+            with serial.Serial(p.device, 115200, timeout=timeout_s) as ser:
+                ser.reset_input_buffer()
+                rsp = send_and_receive(ser, 1, CMD_HELLO, timeout_s=timeout_s)
+                hello = parse_hello(rsp["payload"])
+        except (serial.SerialException, ValueError, TimeoutError, IndexError):
+            continue  # porta ocupada por outro programa ou nao fala o protocolo
+        if hello["status"] == 0 and hello["device_id"].startswith(DEVICE_ID_PREFIX):
+            return p.device, hello
+    return None, None
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--port", help="Porta serial (ex.: COM5)")
+    parser.add_argument("--port", default="auto",
+                        help="Porta serial (ex.: COM5). Padrao: 'auto' = acha o equipamento sozinho")
     parser.add_argument("--list", action="store_true", help="Lista as portas seriais disponiveis e sai")
     parser.add_argument("--cmd", choices=["hello", "status", "auth", "both",
                                           "setpoint", "datetime", "operator", "start", "abort",
@@ -519,19 +546,26 @@ def main():
         print("--cmd auth exige --dev-key-hex <chave gerada por tools/gen_dev_key.py>", file=sys.stderr)
         sys.exit(1)
 
-    if args.list or not args.port:
+    if args.list:
         ports = list(serial.tools.list_ports.comports())
         if not ports:
             print("Nenhuma porta serial encontrada.")
         else:
             print("Portas disponiveis:")
             for p in ports:
-                print(f"  {p.device}  {p.description}")
-        if not args.port:
-            print("\nUse --port <porta> para rodar o teste.")
-            return
-        if args.list:
-            return
+                vidpid = f"{p.vid:04X}:{p.pid:04X}" if p.vid is not None else "----:----"
+                print(f"  {p.device}  {vidpid}  serial={p.serial_number}  {p.description}")
+        return
+
+    if args.port.lower() == "auto":
+        port, hello = find_device()
+        if port is None:
+            print(f"Equipamento nao encontrado (VID:PID {USB_VID:04X}:{USB_PID:04X} + HELLO). "
+                  "Conferir o cabo ou usar --port COMx.", file=sys.stderr)
+            sys.exit(1)
+        print(f"Equipamento encontrado em {port}: {hello['device_id']} FW {hello['fw_version']} "
+              f"serial={hello['serial'].hex()}")
+        args.port = port
 
     try:
         ser = serial.Serial(args.port, args.baud, timeout=args.timeout)
