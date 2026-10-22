@@ -63,6 +63,13 @@ CMD_FS_LIST = 0x0020
 CMD_FS_STAT = 0x0021
 CMD_FS_READ = 0x0022
 CMD_FS_CRC = 0x0023
+CMD_PARAM_LIST = 0x0100
+CMD_PARAM_GET = 0x0101
+CMD_PARAM_SET = 0x0102
+CMD_PARAM_COMMIT = 0x0103
+CMD_PARAM_REVERT = 0x0104
+PARAM_GROUP_NAMES = {0: "PID", 1: "Estabilizacao", 2: "Valvula de alivio", 3: "Aproximacao",
+                     4: "Seguranca", 5: "Vazamento", 6: "Limites"}
 FS_READ_MAX = 1016
 
 # Fase 7.4: eventos assincronos (usb_proto_events.h)
@@ -79,7 +86,7 @@ NONCE_LEN = 16
 RSP_STATUS_NAMES = {
     0: "OK", 1: "CMD_DESCONHECIDO", 2: "SEM_PERMISSAO", 3: "PARAM_INVALIDO",
     4: "OCUPADO", 5: "ESTADO_INVALIDO", 6: "ERRO_SD", 7: "FORA_DE_FAIXA",
-    8: "NAO_AUTENTICADO", 9: "NAO_ENCONTRADO",
+    8: "NAO_AUTENTICADO", 9: "NAO_ENCONTRADO", 10: "CONFLITO",
 }
 
 DEVICE_ID_FIELD_LEN = 16
@@ -404,6 +411,106 @@ def run_listen(ser: serial.Serial, seq: int, seconds: float, timeout_s: float) -
     return True
 
 
+def param_list_all(ser: serial.Serial, seq: int, timeout_s: float):
+    """PARAM_LIST paginado ate' o fim. Devolve (lista, alterado_nao_salvo) ou (None, status)."""
+    params = []
+    dirty = 0
+    start = 0
+    while True:
+        rsp = send_and_receive(ser, seq, CMD_PARAM_LIST, struct.pack("<H", start), timeout_s)
+        seq += 1
+        p = rsp["payload"]
+        if p[0] != 0:
+            return None, p[0]
+        total, dirty, n = struct.unpack("<HBB", p[1:5])
+        i = 5
+        for _ in range(n):
+            pid, typ, grp, vmin, vmax, vdef, val = struct.unpack("<HBBffff", p[i:i + 20])
+            i += 20
+            nl = p[i]
+            name = p[i + 1:i + 1 + nl].decode("ascii", "replace")
+            i += 1 + nl
+            ul = p[i]
+            unit = p[i + 1:i + 1 + ul].decode("ascii", "replace")
+            i += 1 + ul
+            params.append({"id": pid, "type": typ, "group": grp, "min": vmin, "max": vmax,
+                           "def": vdef, "value": val, "name": name, "unit": unit})
+        start += n
+        if n == 0 or start >= total:
+            return params, dirty
+
+
+def fmt_param_value(p: dict, v: float) -> str:
+    return f"{int(v)}" if p["type"] == 1 else f"{v:.6g}"
+
+
+def run_params(ser: serial.Serial, seq: int, timeout_s: float) -> bool:
+    print(f"--> PARAM_LIST (seq={seq})")
+    params, dirty = param_list_all(ser, seq, timeout_s)
+    if params is None:
+        print(f"<-- status={RSP_STATUS_NAMES.get(dirty, dirty)}")
+        return False
+    group = None
+    for p in params:
+        if p["group"] != group:
+            group = p["group"]
+            print(f"\n  [{PARAM_GROUP_NAMES.get(group, group)}]")
+        mark = "*" if p["value"] != p["def"] else " "
+        print(f"  {mark} {p['id']:#06x} {p['name']:<22} = {fmt_param_value(p, p['value']):>10} {p['unit']:<8}"
+              f" fabrica={fmt_param_value(p, p['def']):<8} faixa=[{fmt_param_value(p, p['min'])}, "
+              f"{fmt_param_value(p, p['max'])}]")
+    print(f"\n{len(params)} parametros ('*' = diferente do de fabrica). "
+          f"{'HA ALTERACOES NAO SALVAS (use --cmd pcommit)' if dirty else 'Tudo salvo.'}")
+    return True
+
+
+def find_param(ser: serial.Serial, seq: int, key: str, timeout_s: float):
+    """Aceita nome ('pid.kp') ou id ('0x0101')."""
+    params, _ = param_list_all(ser, seq, timeout_s)
+    if params is None:
+        return None
+    for p in params:
+        if p["name"] == key or (key.lower().startswith("0x") and p["id"] == int(key, 16)):
+            return p
+    return None
+
+
+def run_pset(ser: serial.Serial, seq: int, key: str, value: float, timeout_s: float) -> bool:
+    p = find_param(ser, seq, key, timeout_s)
+    seq += 10
+    if p is None:
+        print(f"FALHA: parametro {key!r} nao existe (ou sessao nao e' DEV)", file=sys.stderr)
+        return False
+    print(f"--> PARAM_SET {p['name']} = {value} (era {fmt_param_value(p, p['value'])}) (seq={seq})")
+    rsp = send_and_receive(ser, seq, CMD_PARAM_SET, struct.pack("<Hf", p["id"], value), timeout_s)
+    st = rsp["payload"][0]
+    now = struct.unpack("<f", rsp["payload"][1:5])[0] if len(rsp["payload"]) >= 5 else None
+    print(f"<-- status={RSP_STATUS_NAMES.get(st, st)} valor atual="
+          f"{fmt_param_value(p, now) if now is not None else '-'}")
+    if st == 0:
+        print("    (vale ja' para o controle; NAO salvo - --cmd pcommit para gravar)")
+    return st == 0
+
+
+def run_pcommit(ser: serial.Serial, seq: int, timeout_s: float) -> bool:
+    print(f"--> PARAM_COMMIT (seq={seq})")
+    rsp = send_and_receive(ser, seq, CMD_PARAM_COMMIT, b"", timeout_s)
+    st = rsp["payload"][0]
+    if st == 0:
+        print(f"<-- status=OK gravado na EEPROM (seq {struct.unpack('<I', rsp['payload'][1:5])[0]})")
+        return True
+    print(f"<-- status={RSP_STATUS_NAMES.get(st, st)}")
+    return False
+
+
+def run_prevert(ser: serial.Serial, seq: int, factory: bool, timeout_s: float) -> bool:
+    print(f"--> PARAM_REVERT {'(fabrica)' if factory else '(descartar nao salvos)'} (seq={seq})")
+    rsp = send_and_receive(ser, seq, CMD_PARAM_REVERT, bytes([1 if factory else 0]), timeout_s)
+    st = rsp["payload"][0]
+    print(f"<-- status={RSP_STATUS_NAMES.get(st, st)}")
+    return st == 0
+
+
 def parse_hello(payload: bytes) -> dict:
     role_idx = 2 + DEVICE_ID_FIELD_LEN + FW_VERSION_FIELD_LEN
     return {
@@ -528,7 +635,10 @@ def main():
     parser.add_argument("--list", action="store_true", help="Lista as portas seriais disponiveis e sai")
     parser.add_argument("--cmd", choices=["hello", "status", "auth", "both",
                                           "setpoint", "datetime", "operator", "start", "abort",
-                                          "stream", "logtail", "listen", "ls", "stat", "get"], default="both")
+                                          "stream", "logtail", "listen", "ls", "stat", "get",
+                                          "params", "pset", "pcommit", "prevert"], default="both")
+    parser.add_argument("--name", help="Parametro: nome ('pid.kp') ou id ('0x0101') (--cmd pset)")
+    parser.add_argument("--factory", action="store_true", help="--cmd prevert: volta aos valores de fabrica")
     parser.add_argument("--path", default="/", help="Caminho no cartao (--cmd ls/stat/get)")
     parser.add_argument("--out", help="Arquivo local de destino (--cmd get; padrao = nome do arquivo)")
     parser.add_argument("--rate", type=int, default=50, help="Taxa do stream em Hz (--cmd stream; USER ate' 50)")
@@ -603,6 +713,8 @@ def main():
                 rsp = send_and_receive(ser, seq, cmd, payload=payload, timeout_s=args.timeout)
                 status = rsp["payload"][0]
                 print(f"<-- status={RSP_STATUS_NAMES.get(status, status)}")
+                if cmd == CMD_SET_SETPOINT and len(rsp["payload"]) >= 2 and rsp["payload"][1] == 1:
+                    print("    ALERTA: setpoint acima do limite recomendado - margem de sobrepressao reduzida")
                 ok = (status == 0)
                 seq += 1
                 # Estado logo depois, para conferir o efeito
@@ -624,6 +736,29 @@ def main():
                 else:
                     out = args.out or args.path.rstrip("/").split("/")[-1] or "download.bin"
                     ok = ok and run_get(ser, seq, args.path, out, args.timeout)
+            except (ValueError, TimeoutError) as exc:
+                print(f"FALHA: {exc}", file=sys.stderr)
+                ok = False
+
+        if args.cmd in ("params", "pset", "pcommit", "prevert"):
+            if not args.dev_key_hex:
+                print("Parametros exigem sessao DEV: passe --dev-key-hex", file=sys.stderr)
+                sys.exit(1)
+            # --value tem default (setpoint 100); aqui tem que vir explicito
+            if args.cmd == "pset" and ((args.name is None) or ("--value" not in sys.argv)):
+                print("--cmd pset exige --name e --value", file=sys.stderr)
+                sys.exit(1)
+            try:
+                ok = run_auth_flow(ser, seq, bytes.fromhex(args.dev_key_hex), args.timeout, logout=False)
+                seq += 10
+                if args.cmd == "params":
+                    ok = ok and run_params(ser, seq, args.timeout)
+                elif args.cmd == "pset":
+                    ok = ok and run_pset(ser, seq, args.name, args.value, args.timeout)
+                elif args.cmd == "pcommit":
+                    ok = ok and run_pcommit(ser, seq, args.timeout)
+                else:
+                    ok = ok and run_prevert(ser, seq, args.factory, args.timeout)
             except (ValueError, TimeoutError) as exc:
                 print(f"FALHA: {exc}", file=sys.stderr)
                 ok = False

@@ -83,6 +83,23 @@ void ControlCore_EnterFaultState(ControlCore_t *cc, ControlCore_Actuators_t *out
     safe_actuators(out, 0.0f, 1u, 1u, 1u);
 }
 
+void ControlCore_DefaultTuning(ControlCore_TuningConfig_t *t)
+{
+    t->pump_min_effective  = CONTROL_CORE_PUMP_MIN_EFFECTIVE;
+    t->approach_lookahead_s = CONTROL_CORE_APPROACH_LOOKAHEAD_S;
+    t->approach_zone_mmhg  = CONTROL_CORE_APPROACH_ZONE_MMHG;
+    t->approach_rearm_mmhg = CONTROL_CORE_APPROACH_REARM_MMHG;
+    t->approach_rearm_ms   = CONTROL_CORE_APPROACH_REARM_MS;
+    t->rate_p_tau_s        = CONTROL_CORE_RATE_P_TAU_S;
+    t->rate_tau_s          = CONTROL_CORE_RATE_TAU_S;
+    t->relief_on_fraction  = CONTROL_CORE_RELIEF_ON_FRACTION;
+    t->relief_ms_per_mmhg  = CONTROL_CORE_RELIEF_MS_PER_MMHG;
+    t->relief_pulse_min_ms = CONTROL_CORE_RELIEF_PULSE_MIN_MS;
+    t->relief_pulse_max_ms = CONTROL_CORE_RELIEF_PULSE_MAX_MS;
+    t->relief_settle_ms    = CONTROL_CORE_RELIEF_SETTLE_MS;
+    t->stabilizing_exit_ms = CONTROL_CORE_STABILIZING_EXIT_MS;
+}
+
 void ControlCore_Init(ControlCore_t *cc, SystemConfig_t *cfg, SystemRuntime_t *runtime,
                       const ControlCore_SafetyConfig_t *safety)
 {
@@ -90,6 +107,7 @@ void ControlCore_Init(ControlCore_t *cc, SystemConfig_t *cfg, SystemRuntime_t *r
     cc->cfg = cfg;
     cc->runtime = runtime;
     cc->safety = *safety;
+    ControlCore_DefaultTuning(&cc->tuning);
     runtime->state = SYSTEM_STATE_IDLE;
 }
 
@@ -111,7 +129,7 @@ void ControlCore_StartInflation(ControlCore_t *cc)
 
         cc->relief_open = 0u;
         cc->relief_on_ms = 0u;
-        cc->relief_off_ms = CONTROL_CORE_RELIEF_SETTLE_MS; /* 1a abertura liberada */
+        cc->relief_off_ms = cc->tuning.relief_settle_ms; /* 1a abertura liberada */
         cc->relief_pulse_ms = 0u;
 
         memset(&cc->cycle, 0, sizeof(cc->cycle));
@@ -135,7 +153,7 @@ const ControlCore_PidDiag_t *ControlCore_GetPidDiag(const ControlCore_t *cc)
  *         Devolve 1 se a valvula deve ficar aberta neste passo. */
 static uint8_t update_relief_valve(ControlCore_t *cc, float over_mmhg, uint32_t dt_ms)
 {
-    float on_threshold = CONTROL_CORE_RELIEF_ON_FRACTION * cc->cfg->stabilization.band_mmhg;
+    float on_threshold = cc->tuning.relief_on_fraction * cc->cfg->stabilization.band_mmhg;
 
     if (cc->relief_open != 0u) {
         cc->relief_on_ms += dt_ms;
@@ -143,16 +161,16 @@ static uint8_t update_relief_valve(ControlCore_t *cc, float over_mmhg, uint32_t 
             cc->relief_open = 0u;
             cc->relief_off_ms = 0u;
         }
-    } else if (cc->relief_off_ms < CONTROL_CORE_RELIEF_SETTLE_MS) {
+    } else if (cc->relief_off_ms < cc->tuning.relief_settle_ms) {
         cc->relief_off_ms += dt_ms; /* acomodando: leitura nao confiavel */
     } else if (over_mmhg >= on_threshold) {
-        float pulse = over_mmhg * CONTROL_CORE_RELIEF_MS_PER_MMHG;
+        float pulse = over_mmhg * cc->tuning.relief_ms_per_mmhg;
 
-        if (pulse < (float)CONTROL_CORE_RELIEF_PULSE_MIN_MS) {
-            pulse = (float)CONTROL_CORE_RELIEF_PULSE_MIN_MS;
+        if (pulse < (float)cc->tuning.relief_pulse_min_ms) {
+            pulse = (float)cc->tuning.relief_pulse_min_ms;
         }
-        if (pulse > (float)CONTROL_CORE_RELIEF_PULSE_MAX_MS) {
-            pulse = (float)CONTROL_CORE_RELIEF_PULSE_MAX_MS;
+        if (pulse > (float)cc->tuning.relief_pulse_max_ms) {
+            pulse = (float)cc->tuning.relief_pulse_max_ms;
         }
         cc->relief_pulse_ms = (uint32_t)pulse;
         cc->relief_open = 1u;
@@ -168,7 +186,7 @@ static uint8_t update_relief_valve(ControlCore_t *cc, float over_mmhg, uint32_t 
  * (leitura distorcida pela reequalizacao da tubulacao). */
 static uint8_t relief_window_active(const ControlCore_t *cc)
 {
-    return ((cc->relief_open != 0u) || (cc->relief_off_ms < CONTROL_CORE_RELIEF_SETTLE_MS)) ? 1u : 0u;
+    return ((cc->relief_open != 0u) || (cc->relief_off_ms < cc->tuning.relief_settle_ms)) ? 1u : 0u;
 }
 
 /* Fecha a valvula de alivio fora da regulacao; a proxima abertura ainda
@@ -196,8 +214,8 @@ static void update_fast_approach(ControlCore_t *cc, uint32_t dt_ms)
         cc->rise_rate_mmhg_s = 0.0f;
         cc->rate_valid = 1u;
     } else if (dt_s > 0.0f) {
-        float a_p = dt_s / (CONTROL_CORE_RATE_P_TAU_S + dt_s);
-        float a_r = dt_s / (CONTROL_CORE_RATE_TAU_S + dt_s);
+        float a_p = dt_s / (cc->tuning.rate_p_tau_s + dt_s);
+        float a_r = dt_s / (cc->tuning.rate_tau_s + dt_s);
         float p_prev = cc->p_filt_mmhg;
         float raw_rate;
 
@@ -210,13 +228,13 @@ static void update_fast_approach(ControlCore_t *cc, uint32_t dt_ms)
 
     predicted = rt->pressure_display;
     if (cc->rise_rate_mmhg_s > 0.0f) {
-        predicted += cc->rise_rate_mmhg_s * CONTROL_CORE_APPROACH_LOOKAHEAD_S;
+        predicted += cc->rise_rate_mmhg_s * cc->tuning.approach_lookahead_s;
     }
     cc->pid_diag.rise_rate_mmhg_s = cc->rise_rate_mmhg_s;
     cc->pid_diag.predicted_mmhg = predicted;
 
     if (cc->fast_approach != 0u) {
-        if (predicted >= (rt->setpoint_mmhg - CONTROL_CORE_APPROACH_ZONE_MMHG)) {
+        if (predicted >= (rt->setpoint_mmhg - cc->tuning.approach_zone_mmhg)) {
             /* Entra na regulacao: PID parte sem integral acumulada durante
              * a subida e sem "chute" de derivada. */
             cc->fast_approach = 0u;
@@ -225,9 +243,9 @@ static void update_fast_approach(ControlCore_t *cc, uint32_t dt_ms)
             cc->pid_prev_error = error_mmhg / CONTROL_CORE_MMHG_PER_KPA;
         }
     } else {
-        if (error_mmhg > CONTROL_CORE_APPROACH_REARM_MMHG) {
+        if (error_mmhg > cc->tuning.approach_rearm_mmhg) {
             cc->rearm_elapsed_ms += dt_ms;
-            if (cc->rearm_elapsed_ms >= CONTROL_CORE_APPROACH_REARM_MS) {
+            if (cc->rearm_elapsed_ms >= cc->tuning.approach_rearm_ms) {
                 cc->fast_approach = 1u;
                 cc->rearm_elapsed_ms = 0u;
             }
@@ -326,9 +344,9 @@ static void run_pid_iteration(ControlCore_t *cc, const ControlCore_Inputs_t *in,
      * overshoot do piso removido acima (aquele agia ate' 5 mmHg do alvo e
      * causava ~60 mmHg de overshoot no simulador). 0.30 ainda nao foi
      * confirmado como o minimo exato — e' o que a bancada mostrou. */
-    if ((pump_power > 0.0f) && (pump_power < CONTROL_CORE_PUMP_MIN_EFFECTIVE) &&
+    if ((pump_power > 0.0f) && (pump_power < cc->tuning.pump_min_effective) &&
         (error_mmhg > cc->cfg->stabilization.band_mmhg)) {
-        pump_power = CONTROL_CORE_PUMP_MIN_EFFECTIVE;
+        pump_power = cc->tuning.pump_min_effective;
         cc->pid_diag.floor_applied = 1u;
     }
 
@@ -415,7 +433,7 @@ static void handle_stabilizing(ControlCore_t *cc, const ControlCore_Inputs_t *in
         cc->stabilizing_out_of_band_ms = 0u;
     } else if (fabsf(error_mmhg) > (2.0f * cc->cfg->stabilization.band_mmhg)) {
         cc->stabilizing_out_of_band_ms += in->dt_ms;
-        if (cc->stabilizing_out_of_band_ms >= CONTROL_CORE_STABILIZING_EXIT_MS) {
+        if (cc->stabilizing_out_of_band_ms >= cc->tuning.stabilizing_exit_ms) {
             cc->stabilizing_out_of_band_ms = 0u;
             rt->state = SYSTEM_STATE_INFLATING;
             return;

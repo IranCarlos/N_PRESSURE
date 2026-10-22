@@ -83,7 +83,9 @@ typedef enum {
     USB_PROTO_RSP_ERRO_SD          = 6,
     USB_PROTO_RSP_FORA_DE_FAIXA    = 7,
     USB_PROTO_RSP_NAO_AUTENTICADO  = 8,
-    USB_PROTO_RSP_NAO_ENCONTRADO   = 9  /* Fase 7.5: arquivo/diretorio inexistente (acrescimo ao Apendice A) */
+    USB_PROTO_RSP_NAO_ENCONTRADO   = 9, /* Fase 7.5: arquivo/diretorio inexistente (acrescimo ao Apendice A) */
+    USB_PROTO_RSP_CONFLITO         = 10 /* Fase 7.6: valor coerente sozinho, mas conflita com outro
+                                         * parametro (ex.: pulso_min > pulso_max) - acrescimo */
 } UsbProtoRspStatus_t;
 
 #define USB_PROTO_DEVICE_ID_FIELD_LEN  (16U)
@@ -120,7 +122,8 @@ typedef struct {
  * continua sem conhecer Control_Loop/RTC. Cada acao devolve o status da
  * resposta. Ponteiro NULL (ou ctx->actions NULL) -> OCUPADO. */
 typedef struct {
-    UsbProtoRspStatus_t (*set_setpoint)(float setpoint_mmhg);
+    /* *warn = 1: aceito, mas acima do limiar de alerta (resposta = status + warn u8) */
+    UsbProtoRspStatus_t (*set_setpoint)(float setpoint_mmhg, uint8_t *warn);
     UsbProtoRspStatus_t (*set_datetime)(const UsbProtoDateTime_t *dt);
     UsbProtoRspStatus_t (*start_test)(void);
     UsbProtoRspStatus_t (*abort_test)(void);
@@ -225,6 +228,51 @@ typedef struct {
                                 uint8_t sha256[32]);
 } UsbProtoFsOps_t;
 
+/* ---- Fase 7.6: tabela de parametros (so' DEV) ----------------------------
+ *
+ * PARAM_LIST     req: inicio u16
+ *                rsp: status, total u16, alterado_nao_salvo u8, n u8, n x {
+ *                     id u16, tipo u8 (0=float 1=inteiro), grupo u8,
+ *                     min f32, max f32, fabrica f32, valor f32,
+ *                     nome_len u8, nome, unid_len u8, unidade }
+ *                     ate' USB_PROTO_PARAM_LIST_MAX por pagina
+ * PARAM_GET      req: id u16             rsp: status, id u16, valor f32
+ * PARAM_SET      req: id u16, valor f32  rsp: status, valor_atual f32
+ *                (vale NA HORA para o controle; so' em STANDBY)
+ * PARAM_COMMIT   req: -                  rsp: status, seq u32 (grava A/B na EEPROM)
+ * PARAM_REVERT   req: modo u8            rsp: status
+ *                (0 = descarta o nao salvo; 1 = valores de fabrica, sem gravar)
+ * Status: PARAM_INVALIDO (id desconhecido / payload), FORA_DE_FAIXA,
+ * CONFLITO, ESTADO_INVALIDO (fora de STANDBY), ERRO_SD reaproveitado como
+ * "falha de gravacao" no COMMIT.
+ */
+#define USB_PROTO_PARAM_LIST_MAX (16U)
+#define USB_PROTO_PARAM_NAME_MAX (23U)
+#define USB_PROTO_PARAM_UNIT_MAX (7U)
+
+typedef struct {
+    uint16_t    id;
+    uint8_t     type;
+    uint8_t     group;
+    float       min;
+    float       max;
+    float       def;
+    float       value;
+    const char *name;
+    const char *unit;
+} UsbProtoParamInfo_t;
+
+/* Retornos uint8_t = UsbProtoRspStatus_t. */
+typedef struct {
+    uint16_t (*count)(void);
+    uint8_t  (*info_at)(uint16_t index, UsbProtoParamInfo_t *out); /* 1 = ok */
+    uint8_t  (*is_dirty)(void);
+    uint8_t  (*get)(uint16_t id, float *value);
+    uint8_t  (*set)(uint16_t id, float value, float *now_value);
+    uint8_t  (*commit)(uint32_t *seq);
+    uint8_t  (*revert)(uint8_t to_factory);
+} UsbProtoParamOps_t;
+
 /* status == NULL -> CMD_GET_STATUS responde OCUPADO (snapshot ainda nao
  * disponivel; nao deveria acontecer em operacao normal, mas evita servir
  * lixo se a task de protocolo rodar antes da primeira atualizacao).
@@ -243,6 +291,7 @@ typedef struct {
     UsbTelemetry_t *telemetry;        /* Fase 7.4 - STREAM_START/STOP (NULL -> OCUPADO) */
     UsbProtoGetLogEntryFn get_log_entry; /* Fase 7.4 - GET_LOG_TAIL (NULL -> OCUPADO) */
     const UsbProtoFsOps_t *fs;        /* Fase 7.5 - FS_* (NULL -> OCUPADO) */
+    const UsbProtoParamOps_t *params; /* Fase 7.6 - PARAM_* (NULL -> OCUPADO) */
 } UsbProtoDispatchCtx_t;
 
 /**

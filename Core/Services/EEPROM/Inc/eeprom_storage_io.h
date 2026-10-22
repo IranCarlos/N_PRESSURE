@@ -67,6 +67,27 @@ uint8_t EEPROM_Storage_LoadDevKey(uint8_t key[32]);
  */
 uint8_t EEPROM_Storage_SaveDevKey(const uint8_t key[32]);
 
+/**
+ * @brief Fase 7.6: carrega a tabela de parametros (copia A/B mais nova e
+ *        valida) e aplica com Params_ApplyBlob(). Chamar depois de
+ *        Params_Bind(). Sem copia valida: tudo fica no valor de fabrica.
+ *        Usa HAL_Delay/timeouts de I2C: no boot, so' ANTES de
+ *        osKernelInitialize() (ver 00-auditoria.md, bancada 2026-10-21).
+ * @return quantos parametros vieram da EEPROM (0 = nenhuma copia valida).
+ */
+uint16_t EEPROM_Storage_LoadParams(void);
+
+/**
+ * @brief Fase 7.6: grava os valores atuais da tabela na copia A/B mais
+ *        antiga, le de volta e confere. So' com o controle parado
+ *        (STANDBY): bloqueia ~30 ms (ciclos de escrita da EEPROM).
+ *        Nao tem trava propria: o unico outro escritor (IHM, nos Ajustes)
+ *        so' grava em CONFIG, e quem chama isto exige STANDBY.
+ * @param out_seq numero de sequencia gravado (pode ser NULL).
+ * @return 1 gravado e conferido; 0 falha (a copia anterior continua valendo).
+ */
+uint8_t EEPROM_Storage_SaveParams(uint32_t *out_seq);
+
 #ifdef __cplusplus
 }
 #endif

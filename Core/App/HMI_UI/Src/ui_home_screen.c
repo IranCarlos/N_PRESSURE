@@ -213,7 +213,15 @@ void UI_HomeScreen_Update(void)
     setpoint = (int32_t)UiBackend_GetSetpointMmHg();
     if (setpoint != s_shown_setpoint) {
         s_shown_setpoint = setpoint;
-        lv_label_set_text_fmt(s_setpoint_label, "Setpoint: %03d mmHg", (int)setpoint);
+        if (setpoint > (int32_t)UiBackend_GetSetpointWarnMmHg()) {
+            /* Margem de sobrepressao reduzida (sensor perto do fundo de
+             * escala) - mesmo limiar do alerta da tela Novo Ensaio. */
+            lv_label_set_text_fmt(s_setpoint_label, LV_SYMBOL_WARNING " Setpoint: %03d mmHg", (int)setpoint);
+            lv_obj_set_style_text_color(s_setpoint_label, UiTheme_ColorWarn(), 0);
+        } else {
+            lv_label_set_text_fmt(s_setpoint_label, "Setpoint: %03d mmHg", (int)setpoint);
+            lv_obj_remove_local_style_prop(s_setpoint_label, LV_STYLE_TEXT_COLOR, 0);
+        }
     }
 
     if (state == UI_STATE_IDLE) {

@@ -84,6 +84,9 @@ UiState_t UiBackend_GetState(void);
 float     UiBackend_GetPressureMmHg(void);
 float     UiBackend_GetSetpointMmHg(void);
 uint16_t  UiBackend_GetMaxSetpointMmHg(void);
+/* Acima deste setpoint a IHM mostra o alerta de margem de sobrepressao
+ * reduzida (sensor perto do fundo de escala). */
+uint16_t  UiBackend_GetSetpointWarnMmHg(void);
 uint32_t  UiBackend_GetTickMs(void);
 bool      UiBackend_GetDateTime(UiDateTime_t * out);
 bool      UiBackend_IsSdMounted(void);

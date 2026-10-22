@@ -124,6 +124,10 @@ typedef struct
 
     float max_setpoint_mmhg;
     float current_setpoint_mmhg;
+    /* Fase 7.6: acima disto a IHM e o PC alertam o operador (margem de
+     * sobrepressao reduzida perto do fundo de escala do sensor). Nao e'
+     * gravado no bloco legado da EEPROM - so' na tabela de parametros. */
+    float setpoint_warn_mmhg;
     StabilizationConfig_t stabilization;
     LeakTestConfig_t leak_test;
 } SystemConfig_t;

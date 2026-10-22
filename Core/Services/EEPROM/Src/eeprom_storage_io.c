@@ -12,6 +12,7 @@
 
 #include "eeprom.h"
 #include "eeprom_port_stm32_hal.h"
+#include "params.h"
 
 static EEPROM_Handle_t s_eeprom;
 static uint8_t s_ready = 0u;
@@ -169,7 +170,12 @@ void EEPROM_Storage_LoadDefaults(SystemConfig_t *cfg)
     cfg->sensor_cal.scale = 1.0f;
     cfg->unit = SYS_PRESSURE_UNIT_MMHG;
 
-    cfg->max_setpoint_mmhg = 300.0f;
+    /* 180/170 (antes 300): o MPXV7025DP satura em ~187,5 mmHg (25 kPa) -
+     * acima disso nem o setpoint e' alcancavel nem a sobrepressao (E001)
+     * detectavel. Decisao do usuario (2026-10-22): permitir ate' 180 com
+     * alerta acima de 170; voltar a 300 com o sensor do proximo hardware. */
+    cfg->max_setpoint_mmhg = 180.0f;
+    cfg->setpoint_warn_mmhg = 170.0f;
     cfg->current_setpoint_mmhg = 100.0f; /* padrao pedido pelo usuario (2026-10-17) */
     /* 3.0 mmHg (nao mais 2.0): a saida de STABILIZED usa o DOBRO desta banda
      * como histerese (ver handle_stabilized em control_core.c) para nao
@@ -349,5 +355,92 @@ uint8_t EEPROM_Storage_SaveDevKey(const uint8_t key[32])
         EEPROM_TRY_OK(EEPROM_WriteValue(&s_eeprom, EEPROM_ADDR_DEV_KEY_VERSION, version));
     }
 
+    return 1u;
+}
+
+/* ---- Fase 7.6: tabela de parametros, copias A/B -------------------------- */
+
+static uint8_t  s_params_buf[EEPROM_PARAMS_SLOT_SIZE];
+static uint32_t s_params_seq;     /* seq da copia mais nova valida */
+static uint8_t  s_params_newest;  /* 0 = A, 1 = B, 0xFF = nenhuma */
+
+static uint16_t params_slot_addr(uint8_t slot)
+{
+    return (slot == 0u) ? (uint16_t)EEPROM_ADDR_PARAMS_A : (uint16_t)EEPROM_ADDR_PARAMS_B;
+}
+
+/* Le a copia `slot` em s_params_buf; 1 se valida (seq em *seq). */
+static uint8_t params_read_slot(uint8_t slot, uint32_t *seq)
+{
+    if (EEPROM_Read(&s_eeprom, params_slot_addr(slot), s_params_buf,
+                    (uint16_t)EEPROM_PARAMS_SLOT_SIZE) != EEPROM_OK) {
+        return 0u;
+    }
+    return Params_ValidateBlob(s_params_buf, sizeof(s_params_buf), seq);
+}
+
+uint16_t EEPROM_Storage_LoadParams(void)
+{
+    uint32_t seq_a = 0u;
+    uint32_t seq_b = 0u;
+    uint8_t ok_a;
+    uint8_t ok_b;
+    uint8_t pick;
+
+    s_params_newest = 0xFFu;
+    s_params_seq = 0u;
+    if (s_ready == 0u) {
+        return 0u;
+    }
+    ok_a = params_read_slot(0u, &seq_a);
+    ok_b = params_read_slot(1u, &seq_b);
+    if ((ok_a == 0u) && (ok_b == 0u)) {
+        return 0u;
+    }
+    /* Mais nova valida. Comparacao com diferenca com sinal: continua certa
+     * se o contador de 32 bits um dia der a volta. */
+    if ((ok_a != 0u) && ((ok_b == 0u) || ((int32_t)(seq_a - seq_b) > 0))) {
+        pick = 0u;
+    } else {
+        pick = 1u;
+    }
+    if (pick == 1u) {
+        /* s_params_buf ficou com a ultima lida (B) - ja' e' a escolhida */
+        s_params_seq = seq_b;
+    } else {
+        (void)params_read_slot(0u, &seq_a);
+        s_params_seq = seq_a;
+    }
+    s_params_newest = pick;
+    return Params_ApplyBlob(s_params_buf, sizeof(s_params_buf));
+}
+
+uint8_t EEPROM_Storage_SaveParams(uint32_t *out_seq)
+{
+    uint8_t slot;
+    uint32_t seq = s_params_seq + 1u;
+    uint32_t check_seq = 0u;
+    size_t len;
+
+    if (s_ready == 0u) {
+        return 0u;
+    }
+    slot = (s_params_newest == 0u) ? 1u : 0u; /* a outra; sem nenhuma, comeca na A */
+    len = Params_Serialize(s_params_buf, sizeof(s_params_buf), seq);
+    if (len == 0u) {
+        return 0u;
+    }
+    EEPROM_TRY_OK(EEPROM_Write(&s_eeprom, params_slot_addr(slot), s_params_buf, (uint16_t)len));
+
+    /* Confere lendo de volta (EEPROM com defeito/escrita incompleta). */
+    if ((params_read_slot(slot, &check_seq) == 0u) || (check_seq != seq)) {
+        return 0u;
+    }
+    s_params_seq = seq;
+    s_params_newest = slot;
+    Params_MarkSaved();
+    if (out_seq != NULL) {
+        *out_seq = seq;
+    }
     return 1u;
 }

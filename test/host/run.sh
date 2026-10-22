@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 OUT=build/host
 mkdir -p "$OUT"
 CFLAGS="-std=c11 -Wall -Wextra -Wconversion -Werror -O0 -g"
-INC="-ICore/Services/Pressure_Core/Inc -ICore/Bsp/Valve/Inc -ICore/Bsp/PwmMotor/Inc -ICore/App/Bench/Inc -ICore/Services/Rtc_Service/Inc -ICore/Services/Control_Core/Inc -ICore/Common/Inc -ICore/Services/Audit_Trail/Inc -ICore/Services/UsbProto/Inc -ICore/Services/Event_Watch/Inc"
+INC="-ICore/Services/Pressure_Core/Inc -ICore/Bsp/Valve/Inc -ICore/Bsp/PwmMotor/Inc -ICore/App/Bench/Inc -ICore/Services/Rtc_Service/Inc -ICore/Services/Control_Core/Inc -ICore/Common/Inc -ICore/Services/Audit_Trail/Inc -ICore/Services/UsbProto/Inc -ICore/Services/Event_Watch/Inc -ICore/Services/Params/Inc"
 fail=0
 run() { # nome fontes...
     local name=$1; shift
@@ -35,6 +35,8 @@ run test_usb_proto_dispatch test/host/test_usb_proto_dispatch.c \
 run test_usb_proto_fs test/host/test_usb_proto_fs.c Core/Services/UsbProto/Src/usb_proto_fs.c
 run test_usb_telemetry test/host/test_usb_telemetry.c Core/Services/UsbProto/Src/usb_telemetry.c
 run test_event_watch test/host/test_event_watch.c Core/Services/Event_Watch/Src/event_watch.c
+run test_params test/host/test_params.c Core/Services/Params/Src/params.c \
+    Core/Services/Control_Core/Src/control_core.c
 run test_usb_proto_policy test/host/test_usb_proto_policy.c Core/Services/UsbProto/Src/usb_proto_policy.c
 run test_usb_rx_ring test/host/test_usb_rx_ring.c Core/Services/UsbProto/Src/usb_rx_ring.c
 run test_hmac_sha256 test/host/test_hmac_sha256.c Core/Services/UsbProto/Src/hmac_sha256.c \

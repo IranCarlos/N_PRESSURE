@@ -41,7 +41,10 @@ extern void Error_Handler(void);
  * verdade (decisao do usuario, 00-auditoria.md).
  */
 static const ControlCore_SafetyConfig_t s_control_safety = {
-    .p_max_abs_mmhg = 320.0f,
+    /* 185 (antes 320): ABAIXO da saturacao do sensor (~187,5 mmHg) - com 320
+     * o E001 nunca disparava, o sensor nao le acima de ~187. Acima do
+     * setpoint maximo (180). Ver PARAMS_SENSOR_FULL_SCALE_MMHG em params.c. */
+    .p_max_abs_mmhg = 185.0f,
     /* 300 (nao mais 50): achado de bancada (2026-10) — 50 ms e' menor que o
      * transiente normal de start-up do ADC (ADC_Acq_Init zera o buffer do
      * DMA antes de armar; os primeiros blocos processados por
@@ -405,6 +408,14 @@ const ControlCore_CycleStats_t* ControlLoop_GetCycleStats(void) {
 
 const ControlCore_PidDiag_t* ControlLoop_GetPidDiag(void) {
     return ControlCore_GetPidDiag(&s_control.cc);
+}
+
+ControlCore_SafetyConfig_t* ControlLoop_GetSafetyConfig(void) {
+    return &s_control.cc.safety;
+}
+
+ControlCore_TuningConfig_t* ControlLoop_GetTuningConfig(void) {
+    return &s_control.cc.tuning;
 }
 
 void ControlLoop_SetSetpointMmHg(float setpoint_mmhg) {

@@ -112,14 +112,33 @@ EEPROM_Status_t EEPROM_Read(EEPROM_Handle_t *handle,
     if (!eeprom_range_valid(addr, len))
         return EEPROM_INVALID;
 
-    int ret = handle->read(handle->ctx,
-                           handle->dev_addr,
-                           addr,
-                           EEPROM_ADDR_SIZE,
-                           data,
-                           len);
+    /* Leitura sequencial nao tem limite de pagina no chip, mas cada
+     * transacao tem que caber em EEPROM_I2C_TIMEOUT_MS: 512 B a 400 kHz
+     * levam ~11,5 ms (> 10 ms) e a leitura inteira falhava (achado de
+     * bancada 2026-10-22, PARAM_COMMIT). Em blocos de EEPROM_PAGE_SIZE,
+     * ~1,5 ms cada. */
+    uint16_t remaining = len;
+    uint16_t cur_addr  = addr;
+    uint8_t *dst       = data;
 
-    return (ret == 0) ? EEPROM_OK : EEPROM_ERROR;
+    while (remaining > 0U)
+    {
+        uint16_t chunk = (remaining < EEPROM_PAGE_SIZE) ? remaining : EEPROM_PAGE_SIZE;
+        int ret = handle->read(handle->ctx,
+                               handle->dev_addr,
+                               cur_addr,
+                               EEPROM_ADDR_SIZE,
+                               dst,
+                               chunk);
+        if (ret != 0)
+            return EEPROM_ERROR;
+
+        cur_addr  += chunk;
+        dst       += chunk;
+        remaining -= chunk;
+    }
+
+    return EEPROM_OK;
 }
 
 /* ------------------------------------------------------------------------- */

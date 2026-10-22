@@ -11,6 +11,8 @@
 #include "rtc_service.h"
 #include "storage_task.h"
 #include "ui_backend_stm32.h"
+#include "params.h"
+#include "eeprom_storage_io.h"
 #include "valve.h"
 #include "pwm_motor.h"
 #include "cycle_record.h"
@@ -28,7 +30,7 @@ static SystemRuntime_t * s_rt;
 static const SystemConfig_t * s_cfg;
 static uint32_t s_log_seq; /* placeholder local, mesmo criterio do log de AUTH em main.c */
 
-static UsbProtoRspStatus_t act_set_setpoint(float setpoint_mmhg);
+static UsbProtoRspStatus_t act_set_setpoint(float setpoint_mmhg, uint8_t * warn);
 static UsbProtoRspStatus_t act_set_datetime(const UsbProtoDateTime_t * dt);
 static UsbProtoRspStatus_t act_start_test(void);
 static UsbProtoRspStatus_t act_abort_test(void);
@@ -97,7 +99,7 @@ static void log_usb_command(StorageFormat_LogLevel_t level, const char * message
 
 /* --- Acoes -------------------------------------------------------------- */
 
-static UsbProtoRspStatus_t act_set_setpoint(float setpoint_mmhg)
+static UsbProtoRspStatus_t act_set_setpoint(float setpoint_mmhg, uint8_t * warn)
 {
     UsbProtoRspStatus_t st;
     char msg[48];
@@ -114,7 +116,9 @@ static UsbProtoRspStatus_t act_set_setpoint(float setpoint_mmhg)
     }
 
     ControlLoop_SetSetpointMmHg(setpoint_mmhg);
-    (void)snprintf(msg, sizeof(msg), "USB: setpoint %d mmHg", (int)setpoint_mmhg);
+    *warn = (setpoint_mmhg > s_cfg->setpoint_warn_mmhg) ? 1u : 0u;
+    (void)snprintf(msg, sizeof(msg), "USB: setpoint %d mmHg%s", (int)setpoint_mmhg,
+                   (*warn != 0u) ? " (ALERTA: margem reduzida)" : "");
     log_usb_command(STORAGE_LOG_LEVEL_EVT, msg);
     return USB_PROTO_RSP_OK;
 }
@@ -399,4 +403,133 @@ static const UsbProtoFsOps_t s_fs_ops = { fs_list, fs_stat, fs_read, fs_hash };
 const UsbProtoFsOps_t * UsbActionsStm32_GetFsOps(void)
 {
     return &s_fs_ops;
+}
+
+/* --- Fase 7.6: tabela de parametros (DEV) -------------------------------- */
+
+static uint16_t prm_count(void)
+{
+    return Params_Count();
+}
+
+static uint8_t prm_info_at(uint16_t index, UsbProtoParamInfo_t * out)
+{
+    const Param_Desc_t * d = Params_DescAt(index);
+
+    if ((d == NULL) || (out == NULL)) {
+        return 0u;
+    }
+    out->id = d->id;
+    out->type = d->type;
+    out->group = d->group;
+    out->min = d->min;
+    out->max = d->max;
+    out->def = Params_GetDefault(index);
+    out->value = Params_Get(index);
+    out->name = d->name;
+    out->unit = d->unit;
+    return 1u;
+}
+
+static uint8_t prm_is_dirty(void)
+{
+    return Params_IsDirty();
+}
+
+static uint8_t prm_get(uint16_t id, float * value)
+{
+    int32_t idx = Params_IndexOf(id);
+
+    if (idx < 0) {
+        return (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO;
+    }
+    *value = Params_Get((uint16_t)idx);
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+/* Mudar parametro so' com o controle parado: o novo valor vale no proximo
+ * passo de 1 ms, e um ensaio nao pode trocar de ganho/limite no meio. */
+static uint8_t prm_standby_only(void)
+{
+    return (uint8_t)UsbProtoPolicy_IdleOnly((s_rt != NULL) ? s_rt->state : SYSTEM_STATE_BOOT);
+}
+
+static uint8_t prm_set(uint16_t id, float value, float * now_value)
+{
+    int32_t idx = Params_IndexOf(id);
+    uint8_t st;
+    float before;
+    Params_Result_t r;
+    char msg[64];
+
+    if (idx < 0) {
+        return (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO;
+    }
+    before = Params_Get((uint16_t)idx);
+    *now_value = before;
+    st = prm_standby_only();
+    if (st != (uint8_t)USB_PROTO_RSP_OK) {
+        return st;
+    }
+
+    r = Params_Set((uint16_t)idx, value);
+    *now_value = Params_Get((uint16_t)idx);
+    if (r == PARAMS_ERR_RANGE) {
+        return (uint8_t)USB_PROTO_RSP_FORA_DE_FAIXA;
+    }
+    if (r == PARAMS_ERR_CONSISTENCY) {
+        return (uint8_t)USB_PROTO_RSP_CONFLITO;
+    }
+    if (r != PARAMS_OK) {
+        return (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO;
+    }
+    /* Auditoria (Parte B 2.6: "toda escrita de parametro no log"), com o
+     * valor de antes e o de depois. */
+    (void)snprintf(msg, sizeof(msg), "PARAM %s: %.4g -> %.4g (nao salvo)",
+                   Params_DescAt((uint16_t)idx)->name, (double)before, (double)*now_value);
+    log_usb_command(STORAGE_LOG_LEVEL_AUDIT, msg);
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static uint8_t prm_commit(uint32_t * seq)
+{
+    uint8_t st = prm_standby_only();
+    char msg[48];
+
+    if (st != (uint8_t)USB_PROTO_RSP_OK) {
+        return st;
+    }
+    if (EEPROM_Storage_SaveParams(seq) == 0u) {
+        log_usb_command(STORAGE_LOG_LEVEL_AUDIT, "PARAM: falha ao gravar na EEPROM");
+        return (uint8_t)USB_PROTO_RSP_ERRO_SD; /* "falha de gravacao" - ver usb_proto_dispatch.h */
+    }
+    (void)snprintf(msg, sizeof(msg), "PARAM: parametros gravados (seq %lu)", (unsigned long)*seq);
+    log_usb_command(STORAGE_LOG_LEVEL_AUDIT, msg);
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static uint8_t prm_revert(uint8_t to_factory)
+{
+    uint8_t st = prm_standby_only();
+
+    if (st != (uint8_t)USB_PROTO_RSP_OK) {
+        return st;
+    }
+    if (to_factory != 0u) {
+        Params_RestoreDefaults();
+        log_usb_command(STORAGE_LOG_LEVEL_AUDIT, "PARAM: valores de fabrica aplicados (nao salvos)");
+    } else {
+        Params_RevertToSaved();
+        log_usb_command(STORAGE_LOG_LEVEL_AUDIT, "PARAM: alteracoes nao salvas descartadas");
+    }
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static const UsbProtoParamOps_t s_param_ops = {
+    prm_count, prm_info_at, prm_is_dirty, prm_get, prm_set, prm_commit, prm_revert
+};
+
+const UsbProtoParamOps_t * UsbActionsStm32_GetParamOps(void)
+{
+    return &s_param_ops;
 }

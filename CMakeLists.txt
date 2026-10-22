@@ -140,6 +140,7 @@ set(N_PRESSURE_INC_DIRS
     Core/Services/Audit_Trail/Inc
     Core/Services/UsbProto/Inc
     Core/Services/Event_Watch/Inc
+    Core/Services/Params/Inc
     Core/App/HMI_UI/Inc
     Core/App/HMI_Port/Inc
     Core/App/Usb_Port/Inc

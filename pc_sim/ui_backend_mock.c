@@ -24,7 +24,8 @@
 #define MOCK_LEAK_RATE_MMHG_S     (0.15f)
 #define MOCK_LEAK_HOLD_MS         (10000u)
 #define MOCK_LEAK_MAX_DROP_MMHG   (3.0f)
-#define MOCK_MAX_SETPOINT_MMHG    (300u)
+#define MOCK_MAX_SETPOINT_MMHG    (180u)
+#define MOCK_SETPOINT_WARN_MMHG   (170u)
 
 static UiState_t s_state = UI_STATE_BOOT;
 static float s_pressure;
@@ -264,6 +265,7 @@ UiState_t UiBackend_GetState(void)        { return s_state; }
 float     UiBackend_GetPressureMmHg(void) { return s_pressure; }
 float     UiBackend_GetSetpointMmHg(void) { return s_setpoint; }
 uint16_t  UiBackend_GetMaxSetpointMmHg(void) { return MOCK_MAX_SETPOINT_MMHG; }
+uint16_t  UiBackend_GetSetpointWarnMmHg(void) { return MOCK_SETPOINT_WARN_MMHG; }
 uint32_t  UiBackend_GetTickMs(void)       { return SDL_GetTicks(); }
 bool      UiBackend_IsSdMounted(void)     { return s_sd_ok; }
 bool      UiBackend_IsRtcValid(void)      { return s_rtc_ok; }

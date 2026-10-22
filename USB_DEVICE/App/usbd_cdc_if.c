@@ -36,6 +36,9 @@ extern UsbRxRing_t g_usb_rx_ring;
 
 /* USER CODE BEGIN PV */
 /* Private variables ---------------------------------------------------------*/
+/* Fase 7.6 - abertura/fechamento da porta pelo PC (ver CDC_SET_CONTROL_LINE_STATE). */
+static volatile uint8_t s_dtr_level;
+static volatile uint32_t s_dtr_edges;
 
 /* USER CODE END PV */
 
@@ -236,7 +239,19 @@ static int8_t CDC_Control_HS(uint8_t cmd, uint8_t* pbuf, uint16_t length)
     break;
 
   case CDC_SET_CONTROL_LINE_STATE:
-
+    /* Fase 7.6: DTR (bit 0 de wValue, CDC PSTN 6.3.12) = o programa do PC
+     * abriu (1) / fechou (0) a porta. Pedido sem dados: a classe passa o
+     * proprio setup request em pbuf (usbd_cdc.c, wLength == 0). So' conta
+     * as BORDAS - um programa que nunca liga o DTR nao derruba nada. */
+    {
+      const USBD_SetupReqTypedef *req = (const USBD_SetupReqTypedef *)(const void *)pbuf;
+      uint8_t dtr = ((req->wValue & 0x0001U) != 0U) ? 1U : 0U;
+      if (dtr != s_dtr_level)
+      {
+        s_dtr_level = dtr;
+        s_dtr_edges++;
+      }
+    }
     break;
 
   case CDC_SEND_BREAK:
@@ -344,6 +359,11 @@ uint8_t CDC_IsTxBusy_HS(void)
     return 0U;
   }
   return (hcdc->TxState != 0U) ? 1U : 0U;
+}
+
+uint32_t CDC_GetDtrEdges_HS(void)
+{
+  return s_dtr_edges;
 }
 
 /* USER CODE END PRIVATE_FUNCTIONS_IMPLEMENTATION */

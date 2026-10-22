@@ -156,6 +156,16 @@ extern "C" {
 #define EEPROM_DEV_KEY_MAGIC_VALUE                 (0x4B455944U) /* "DYEK" lido como LE */
 #define EEPROM_DEV_KEY_LAYOUT_VERSION               (0x0001U)
 
+/* ---- Fase 7.6: tabela de parametros de controle (Core/Services/Params) ----
+ * Duas copias (A/B) do bloco serializado por Params_Serialize() (magic,
+ * versao, seq, pares id/valor, CRC32). Gravar sempre na copia que NAO tem
+ * o seq mais novo: um corte de energia no meio da escrita estraga so' a
+ * copia sendo escrita, a outra continua valida. Na carga vale a copia
+ * valida de maior seq. 512 B cada (bloco atual ~300 B; cabe 64 pares). */
+#define EEPROM_ADDR_PARAMS_A                       (0x0600U)
+#define EEPROM_ADDR_PARAMS_B                       (0x0800U)
+#define EEPROM_PARAMS_SLOT_SIZE                    (0x0200U)
+
 #ifdef __cplusplus
 }
 #endif

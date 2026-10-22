@@ -59,6 +59,7 @@
 #include "usb_proto_events.h"
 #include "event_watch.h"
 #include "app_event_log.h"
+#include "params.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -427,7 +428,8 @@ UsbRxRing_t g_usb_rx_ring;
 uint8_t g_device_serial[USB_PROTO_AUTH_SERIAL_LEN];
 uint8_t g_dev_key[USB_PROTO_AUTH_DEV_KEY_LEN];
 uint8_t g_dev_key_valid;
-volatile uint32_t g_eeprom_i2c_error; // hi2c1.ErrorCode apos carregar a chave DEV (diagnostico de bancada)
+volatile uint32_t g_eeprom_i2c_error;
+volatile uint16_t g_params_loaded; // Fase 7.6: parametros vindos da EEPROM no boot (0 = todos de fabrica) // hi2c1.ErrorCode apos carregar a chave DEV (diagnostico de bancada)
 UsbProtoAuthSession_t g_usb_auth_session;
 // Fase 7.4: fila de telemetria - controlTask produz (1 kHz), usbProtoTask
 // consome (usb_telemetry.h). ~2 KB.
@@ -858,6 +860,16 @@ int main(void)
     // respondem OCUPADO (ver StartUsbProtoTask).
     UsbActionsStm32_Bind(g_control_runtime, &g_bringup_sys_cfg);
 #endif
+    // Fase 7.6: tabela de parametros apontando para o que o controle le.
+    // Os valores neste instante (defaults recem-carregados) viram os "de
+    // fabrica"; os gravados na EEPROM sao aplicados mais abaixo (bloco da
+    // EEPROM, ainda antes do kernel).
+    {
+      const Params_Targets_t targets = {
+        &g_bringup_sys_cfg, ControlLoop_GetSafetyConfig(), ControlLoop_GetTuningConfig()
+      };
+      Params_Bind(&targets);
+    }
 #if BRINGUP_ENABLE_STORAGE
     // Fase 7.4: estado/erros/SD/fim de ensaio no log do SD (appTask).
     AppEventLog_Init(g_control_runtime);
@@ -975,6 +987,10 @@ int main(void)
     EEPROM_Storage_SaveDevKey(DEV_KEY_PROVISION);
 #endif
     g_dev_key_valid = EEPROM_Storage_LoadDevKey(g_dev_key);
+#if BRINGUP_ENABLE_CONTROL
+    // Fase 7.6: parametros de controle gravados pelo app DEV (copia A/B).
+    g_params_loaded = EEPROM_Storage_LoadParams();
+#endif
   } else {
     g_dev_key_valid = 0u;
   }
@@ -2225,6 +2241,19 @@ void StartUsbProtoTask(void *argument)
       raw_len = 0U;
       raw_overflow = 0U;
     }
+    // Fase 7.6: programa do PC abriu/fechou a porta (DTR) sem desconectar o
+    // cabo - mesmo tratamento: o proximo programa nao herda a sessao DEV.
+    {
+      static uint32_t s_dtr_seen;
+      uint32_t edges = CDC_GetDtrEdges_HS();
+      if (edges != s_dtr_seen)
+      {
+        s_dtr_seen = edges;
+        usb_host_disconnected();
+        raw_len = 0U;
+        raw_overflow = 0U;
+      }
+    }
 
     while (UsbRxRing_Pop(&g_usb_rx_ring, &byte, 1U) == 1U)
     {
@@ -2273,6 +2302,7 @@ void StartUsbProtoTask(void *argument)
 #if BRINGUP_ENABLE_CONTROL
               ctx.actions = UsbActionsStm32_Get();
               ctx.telemetry = &g_usb_telemetry;
+              ctx.params = UsbActionsStm32_GetParamOps(); /* Fase 7.6 - so' DEV */
 #else
               ctx.actions = NULL;   /* sem Control_Loop: comandos de controle -> OCUPADO */
               ctx.telemetry = NULL; /* sem controlTask produzindo amostras -> OCUPADO */

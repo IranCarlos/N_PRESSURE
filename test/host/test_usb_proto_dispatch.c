@@ -245,7 +245,7 @@ static uint16_t s_last_op;
 static uint16_t s_last_part;
 static UsbProtoRspStatus_t s_fake_result;
 
-static UsbProtoRspStatus_t fake_set_setpoint(float sp) { s_calls++; s_last_sp = sp; return s_fake_result; }
+static UsbProtoRspStatus_t fake_set_setpoint(float sp, uint8_t *warn) { s_calls++; s_last_sp = sp; *warn = (sp > 170.0f) ? 1U : 0U; return s_fake_result; }
 static UsbProtoRspStatus_t fake_set_datetime(const UsbProtoDateTime_t *dt) { s_calls++; s_last_dt = *dt; return s_fake_result; }
 static UsbProtoRspStatus_t fake_start(void) { s_calls++; return s_fake_result; }
 static UsbProtoRspStatus_t fake_abort(void) { s_calls++; return s_fake_result; }
@@ -272,7 +272,7 @@ static UsbProtoRspStatus_t call(uint16_t cmd, const uint8_t *payload, uint16_t l
     UsbProtoDispatchCtx_t ctx = { .actions = actions };
     uint8_t rsp[8];
     size_t n = UsbProtoDispatch_Handle(cmd, payload, len, &ctx, rsp, sizeof(rsp));
-    CHECK(n == 1U); /* todos os comandos da 7.3 respondem so' o status */
+    CHECK((n == 1U) || ((cmd == USB_PROTO_CMD_SET_SETPOINT) && (n == 2U) && (rsp[0] == 0U))); /* so' status; SET_SETPOINT ok + alerta */
     return (UsbProtoRspStatus_t)rsp[0];
 }
 
@@ -294,6 +294,15 @@ static void test_set_setpoint_decodes_float_le(void)
     CHECK(call(USB_PROTO_CMD_SET_SETPOINT, sp_120_5, 4U, &FAKE_ACTIONS) == USB_PROTO_RSP_OK);
     CHECK(s_calls == 1);
     CHECK(s_last_sp == 120.5f);
+    {
+        const uint8_t sp_175[4] = { 0x00, 0x00, 0x2F, 0x43 }; /* 175.0f = 0x432F0000 */
+        UsbProtoDispatchCtx_t ctx = { .actions = &FAKE_ACTIONS };
+        uint8_t rsp[8];
+        CHECK(UsbProtoDispatch_Handle(USB_PROTO_CMD_SET_SETPOINT, sp_120_5, 4U, &ctx, rsp, sizeof(rsp)) == 2U);
+        CHECK(rsp[1] == 0U);
+        CHECK(UsbProtoDispatch_Handle(USB_PROTO_CMD_SET_SETPOINT, sp_175, 4U, &ctx, rsp, sizeof(rsp)) == 2U);
+        CHECK((rsp[0] == 0U) && (rsp[1] == 1U)); /* aceito com alerta */
+    }
 
     /* status da acao (ex.: politica recusou) passa direto para o PC */
     reset_fakes(USB_PROTO_RSP_FORA_DE_FAIXA);
@@ -669,8 +678,155 @@ static void test_fs_without_ops_is_ocupado(void)
     CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_OCUPADO);
 }
 
+/* ---- Fase 7.6: PARAM_* com operacoes falsas --------------------------- */
+
+static float s_prm_value = 0.8f;
+static uint8_t s_prm_set_result;
+
+static uint16_t fp_count(void) { return 20U; }
+static uint8_t fp_info_at(uint16_t i, UsbProtoParamInfo_t *o)
+{
+    if (i >= 20U) {
+        return 0U;
+    }
+    o->id = (uint16_t)(0x0100U + i);
+    o->type = 0U;
+    o->group = 0U;
+    o->min = 0.0f;
+    o->max = 20.0f;
+    o->def = 0.8f;
+    o->value = s_prm_value;
+    o->name = "pid.kp";
+    o->unit = "mmHg";
+    return 1U;
+}
+static uint8_t fp_dirty(void) { return 1U; }
+static uint8_t fp_get(uint16_t id, float *v)
+{
+    if (id != 0x0101U) {
+        return (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO;
+    }
+    *v = s_prm_value;
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+static uint8_t fp_set(uint16_t id, float v, float *now)
+{
+    if (id != 0x0101U) {
+        return (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO;
+    }
+    if (s_prm_set_result == (uint8_t)USB_PROTO_RSP_OK) {
+        s_prm_value = v;
+    }
+    *now = s_prm_value;
+    return s_prm_set_result;
+}
+static uint8_t fp_commit(uint32_t *seq) { *seq = 77U; return (uint8_t)USB_PROTO_RSP_OK; }
+static uint8_t fp_revert(uint8_t f) { (void)f; return (uint8_t)USB_PROTO_RSP_OK; }
+
+static const UsbProtoParamOps_t FAKE_PARAMS = {
+    fp_count, fp_info_at, fp_dirty, fp_get, fp_set, fp_commit, fp_revert
+};
+
+static size_t prm_call(uint16_t cmd, const uint8_t *req, uint16_t len, UsbProtoRole_t role,
+                       uint8_t *rsp, size_t cap)
+{
+    UsbProtoAuthSession_t sess;
+    UsbProtoDispatchCtx_t ctx = { .auth = &sess, .params = &FAKE_PARAMS };
+    UsbProtoAuth_Init(&sess, KEY, 1U);
+    sess.role = role;
+    return UsbProtoDispatch_Handle(cmd, req, len, &ctx, rsp, cap);
+}
+
+static void test_param_requires_dev(void)
+{
+    const uint8_t start[2] = { 0U, 0U };
+    const uint8_t set[6] = { 0x01U, 0x01U, 0U, 0U, 0x80U, 0x3FU };
+    uint8_t rsp[64];
+
+    CHECK(prm_call(USB_PROTO_CMD_PARAM_LIST, start, 2U, USB_PROTO_ROLE_USER, rsp, sizeof(rsp)) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_SEM_PERMISSAO);
+    CHECK(prm_call(USB_PROTO_CMD_PARAM_SET, set, 6U, USB_PROTO_ROLE_USER, rsp, sizeof(rsp)) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_SEM_PERMISSAO);
+    CHECK(prm_call(USB_PROTO_CMD_PARAM_COMMIT, NULL, 0U, USB_PROTO_ROLE_USER, rsp, sizeof(rsp)) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_SEM_PERMISSAO);
+}
+
+static void test_param_list_pages(void)
+{
+    const uint8_t p0[2] = { 0U, 0U };
+    const uint8_t p16[2] = { 16U, 0U };
+    uint8_t rsp[1024];
+    size_t n;
+    const size_t entry = 20U + 1U + 6U + 1U + 4U; /* "pid.kp" + "mmHg" */
+
+    s_prm_value = 0.8f;
+    n = prm_call(USB_PROTO_CMD_PARAM_LIST, p0, 2U, USB_PROTO_ROLE_DEV, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_OK);
+    CHECK((rsp[1] | (rsp[2] << 8)) == 20);
+    CHECK(rsp[3] == 1U);                          /* alterado nao salvo */
+    CHECK(rsp[4] == USB_PROTO_PARAM_LIST_MAX);
+    CHECK(n == 5U + USB_PROTO_PARAM_LIST_MAX * entry);
+    CHECK((rsp[5] | (rsp[6] << 8)) == 0x0100);
+    CHECK(rsp[25] == 6U);
+    CHECK(memcmp(&rsp[26], "pid.kp", 6U) == 0);
+    CHECK(rsp[32] == 4U);
+
+    n = prm_call(USB_PROTO_CMD_PARAM_LIST, p16, 2U, USB_PROTO_ROLE_DEV, rsp, sizeof(rsp));
+    CHECK(rsp[4] == 4U);
+    CHECK(n == 5U + 4U * entry);
+}
+
+static void test_param_get_set(void)
+{
+    const uint8_t get_ok[2] = { 0x01U, 0x01U };
+    const uint8_t get_bad[2] = { 0x99U, 0x09U };
+    const uint8_t set_1[6] = { 0x01U, 0x01U, 0U, 0U, 0x80U, 0x3FU }; /* 1.0f */
+    uint8_t rsp[16];
+    float v;
+
+    s_prm_value = 0.8f;
+    CHECK(prm_call(USB_PROTO_CMD_PARAM_GET, get_ok, 2U, USB_PROTO_ROLE_DEV, rsp, sizeof(rsp)) == 7U);
+    memcpy(&v, &rsp[3], 4U);
+    CHECK(v == 0.8f);
+    CHECK(prm_call(USB_PROTO_CMD_PARAM_GET, get_bad, 2U, USB_PROTO_ROLE_DEV, rsp, sizeof(rsp)) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO);
+
+    s_prm_set_result = (uint8_t)USB_PROTO_RSP_OK;
+    CHECK(prm_call(USB_PROTO_CMD_PARAM_SET, set_1, 6U, USB_PROTO_ROLE_DEV, rsp, sizeof(rsp)) == 5U);
+    memcpy(&v, &rsp[1], 4U);
+    CHECK((rsp[0] == (uint8_t)USB_PROTO_RSP_OK) && (v == 1.0f));
+
+    /* recusado: devolve o valor que continua valendo */
+    s_prm_set_result = (uint8_t)USB_PROTO_RSP_CONFLITO;
+    s_prm_value = 0.5f;
+    CHECK(prm_call(USB_PROTO_CMD_PARAM_SET, set_1, 6U, USB_PROTO_ROLE_DEV, rsp, sizeof(rsp)) == 5U);
+    memcpy(&v, &rsp[1], 4U);
+    CHECK((rsp[0] == (uint8_t)USB_PROTO_RSP_CONFLITO) && (v == 0.5f));
+
+    CHECK(prm_call(USB_PROTO_CMD_PARAM_SET, set_1, 5U, USB_PROTO_ROLE_DEV, rsp, sizeof(rsp)) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO);
+}
+
+static void test_param_commit_revert(void)
+{
+    const uint8_t mode_bad[1] = { 2U };
+    const uint8_t mode_factory[1] = { 1U };
+    uint8_t rsp[16];
+
+    CHECK(prm_call(USB_PROTO_CMD_PARAM_COMMIT, NULL, 0U, USB_PROTO_ROLE_DEV, rsp, sizeof(rsp)) == 5U);
+    CHECK((rsp[0] == (uint8_t)USB_PROTO_RSP_OK) && (rd32(&rsp[1]) == 77U));
+    CHECK(prm_call(USB_PROTO_CMD_PARAM_REVERT, mode_factory, 1U, USB_PROTO_ROLE_DEV, rsp, sizeof(rsp)) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_OK);
+    (void)prm_call(USB_PROTO_CMD_PARAM_REVERT, mode_bad, 1U, USB_PROTO_ROLE_DEV, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO);
+}
+
 int main(void)
 {
+    test_param_requires_dev();
+    test_param_list_pages();
+    test_param_get_set();
+    test_param_commit_revert();
     test_fs_list_paging();
     test_fs_permissions_and_errors();
     test_fs_read_chunks_and_eof();

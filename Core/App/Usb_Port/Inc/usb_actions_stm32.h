@@ -77,6 +77,9 @@ void UsbActionsStm32_LogAuthExpired(void);
  * esperando (ate' 0,5 s; FS_CRC ate' 15 s). */
 const UsbProtoFsOps_t * UsbActionsStm32_GetFsOps(void);
 
+/* Fase 7.6: tabela de parametros (PARAM_*, so' DEV) - Core/Services/Params. */
+const UsbProtoParamOps_t * UsbActionsStm32_GetParamOps(void);
+
 #ifdef __cplusplus
 }
 #endif

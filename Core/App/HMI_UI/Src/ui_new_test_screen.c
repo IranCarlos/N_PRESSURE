@@ -33,8 +33,24 @@ static lv_obj_t * s_screen;
 static lv_obj_t * s_spin_operator;
 static lv_obj_t * s_spin_participant;
 static lv_obj_t * s_spin_setpoint;
+static lv_obj_t * s_warn_label;
 
 static lv_obj_t * ui_create_field(int32_t y, const char * title, int32_t min, int32_t max);
+
+static void ui_update_warn(void)
+{
+    if (lv_spinbox_get_value(s_spin_setpoint) > (int32_t)UiBackend_GetSetpointWarnMmHg()) {
+        lv_obj_remove_flag(s_warn_label, LV_OBJ_FLAG_HIDDEN);
+    } else {
+        lv_obj_add_flag(s_warn_label, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+static void ui_setpoint_changed_cb(lv_event_t * e)
+{
+    LV_UNUSED(e);
+    ui_update_warn();
+}
 static void ui_start_event_cb(lv_event_t * e);
 static void ui_cancel_event_cb(lv_event_t * e);
 
@@ -71,6 +87,16 @@ void UI_NewTestScreen_Show(void)
     s_spin_setpoint = ui_create_field(112, "Setpoint (mmHg)", 0,
                                       (int32_t)UiBackend_GetMaxSetpointMmHg());
     lv_spinbox_set_value(s_spin_setpoint, (int32_t)UiBackend_GetSetpointMmHg());
+
+    /* Alerta (2026-10-22, decisao do usuario): o setpoint vai ate' o limite,
+     * mas acima do limiar a protecao de sobrepressao fica com pouca margem
+     * (sensor deste hardware satura em ~187 mmHg). Atualizado a cada giro. */
+    s_warn_label = UiW_LabelHint(s_screen, LV_SYMBOL_WARNING " Acima do limite recomendado:\n"
+                                            "margem de sobrepressao reduzida.");
+    lv_obj_set_style_text_color(s_warn_label, UiTheme_ColorWarn(), 0);
+    lv_obj_align(s_warn_label, LV_ALIGN_TOP_MID, 0, 150);
+    lv_obj_add_event_cb(s_spin_setpoint, ui_setpoint_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    ui_update_warn();
 
     btn_start = UiW_Button(s_screen, 150, 32, LV_SYMBOL_OK " Confirmar", ui_start_event_cb);
     lv_obj_align(btn_start, LV_ALIGN_BOTTOM_LEFT, 8, -8);

@@ -114,9 +114,17 @@ float UiBackend_GetSetpointMmHg(void)
 uint16_t UiBackend_GetMaxSetpointMmHg(void)
 {
     if ((s_cfg == NULL) || (s_cfg->max_setpoint_mmhg < 0.0f)) {
-        return 300u;
+        return 180u;
     }
     return (uint16_t)s_cfg->max_setpoint_mmhg;
+}
+
+uint16_t UiBackend_GetSetpointWarnMmHg(void)
+{
+    if ((s_cfg == NULL) || (s_cfg->setpoint_warn_mmhg < 0.0f)) {
+        return 170u;
+    }
+    return (uint16_t)s_cfg->setpoint_warn_mmhg;
 }
 
 uint32_t UiBackend_GetTickMs(void)

@@ -115,6 +115,9 @@ uint8_t CDC_IsReady_HS(void);
 /* 1 = a transmissao anterior ainda nao terminou (o buffer dela ainda esta'
  * em uso pelo hardware - nao reescrever). 0 tambem quando nao esta' pronto. */
 uint8_t CDC_IsTxBusy_HS(void);
+/* Fase 7.6: conta as mudancas de DTR (porta aberta/fechada pelo programa do
+ * PC). Mudou desde a ultima leitura = outro "cliente": a sessao DEV cai. */
+uint32_t CDC_GetDtrEdges_HS(void);
 /* USER CODE END EXPORTED_FUNCTIONS */
 
 /**

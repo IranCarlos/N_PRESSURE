@@ -76,7 +76,12 @@ static const ScriptStep_t k_script[] = {
     {  300u, ACT_ROT,   3, NULL },
     {  400u, ACT_SHOT,  0, "07_new_test_editing" },
     {  100u, ACT_LONG,  0, NULL },                 /* sai da edicao */
-    {  900u, ACT_ROT,   4, NULL },                 /* -> Cancelar */
+    {  900u, ACT_ROT,   2, NULL },                 /* -> Setpoint (160) */
+    {  300u, ACT_PRESS, 0, NULL },                 /* edita */
+    {  300u, ACT_ROT,  15, NULL },                 /* 175 > limiar de alerta (170) */
+    {  400u, ACT_SHOT,  0, "07b_new_test_setpoint_warn" },
+    {  100u, ACT_LONG,  0, NULL },                 /* sai da edicao */
+    {  900u, ACT_ROT,   2, NULL },                 /* -> Cancelar (descarta) */
     {  300u, ACT_PRESS, 0, NULL },
     {  500u, ACT_ROT,   1, NULL },                 /* -> Ajustes */
     {  300u, ACT_PRESS, 0, NULL },

@@ -56,6 +56,26 @@ typedef struct {
     uint32_t t_seguro_ms;
 } ControlCore_SafetyConfig_t;
 
+/* Ajuste fino da malha (Fase 7.6): antes eram #define em control_core.c;
+ * agora editaveis pelo app DEV (tabela de parametros, Core/Services/Params).
+ * ControlCore_DefaultTuning() preenche com os mesmos valores de antes -
+ * comentario de cada um em control_core.c, junto do #define de default. */
+typedef struct {
+    float    pump_min_effective;   /* piso de partida da bomba (0..1) */
+    float    approach_lookahead_s; /* antecipacao do corte da aproximacao rapida (T_lag) */
+    float    approach_zone_mmhg;   /* PID assume a esta distancia do setpoint */
+    float    approach_rearm_mmhg;  /* volta a 100% se cair isto abaixo do alvo... */
+    uint32_t approach_rearm_ms;    /* ...por este tempo */
+    float    rate_p_tau_s;         /* filtro da pressao (base da taxa de subida) */
+    float    rate_tau_s;           /* filtro da taxa de subida */
+    float    relief_on_fraction;   /* abre o alivio com sobrepressao >= fracao * banda */
+    float    relief_ms_per_mmhg;   /* duracao do pulso por mmHg de excesso */
+    uint32_t relief_pulse_min_ms;
+    uint32_t relief_pulse_max_ms;
+    uint32_t relief_settle_ms;     /* acomodacao apos o pulso (histerese de tempo) */
+    uint32_t stabilizing_exit_ms;  /* fora de 2x banda por isto -> volta a INFLATING */
+} ControlCore_TuningConfig_t;
+
 typedef struct {
     float   pressure_kpa;   /* leitura ja calibrada (Pressure_Core/ADC_Acq) */
     uint8_t sensor_ok;      /* 0 = sensor invalido (travado/fora de faixa/salto) */
@@ -132,6 +152,7 @@ typedef struct {
     SystemConfig_t             *cfg;     /* pid/stabilization/leak_test/setpoint (EEPROM) */
     SystemRuntime_t            *runtime; /* state/pressure_display/setpoint_mmhg/bt_user_pressed */
     ControlCore_SafetyConfig_t  safety;
+    ControlCore_TuningConfig_t  tuning;  /* Fase 7.6 - defaults em ControlCore_Init */
 
     ControlCore_PidDiag_t pid_diag;   /* ver comentario acima */
 
@@ -166,6 +187,9 @@ typedef struct {
 
     ControlCore_CycleStats_t cycle;   /* Fase 5 — ver ControlCore_CycleStats_t */
 } ControlCore_t;
+
+/* Valores de fabrica do ajuste fino (os #define de control_core.c). */
+void ControlCore_DefaultTuning(ControlCore_TuningConfig_t *t);
 
 void ControlCore_Init(ControlCore_t *cc, SystemConfig_t *cfg, SystemRuntime_t *runtime,
                       const ControlCore_SafetyConfig_t *safety);

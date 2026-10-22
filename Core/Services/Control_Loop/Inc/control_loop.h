@@ -120,6 +120,15 @@ const ControlCore_PidDiag_t* ControlLoop_GetPidDiag(void);
 void ControlLoop_SetSetpointMmHg(float setpoint_mmhg);
 
 /**
+ * @brief Fase 7.6: configuracoes vivas do Control_Core (copia de seguranca
+ *        e ajuste fino), para a tabela de parametros (Core/Services/Params)
+ *        apontar para elas. Valores lidos a cada passo de 1 ms: so' alterar
+ *        com o controle em STANDBY.
+ */
+ControlCore_SafetyConfig_t* ControlLoop_GetSafetyConfig(void);
+ControlCore_TuningConfig_t* ControlLoop_GetTuningConfig(void);
+
+/**
  * @brief Inicia o ciclo de insuflação.
  *
  * Muda o estado do sistema para SYSTEM_STATE_INFLATING.
