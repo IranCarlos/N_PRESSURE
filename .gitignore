@@ -23,3 +23,16 @@ compile_commands.json
 .cproject
 .settings/
 .vscode/
+
+# Chave DEV do protocolo USB (Fase 7.2) - nunca comitar a de verdade.
+# Copie Core/Services/UsbProto/Inc/dev_key_secret.h.example (esse SIM e'
+# versionado) e cole a saida de tools/gen_dev_key.py.
+Core/Services/UsbProto/Inc/dev_key_secret.h
+# Python
+__pycache__/
+
+# Arquivos grandes/binarios fora do controle de versao: modelos 3D mecanicos
+# (~110 MB), videos de referencia e datasheets publicos.
+/PCB_3D/
+/Docs/*.mp4
+/Docs/DS_*.pdf

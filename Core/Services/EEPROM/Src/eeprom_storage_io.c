@@ -120,10 +120,47 @@ void EEPROM_Storage_LoadDefaults(SystemConfig_t *cfg)
      * de valvula medidos de verdade. */
     cfg->pid.kp = 0.8f;
     cfg->pid.ki = 0.015f;
-    cfg->pid.kd = 0.15f;
+    /* kd ZERADO (2026-10, achado de bancada apos corrigir out_max abaixo):
+     * com a saida do PID finalmente tendo potencia de verdade perto do
+     * setpoint (antes era ~2%, nao fazia nada), o termo derivativo passou
+     * a dominar o ruido — derivative=(erro-erro_anterior)/dt_s com dt_s=
+     * 0.001s (1ms) amplifica qualquer ondulacao entre amostras por 1000x
+     * antes de multiplicar por kd. Esta bomba e' de embolo (pulsos
+     * discretos, ja documentado em control_loop.c — "a pressao oscila a
+     * cada curso do embolo"), entao SEMPRE tem ondulacao amostra-a-amostra
+     * perto do setpoint; o d_term alternava de sinal a cada pulso,
+     * cruzando repetidamente CONTROL_CORE_CONTROL_BAND_MMHG (0.5 mmHg,
+     * control_core.c) e disparando a valvula de alivio em rajadas
+     * ("valvulas ficam loucas perto do setpoint"). kd=0 e' o experimento
+     * mais conservador pra' isolar a causa (remove autuacao, nao adiciona
+     * nenhuma) — se resolver, um PI puro (sem D) pode ser simplesmente o
+     * que faz sentido pra' esta bomba; se nao resolver sozinho, o proximo
+     * suspeito e' CONTROL_CORE_CONTROL_BAND_MMHG estar apertado demais pro
+     * ruido real do sensor+ondulacao da bomba, nao so' o D. Ainda
+     * nao bench-verificado — proxima bancada confirma com
+     * g_control_pid_diag (d_term_kpa/error_mmhg/relief_active). */
+    cfg->pid.kd = 0.0f;
     cfg->pid.ff = 1.5f;
     cfg->pid.out_min = 0.0f;
-    cfg->pid.out_max = 1000.0f;
+    /* out_max CORRIGIDO (2026-10, achado de bancada via g_control_pid_diag):
+     * era 1000.0f — placeholder do simulador, nunca bench-verificado (ver
+     * comentario acima). Todos os termos do PID sao calculados em kPa
+     * (ff_term=ff*setpoint_kpa, p_term=kp*erro_kpa, i_min/i_max=+-8 ja'
+     * estao em kPa) — a SOMA (output_kpa) fica tipicamente entre ~20 e
+     * ~45 kPa (setpoint ate' 300 mmHg=40 kPa, ff=1.5x isso sozinho). Com
+     * out_max=1000, pump_power=output/out_max nunca passava de ~0.02-0.05
+     * (medido: output_kpa=22.3 -> pump_power_pid=0.0223) — o PID ficava
+     * praticamente inerte, so' o piso de partida (CONTROL_CORE_PUMP_MIN_
+     * EFFECTIVE=0.30, control_core.c) dava alguma potencia real, e so'
+     * enquanto error_mmhg>banda; perto do setpoint o piso parava de valer
+     * e a bomba caia pros ~2% "de verdade" do PID — exatamente o
+     * comportamento reportado na bancada ("so' atua perto do setpoint,
+     * diminuindo ainda mais a potencia"). 40.0f faz o PID saturar em 100%
+     * de saida com erro grande (~40-45 kPa de output_kpa tipico longe do
+     * alvo) e reduzir suavemente ao se aproximar — ainda e' so' um ponto de
+     * partida calculado, nao bench-verificado; ajustar junto com kp/ki/kd/
+     * ff na proxima bancada observando g_control_pid_diag. */
+    cfg->pid.out_max = 40.0f;
     cfg->pid.i_min = -8.0f;
     cfg->pid.i_max = 8.0f;
     cfg->pid.sample_time_ms = 1u;
@@ -133,7 +170,7 @@ void EEPROM_Storage_LoadDefaults(SystemConfig_t *cfg)
     cfg->unit = SYS_PRESSURE_UNIT_MMHG;
 
     cfg->max_setpoint_mmhg = 300.0f;
-    cfg->current_setpoint_mmhg = 120.0f;
+    cfg->current_setpoint_mmhg = 100.0f; /* padrao pedido pelo usuario (2026-10-17) */
     /* 3.0 mmHg (nao mais 2.0): a saida de STABILIZED usa o DOBRO desta banda
      * como histerese (ver handle_stabilized em control_core.c) para nao
      * voltar a inflar por causa so' da inercia residual da bomba logo apos
@@ -257,6 +294,60 @@ uint8_t EEPROM_Storage_Save(const SystemConfig_t *cfg)
     EEPROM_TRY_OK(EEPROM_WriteValue(&s_eeprom, EEPROM_ADDR_LEAK_HOLD_TIME_MS, cfg_copy.leak_test.hold_time_ms));
     EEPROM_TRY_OK(EEPROM_WriteValue(&s_eeprom, EEPROM_ADDR_LEAK_MAX_DROP_MMHG, cfg_copy.leak_test.max_drop_mmhg));
     EEPROM_TRY_OK(EEPROM_WriteValue(&s_eeprom, EEPROM_ADDR_LEAK_REACH_TIMEOUT_MS, cfg_copy.leak_test.reach_timeout_ms));
+
+    return 1u;
+}
+
+uint8_t EEPROM_Storage_LoadDevKey(uint8_t key[32])
+{
+    uint32_t magic;
+    uint16_t version;
+    uint32_t crc;
+    uint32_t calc_crc;
+
+    memset(key, 0, 32u);
+
+    if (!s_ready) {
+        return 0u;
+    }
+
+    EEPROM_TRY_OK(EEPROM_ReadValue(&s_eeprom, EEPROM_ADDR_DEV_KEY_MAGIC, magic));
+    EEPROM_TRY_OK(EEPROM_ReadValue(&s_eeprom, EEPROM_ADDR_DEV_KEY_VERSION, version));
+
+    if ((magic != EEPROM_DEV_KEY_MAGIC_VALUE) || (version != EEPROM_DEV_KEY_LAYOUT_VERSION)) {
+        return 0u; /* nunca provisionada - estado normal antes do bring-up de auth */
+    }
+
+    EEPROM_TRY_OK(EEPROM_Read(&s_eeprom, EEPROM_ADDR_DEV_KEY_BYTES, key, 32u));
+    EEPROM_TRY_OK(EEPROM_ReadValue(&s_eeprom, EEPROM_ADDR_DEV_KEY_CRC32, crc));
+
+    calc_crc = crc32_finish(crc32_update(crc32_seed(), key, 32u));
+    if (crc != calc_crc) {
+        memset(key, 0, 32u);
+        return 0u;
+    }
+
+    return 1u;
+}
+
+uint8_t EEPROM_Storage_SaveDevKey(const uint8_t key[32])
+{
+    uint32_t crc;
+
+    if (!s_ready) {
+        return 0u;
+    }
+
+    crc = crc32_finish(crc32_update(crc32_seed(), key, 32u));
+
+    EEPROM_TRY_OK(EEPROM_Write(&s_eeprom, EEPROM_ADDR_DEV_KEY_BYTES, key, 32u));
+    EEPROM_TRY_OK(EEPROM_WriteValue(&s_eeprom, EEPROM_ADDR_DEV_KEY_CRC32, crc));
+    {
+        uint32_t magic = EEPROM_DEV_KEY_MAGIC_VALUE;
+        uint16_t version = EEPROM_DEV_KEY_LAYOUT_VERSION;
+        EEPROM_TRY_OK(EEPROM_WriteValue(&s_eeprom, EEPROM_ADDR_DEV_KEY_MAGIC, magic));
+        EEPROM_TRY_OK(EEPROM_WriteValue(&s_eeprom, EEPROM_ADDR_DEV_KEY_VERSION, version));
+    }
 
     return 1u;
 }

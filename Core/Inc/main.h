@@ -53,7 +53,6 @@ void HAL_TIM_MspPostInit(TIM_HandleTypeDef *htim);
 
 /* Exported functions prototypes ---------------------------------------------*/
 void Error_Handler(void);
-void MX_USB_OTG_HS_HCD_Init(void);
 
 /* USER CODE BEGIN EFP */
 

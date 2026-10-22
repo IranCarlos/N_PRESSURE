@@ -31,8 +31,16 @@ extern "C" {
 /** @brief Validation constant for stored configuration block. */
 #define EEPROM_STORAGE_MAGIC_VALUE                 (0xA5A55A5AU)
 
-/** @brief Current EEPROM layout version. Increment on incompatible changes. */
-#define EEPROM_STORAGE_LAYOUT_VERSION              (0x0002U)
+/** @brief Current EEPROM layout version. Increment on incompatible changes.
+ *
+ * 0x0002 -> 0x0003 (2026-10): out_max default corrigido (1000.0f -> 40.0f,
+ * ver EEPROM_Storage_LoadDefaults() em eeprom_storage_io.c) — nao e'
+ * mudanca de layout de bytes, mas precisa forcar o reload dos defaults em
+ * qualquer EEPROM que ja' tenha o valor antigo gravado (inclusive a de
+ * bancada usada nesta sessao); bump de versao e' o mecanismo que ja'
+ * existe pra isso (EEPROM_Storage_Load() recusa blob de versao diferente
+ * e quem chama cai pros defaults). */
+#define EEPROM_STORAGE_LAYOUT_VERSION              (0x0003U)
 
 /* ========================================================================== */
 /* EEPROM map (bytes) - metadata                                               */
@@ -122,6 +130,31 @@ extern "C" {
 
 /** @brief uint32_t: timeout to reach leak-test target pressure (ms). */
 #define EEPROM_ADDR_LEAK_REACH_TIMEOUT_MS          (0x0430U)
+
+/* ========================================================================== */
+/* EEPROM map (bytes) - chave DEV do protocolo USB (Fase 7.2)                  */
+/* ========================================================================== */
+/* Regiao PROPOSITALMENTE separada do magic/versao de SystemConfig_t acima -
+ * a chave de autenticacao DEV nao pode ser perdida so' porque o layout de
+ * CONFIGURACAO mudou de versao (EEPROM_STORAGE_LAYOUT_VERSION bump). Ver
+ * Core/Services/UsbProto/Inc/usb_proto_auth.h e eeprom_storage_io.c
+ * (EEPROM_Storage_LoadDevKey/SaveDevKey). */
+
+/** @brief uint32_t: magic desta regiao (independente de EEPROM_STORAGE_MAGIC_VALUE). */
+#define EEPROM_ADDR_DEV_KEY_MAGIC                  (0x0500U)
+
+/** @brief uint16_t: versao do layout desta regiao. */
+#define EEPROM_ADDR_DEV_KEY_VERSION                (0x0510U)
+
+/** @brief uint8_t[32]: chave DEV (HMAC-SHA256), nunca comitada - ver
+ *  tools/gen_dev_key.py e Core/Services/UsbProto/Inc/dev_key_secret.h.example. */
+#define EEPROM_ADDR_DEV_KEY_BYTES                  (0x0520U)
+
+/** @brief uint32_t: CRC32 dos 32 bytes da chave. */
+#define EEPROM_ADDR_DEV_KEY_CRC32                  (0x0540U)
+
+#define EEPROM_DEV_KEY_MAGIC_VALUE                 (0x4B455944U) /* "DYEK" lido como LE */
+#define EEPROM_DEV_KEY_LAYOUT_VERSION               (0x0001U)
 
 #ifdef __cplusplus
 }

@@ -21,6 +21,7 @@
 #include "FreeRTOS.h"
 #include "cmsis_os2.h"
 #include "fatfs.h"
+#include "usb_device.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -38,6 +39,7 @@
 #include <stdio.h>
 #include "hmi_ui.h"
 #include "hmi_encoder_group.h"
+#include "ui_backend_stm32.h"
 #include "st7789.h"
 #include "buzzer.h"
 #include "eeprom_storage_io.h"
@@ -45,7 +47,13 @@
 #include "port_dwt.h"
 #include "supervisor.h"
 #include "rtc_service.h"
+#include "port_ram_ecc.h"
 #include <stm32h7xx_hal_flash_ex.h>
+#include "usbd_cdc_if.h"
+#include "usb_rx_ring.h"
+#include "cobs.h"
+#include "usb_proto_frame.h"
+#include "usb_proto_dispatch.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -114,6 +122,48 @@ typedef StaticTask_t osStaticThreadDef_t;
 // write_errors, etc.
 #define BRINGUP_ENABLE_STORAGE      (1)
 
+// 1 = usbProtoTask de verdade (Fase 7.1): drena g_usb_rx_ring (preenchido
+// por CDC_Receive_HS em USB_DEVICE/App/usbd_cdc_if.c), faz o parsing COBS
+// (delimitador 0x00) + valida o frame (usb_proto_frame.h) + despacha
+// (usb_proto_dispatch.h: so' CMD_HELLO/CMD_GET_STATUS nesta entrega, sem
+// autenticacao ainda) + monta a resposta + COBS-encode + CDC_Transmit_HS.
+// Com a flag em 0 a task volta a ser so' um idle-loop (mesma filosofia das
+// outras BRINGUP_ENABLE_*). MX_USB_DEVICE_Init() continua sendo chamado
+// sempre (gerado pelo CubeMX dentro de StartControlTask - decisao dele, nao
+// configuravel por aqui - ver Docs/dev/00-auditoria.md), so' a logica de
+// protocolo e' que fica atras da flag. NUNCA testado em hardware ainda.
+#define BRINGUP_ENABLE_USB          (1)
+
+// 1 = toca a EEPROM I2C de verdade no boot pra carregar a chave DEV (Fase
+// 7.2 - usb_proto_auth.h). Validado em bancada (2026-10-21) depois de duas
+// correcoes: (1) a carga roda em USER CODE 2, ANTES de osKernelInitialize()
+// - entre ele e osKernelStart() o BASEPRI do FreeRTOS mascara o TIM6 (tick
+// do HAL) e qualquer HAL_Delay()/timeout de I2C virava loop infinito ate' o
+// IWDG resetar; (2) pull-up em PB8/PB9 (a placa nao tem pull-up externo).
+// Com 0, g_dev_key_valid fica sempre 0 (AUTH_RESPONSE nega tudo,
+// fail-safe) e I2C1 nunca e' tocado por este caminho.
+#define BRINGUP_ENABLE_EEPROM_DEVKEY (1)
+
+// 1 = no boot (exige BRINGUP_ENABLE_EEPROM_DEVKEY=1 tambem), grava
+// DEV_KEY_PROVISION (Core/Services/UsbProto/Inc/dev_key_secret.h, NUNCA
+// comitado - copie de dev_key_secret.h.example e cole a saida de
+// tools/gen_dev_key.py) na EEPROM via EEPROM_Storage_SaveDevKey(), uma vez
+// - mesmo esquema "liga, flasha, confirma, desliga de volta" do
+// RTC_CALENDAR_INITIALIZED_BKP_REG acima. Volte a 0 depois de confirmar.
+#define BRINGUP_PROVISION_DEV_KEY   (0)
+
+// DIAGNOSTICO (2026-10-17): 1 = torna os BusFaults de ESCRITA precisos.
+// O HardFault de boot vem com CFSR=0x400 (IMPRECISERR): a escrita que falhou
+// ja' ficou para tras e o PC registrado so' diz onde o erro foi ACUSADO.
+// No Cortex-M7 o ACTLR.DISDEFWBUF (ver USER CODE 1) nao resolve isso. Aqui a
+// AXI SRAM (0x24000000, 512 KB) e os perifericos (0x40000000, 512 MB) viram
+// "strongly-ordered" no MPU: escrita sem buffer, o core espera a resposta e
+// o fault sai PRECISO (CFSR bit 9 PRECISERR + bit 15 BFARVALID, PC = a
+// instrucao culpada, BFAR = o endereco). Mais lento — so' para achar o bug.
+// Efeito colateral possivel: acesso desalinhado nessas faixas vira
+// UsageFault UNALIGNED (CFSR bit 24) — tambem e' informacao util.
+#define DIAG_PRECISE_BUSFAULT       (0)
+
 #define TASK_ENCODER_PERIOD_MS      (1u)
 #define TASK_CONTROL_PERIOD_MS      (1u)
 #define TASK_HMI_PERIOD_MS          (20u)
@@ -159,6 +209,10 @@ typedef StaticTask_t osStaticThreadDef_t;
 /* Private macro -------------------------------------------------------------*/
 /* USER CODE BEGIN PM */
 
+#if BRINGUP_PROVISION_DEV_KEY
+  #include "dev_key_secret.h" /* ver BRINGUP_PROVISION_DEV_KEY acima - nunca comitado */
+#endif
+
 /* USER CODE END PM */
 
 /* Private variables ---------------------------------------------------------*/
@@ -181,9 +235,6 @@ TIM_HandleTypeDef htim3;
 TIM_HandleTypeDef htim4;
 TIM_HandleTypeDef htim8;
 TIM_HandleTypeDef htim15;
-
-PCD_HandleTypeDef hpcd_USB_OTG_HS;
-HCD_HandleTypeDef hhcd_USB_OTG_HS;
 
 /* Definitions for controlTask */
 osThreadId_t controlTaskHandle;
@@ -259,7 +310,7 @@ const osThreadAttr_t storageTask_attributes = {
 };
 /* Definitions for uiTask */
 osThreadId_t uiTaskHandle;
-uint32_t uiTaskBuffer[ 1024 ];
+uint32_t uiTaskBuffer[ 2048 ];
 osStaticThreadDef_t uiTaskControlBlock;
 const osThreadAttr_t uiTask_attributes = {
   .name = "uiTask",
@@ -340,37 +391,39 @@ SystemConfig_t   g_bringup_sys_cfg;
 SystemRuntime_t *g_control_runtime; // aponta para s_bringup_runtime (compartilhado com ADC_Acq)
 volatile uint32_t g_control_last_error;
 volatile uint32_t g_control_jitter_us;
-// HUD de bancada (display+encoder) para nao depender do Live Watch/Debug
-// Console (a extensao do VS Code usada neste projeto nao suporta editar
-// variavel: stm32cube-ide-debug-core 1.5.0 so' tem addWatchExpr/getCopyValue,
-// sem setValue). O arco ja usado no bring-up do LVGL vira o knob do setpoint
-// (girar o encoder = sobe/desce o setpoint, ate' ARC_SETPOINT_MAX_MMHG);
-// os labels abaixo mostram estado/pressao/erro. Atualizados so' pela uiTask
-// (unico lugar que toca LVGL, ja documentado nao-thread-safe).
-#define ARC_SETPOINT_MAX_MMHG (150)
-static lv_obj_t *s_ctrl_arc;
-static lv_obj_t *s_ctrl_label_state;
-static lv_obj_t *s_ctrl_label_pressure;
-static lv_obj_t *s_ctrl_label_error;
-static const char *const s_state_names[] = {
-    "BOOT", "IDLE", "INFLATING", "STABILIZING", "STABILIZED",
-    "DEFLATING", "LEAK_TEST", "CONFIG", "FAULT"
-};
-
-/** @brief 1 casa decimal sem usar %f (newlib-nano/--specs=nano.specs nao
- *         linka printf_float por padrao neste projeto — ver cmake/gcc-arm-
- *         none-eabi.cmake). So' %d/%s, funciona sem mudar o toolchain. */
-static void format_1dp(float v, char *buf, size_t n) {
-    uint8_t neg = (v < 0.0f) ? 1u : 0u;
-    float av = neg ? -v : v;
-    int whole = (int)av;
-    int frac = (int)(((av - (float)whole) * 10.0f) + 0.5f);
-    if (frac >= 10) { frac = 0; whole += 1; }
-    snprintf(buf, n, "%s%d.%d", neg ? "-" : "", whole, frac);
-}
+// Termos internos do PID (ver ControlCore_PidDiag_t em control_core.h) —
+// achado de bancada 2026-10 (ensaio nunca alcancando o setpoint, bomba
+// enchendo devagar demais): sem isto so' dava pra' ver o RESULTADO
+// (pressure_display preso abaixo do setpoint), nao QUAL termo esta'
+// segurando a saida baixa. Expandir no Live Watch durante INFLATING/
+// STABILIZING: pump_power_pid (o que o PID calculou) vs pump_power_final
+// (o que realmente foi pro PWM, depois do piso/alivio) e' o primeiro
+// lugar pra' olhar — se os dois forem baixos e error_mmhg for grande,
+// o problema e' ganho (Ki/i_max) baixo demais pra' esse pneumatico real,
+// nao a bomba/piso.
+ControlCore_PidDiag_t g_control_pid_diag;
+// Diagnostico de bancada via g_control_runtime/g_control_last_error/
+// g_control_jitter_us/g_control_pid_diag acima (Live Watch) + a IHM real
+// (HMI_Init(), USER CODE 2) — o HUD cru (arco+labels direto em main.c)
+// que vivia aqui foi substituido pela IHM de verdade (Core/App/HMI_UI,
+// Fase 6).
 #endif
 #if (APP_MODE_BRINGUP && BRINGUP_ENABLE_STORAGE)
 StorageTask_Stats_t g_storage_stats;
+#endif
+#if (APP_MODE_BRINGUP && BRINGUP_ENABLE_USB)
+// Preenchido por CDC_Receive_HS (ISR, usbd_cdc_if.c) e drenado por
+// StartUsbProtoTask - ver BRINGUP_ENABLE_USB acima e usb_rx_ring.h.
+UsbRxRing_t g_usb_rx_ring;
+// UID de 96 bits do STM32H7 (UID_BASE) - lido 1x no boot (USER CODE 2),
+// usado como "serial" no HELLO e no HMAC de AUTH_RESPONSE (ver
+// usb_proto_auth.h). Chave DEV carregada da EEPROM (0 = nunca
+// provisionada - AUTH_RESPONSE falha sempre, fail-safe).
+uint8_t g_device_serial[USB_PROTO_AUTH_SERIAL_LEN];
+uint8_t g_dev_key[USB_PROTO_AUTH_DEV_KEY_LEN];
+uint8_t g_dev_key_valid;
+volatile uint32_t g_eeprom_i2c_error; // hi2c1.ErrorCode apos carregar a chave DEV (diagnostico de bancada)
+UsbProtoAuthSession_t g_usb_auth_session;
 #endif
 volatile uint32_t g_supervisor_last_mask;
 volatile uint32_t g_supervisor_missed_windows;
@@ -387,6 +440,10 @@ volatile uint32_t g_boot_rsr;
 // fonte de clock do RTC via CubeMX). Setado em MX_RTC_Init() (USER CODE
 // BEGIN RTC_Init 2), consumido por RtcService_CheckAtBoot() logo depois.
 volatile uint8_t  g_rtc_backup_domain_was_reset;
+// Resultado da selecao de clock do RTC (Live Watch): lse_ok=0 => caiu para
+// LSI (cristal nao partiu em 3 s); lse_startup_ms = tempo ate' LSERDY;
+// lse_css_failure_seen=1 => o CSS do LSE estava travado em falha no boot.
+RtcService_ClockInfo_t g_rtc_clock_info;
 // Resultado de RtcService_CheckAtBoot (Live Watch): ver RtcValidityFlags_t
 // em rtc_validity.h. 0 = calendario confiavel para timestamps de log/ensaio.
 volatile uint32_t g_rtc_status;
@@ -408,7 +465,6 @@ static void MX_TIM3_Init(void);
 static void MX_TIM4_Init(void);
 static void MX_ADC2_Init(void);
 static void MX_SDMMC1_SD_Init(void);
-static void MX_USB_OTG_HS_PCD_Init(void);
 static void MX_RTC_Init(void);
 static void MX_TIM8_Init(void);
 static void MX_TIM15_Init(void);
@@ -428,6 +484,66 @@ void StartAudioTask(void *argument);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+#if (APP_MODE_BRINGUP && BRINGUP_ENABLE_USB)
+/* UID de 96 bits do STM32H7, gravado de fabrica (ver UID_BASE em
+ * stm32h723xx.h) - "serial" do Apendice A (HELLO + HMAC de AUTH_RESPONSE,
+ * usb_proto_auth.h). Registrador de CPU, sem HAL/periferico envolvido -
+ * leitura direta, memcpy em vez de cast de ponteiro pra nao depender de
+ * alinhamento/strict-aliasing. */
+static void read_device_uid(uint8_t out[USB_PROTO_AUTH_SERIAL_LEN])
+{
+    uint32_t w0 = *(volatile const uint32_t *)(UID_BASE + 0u);
+    uint32_t w1 = *(volatile const uint32_t *)(UID_BASE + 4u);
+    uint32_t w2 = *(volatile const uint32_t *)(UID_BASE + 8u);
+    memcpy(&out[0], &w0, 4u);
+    memcpy(&out[4], &w1, 4u);
+    memcpy(&out[8], &w2, 4u);
+}
+
+/* Nonce "aleatorio" por software (DWT->CYCCNT + HAL_GetTick() + contador) -
+ * NAO e' um CSPRNG. Decisao registrada em 00-auditoria.md (Fase 7.2): o
+ * periferico RNG nao esta' habilitado no .ioc; mesmo precedente de
+ * usb_crc32.c/sha256.c (software agora, periferico de hardware e'
+ * otimizacao futura). Suficiente pra impedir reuso trivial de nonce num
+ * aparelho fisicamente acessivel, nao pra resistir a um atacante com
+ * acesso a side-channel/timing do barramento USB. */
+static void fill_weak_random_nonce(uint8_t out[USB_PROTO_AUTH_NONCE_LEN])
+{
+    static uint32_t s_counter;
+    uint32_t a = PortDWT_GetCycles();
+    uint32_t b = HAL_GetTick();
+    uint32_t c = ++s_counter;
+    size_t i;
+
+    for (i = 0U; i < USB_PROTO_AUTH_NONCE_LEN; i++) {
+        a = (a * 1664525u) + 1013904223u; /* passo de LCG, espalha a entropia inicial */
+        out[i] = (uint8_t)(a ^ (b >> ((i % 4u) * 8u)) ^ (c << (i % 3u)));
+    }
+}
+
+/* Para StorageTask_LogAudit() (tentativa de AUTH negada - Apendice A,
+ * "qualquer comando com papel insuficiente... o evento e' gravado no
+ * log"). RTC_FORMAT_BIN: campos decimais direto, sem converter de BCD. */
+static void build_log_datetime_now(StorageFormat_DateTime_t *out)
+{
+    RTC_TimeTypeDef t = {0};
+    RTC_DateTypeDef d = {0};
+
+    /* GetTime destrava os registradores-sombra; GetDate em seguida e'
+     * obrigatorio (mesmo sem usar a data por si) pra' manter o calendario
+     * consistente - quirk conhecido da RTC do STM32, documentado no HAL. */
+    HAL_RTC_GetTime(&hrtc, &t, RTC_FORMAT_BIN);
+    HAL_RTC_GetDate(&hrtc, &d, RTC_FORMAT_BIN);
+
+    out->year = (uint16_t)(2000U + d.Year);
+    out->month = d.Month;
+    out->day = d.Date;
+    out->hour = t.Hours;
+    out->minute = t.Minutes;
+    out->second = t.Seconds;
+}
+#endif /* APP_MODE_BRINGUP && BRINGUP_ENABLE_USB */
+
 /* USER CODE END 0 */
 
 /**
@@ -438,6 +554,27 @@ int main(void)
 {
 
   /* USER CODE BEGIN 1 */
+  /* PRIMEIRA coisa do boot: inicializa o ECC da AXI SRAM (RAM_D1), onde
+   * ficam os buffers do display/ADC/FatFS. Sem isto, no power-on frio a
+   * 1a escrita de 16 bits do LVGL num buffer com ECC aleatorio dava
+   * BusFault imprecise (CFSR=0x400, PC num DSB do disp_flush) -> HardFault
+   * -> reset, varias vezes, ate' a RAM "esquentar". Ver port_ram_ecc.h. */
+  PortRamEcc_InitAxiSram();
+  // Mesmo problema na DTCM: a pilha das interrupcoes (MSP) e o heap do newlib
+  // ficam acima de .bss e nunca eram escritos — ver port_ram_ecc.h.
+  PortRamEcc_InitDtcmFree();
+  // A D-Cache NAO e' ligada neste projeto, mas o codigo faz manutencao de
+  // cache por endereco (SCB_CleanDCache_by_Addr no disp_flush e no ADC,
+  // Clean/Invalidate no sd_diskio). Depois do power-on o conteudo da cache
+  // (tags, valido/sujo, dados) e' INDEFINIDO e o ARM exige invalida-la antes
+  // de qualquer uso: sem isto, um "clean" num endereco que casava com uma
+  // linha aleatoria marcada como suja tentava grava-la de volta -> BusFault
+  // imprecise sempre dentro do laco do SCB_CleanDCache_by_Addr() do
+  // disp_flush, em iteracao aleatoria (achado 2026-10-17). Invalidar por
+  // set/way funciona com a cache desligada e torna as operacoes por endereco
+  // no-ops enquanto ela continuar desligada.
+  SCB_InvalidateDCache();
+
   /* Forca UNALIGN_TRP=0 (tolerar acesso desalinhado em LDR/LDRH/LDRB, valor
    * padrao da arquitetura ARMv7-M). Diagnostico: LVGL v9 usa lv_color_t como
    * struct de 3 bytes {blue,green,red} incondicionalmente (nao depende de
@@ -483,6 +620,41 @@ int main(void)
   // pausa no debugger mais longa que o timeout (~8,2 s) reseta a placa no
   // meio da sessao de debug, parecendo reset espontaneo.
   __HAL_DBGMCU_FREEZE_IWDG1();
+  // Antes do SystemClock_Config(): se o CSS do LSE ficou travado em falha
+  // (LSECSSD) num boot anterior, reseta o dominio de backup para o LSE
+  // partir limpo — senao, com o LSE ligado no CubeMX, SystemClock_Config()
+  // pode cair em Error_Handler() antes do IWDG e a placa nao liga nunca.
+  // O registro de HardFault (BKP0..12) e' preservado. Ver rtc_service.h.
+  (void)RtcService_RecoverLseFailureEarly(FAULT_MANAGER_BKP_MASK);
+
+#if DIAG_PRECISE_BUSFAULT
+  {
+    MPU_Region_InitTypeDef diag = {0};
+
+    HAL_MPU_Disable();
+    // TEX=0, C=0, B=0 = strongly-ordered (nenhuma escrita bufferizada).
+    diag.Enable = MPU_REGION_ENABLE;
+    diag.TypeExtField = MPU_TEX_LEVEL0;
+    diag.IsCacheable = MPU_ACCESS_NOT_CACHEABLE;
+    diag.IsBufferable = MPU_ACCESS_NOT_BUFFERABLE;
+    diag.IsShareable = MPU_ACCESS_SHAREABLE;
+    diag.AccessPermission = MPU_REGION_FULL_ACCESS;
+    diag.DisableExec = MPU_INSTRUCTION_ACCESS_DISABLE;
+    diag.SubRegionDisable = 0x00;
+
+    diag.Number = MPU_REGION_NUMBER2;      // AXI SRAM (RAM_D1)
+    diag.BaseAddress = 0x24000000u;
+    diag.Size = MPU_REGION_SIZE_512KB;
+    HAL_MPU_ConfigRegion(&diag);
+
+    diag.Number = MPU_REGION_NUMBER3;      // perifericos APB/AHB
+    diag.BaseAddress = 0x40000000u;
+    diag.Size = MPU_REGION_SIZE_512MB;
+    HAL_MPU_ConfigRegion(&diag);
+
+    HAL_MPU_Enable(MPU_PRIVILEGED_DEFAULT);
+  }
+#endif
   /* USER CODE END Init */
 
   /* Configure the system clock */
@@ -506,7 +678,6 @@ int main(void)
   MX_TIM4_Init();
   MX_ADC2_Init();
   MX_SDMMC1_SD_Init();
-  MX_USB_OTG_HS_PCD_Init();
   MX_FATFS_Init();
   MX_RTC_Init();
   MX_TIM8_Init();
@@ -524,14 +695,16 @@ int main(void)
   g_boot_rsr = RCC->RSR; // antes de o FaultManager limpar: motivo do ultimo reset
   FaultManager_Init(&hrtc);
   PortDWT_Init();
+  g_rtc_clock_info = *RtcService_GetClockInfo();
   g_rtc_status = RtcService_CheckAtBoot(&hrtc, g_rtc_backup_domain_was_reset);
   g_boot_fault_pending = FaultManager_HasPendingFault();
   if (g_boot_fault_pending != 0u) {
     FaultManager_GetLastFault(&g_boot_fault_record);
   }
 
-  /* Liga o backlight do display */
-  HAL_GPIO_WritePin(TFT_BACKLIGHT_GPIO_Port, TFT_BACKLIGHT_Pin, GPIO_PIN_SET);
+  // Backlight NAO e' mais ligado aqui (antes do display ser inicializado, a
+  // tela acendia mostrando lixo branco): lv_port_disp_init() acende depois
+  // de ST7789_Init() ter preenchido a tela de preto.
 
 #if APP_MODE_BRINGUP
   // --- MODO BRING-UP: testa display, encoder e buzzer isoladamente ---
@@ -551,12 +724,7 @@ int main(void)
         .valve2 = { VALVE_2_GPIO_Port, VALVE_2_Pin },
         .valve3 = { VALVE_3_GPIO_Port, VALVE_3_Pin },
     };
-    EEPROM_Storage_LoadDefaults(&g_bringup_sys_cfg);
-    // 1o teste em hardware de verdade: setpoint baixo de proposito, mesmo
-    // com o default da EEPROM sendo 120 mmHg — suba pelo Live Watch
-    // (g_bringup_sys_cfg.current_setpoint_mmhg) so' depois de confirmar
-    // que o ciclo completo (inflar/estabilizar/desinflar) funciona aqui.
-    g_bringup_sys_cfg.current_setpoint_mmhg = 40.0f;
+    EEPROM_Storage_LoadDefaults(&g_bringup_sys_cfg); // setpoint padrao 100 mmHg
     g_control_runtime = &s_bringup_runtime;
     Pedal_Init(&htim4); // nao chamado em nenhum outro lugar do bring-up
     ControlLoop_Init(&g_bringup_sys_cfg, &htim3, g_control_runtime, &valve_pins);
@@ -579,6 +747,7 @@ int main(void)
 
 #if (BRINGUP_ENABLE_DISPLAY && !BRINGUP_ENABLE_LVGL)
   ST7789_Init();
+  ST7789_SetBacklight(1u); // tela ja' preta (ver st7789.h)
   ST7789_FillRect(0, 0, 319, 239, 0x0000); // limpa a tela (preto)
 
 #if BRINGUP_ENABLE_BUZZER
@@ -613,44 +782,28 @@ int main(void)
 
   lv_port_indev_init();
 
+#if BRINGUP_ENABLE_CONTROL
+  // IHM real (Fase 6) — substitui o HUD cru (arco+labels) que vivia aqui.
+  // HMI_Init() cuida de HMI_EncoderGroup_Init()/BindIndev() internamente.
+  // Precisa de Control_Loop ja inicializado (ControlLoop_StartInflation()/
+  // GetCycleStats()/GetLastError() sao chamados pela IHM) — por isso fica
+  // atras do mesmo BRINGUP_ENABLE_CONTROL que guarda o ControlLoop_Init()
+  // la' em cima, nao incondicional atras so' de BRINGUP_ENABLE_LVGL.
+  UiBackendStm32_Bind(g_control_runtime, &g_bringup_sys_cfg);
+  HMI_Init(lv_port_indev_get_default());
+#else
+  // Sem controle inicializado: mantem so' um arco de teste, igual antes,
+  // para bring-up isolado de display+encoder+LVGL.
   {
     lv_obj_t *scr = lv_screen_active();
-    lv_obj_t *title = lv_label_create(scr);
     lv_obj_t *arc = lv_arc_create(scr);
     static lv_obj_t *s_bringup_focus_objs[1];
     HMI_EncoderGroupConfig_t group_cfg = {0};
 
-    lv_label_set_text(title, "LVGL + DMA bring-up");
-    // Tema padrao do LVGL aqui e' claro (LV_THEME_DEFAULT_DARK=0, fundo
-    // branco) — cor de texto preta explicita para garantir contraste em
-    // vez de depender do estilo default do tema.
-    lv_obj_set_style_text_color(title, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 10);
-
     lv_obj_set_size(arc, 180, 180);
     lv_obj_align(arc, LV_ALIGN_CENTER, 0, 10);
-#if BRINGUP_ENABLE_CONTROL
-    // HUD de bancada: o arco vira o knob do setpoint (ver uiTask), em mmHg.
-    lv_label_set_text(title, "Fase 4: ensaio de controle");
-    lv_arc_set_range(arc, 0, ARC_SETPOINT_MAX_MMHG);
-    lv_arc_set_value(arc, (int16_t)g_bringup_sys_cfg.current_setpoint_mmhg);
-    s_ctrl_arc = arc;
-
-    s_ctrl_label_state = lv_label_create(scr);
-    lv_obj_set_style_text_color(s_ctrl_label_state, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_align(s_ctrl_label_state, LV_ALIGN_TOP_MID, 0, 30);
-
-    s_ctrl_label_pressure = lv_label_create(scr);
-    lv_obj_set_style_text_color(s_ctrl_label_pressure, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_align(s_ctrl_label_pressure, LV_ALIGN_BOTTOM_MID, 0, -30);
-
-    s_ctrl_label_error = lv_label_create(scr);
-    lv_obj_set_style_text_color(s_ctrl_label_error, lv_color_hex(0xFF4040), 0);
-    lv_obj_align(s_ctrl_label_error, LV_ALIGN_BOTTOM_MID, 0, -10);
-#else
     lv_arc_set_range(arc, 0, 50);
     lv_arc_set_value(arc, 25);
-#endif
 
     HMI_EncoderGroup_Init();
     HMI_EncoderGroup_BindIndev(lv_port_indev_get_default());
@@ -660,21 +813,38 @@ int main(void)
     group_cfg.initial_focus_idx = 0u;
     group_cfg.wrap = false;
     HMI_EncoderGroup_Load(&group_cfg);
-
-    // So' ha' 1 objeto no grupo, entao o modo normal de navegacao (girar =
-    // troca de foco entre objetos) nao teria efeito visivel — forca direto
-    // o modo de edicao, assim girar o encoder ja manipula o valor do arco
-    // sem precisar apertar o botao antes. E' so' pra esse teste isolado;
-    // quando o HMI_UI real entrar (varias telas/widgets), o fluxo padrao
-    // (apertar pra entrar/sair de edicao) volta a fazer sentido.
     HMI_EncoderGroup_SetEditing(true);
   }
+#endif /* BRINGUP_ENABLE_CONTROL */
 #endif /* BRINGUP_ENABLE_DISPLAY && BRINGUP_ENABLE_LVGL */
 
 #if (BRINGUP_ENABLE_BUZZER && !BRINGUP_ENABLE_DISPLAY && !BRINGUP_ENABLE_ENCODER)
   // Buzzer isolado: sem display nem encoder para observar, um bipe de
   // confirmacao na inicializacao e o unico sinal de que o driver rodou.
   Buzzer_Beep(2500u, 200u);
+#endif
+
+#if (BRINGUP_ENABLE_USB && BRINGUP_ENABLE_EEPROM_DEVKEY)
+  // Chave DEV (Fase 7.2 - usb_proto_auth.h). TEM que ficar aqui, ANTES de
+  // osKernelInitialize(): o FreeRTOS deixa BASEPRI mascarando as IRQs de
+  // prioridade >= configMAX_SYSCALL_INTERRUPT_PRIORITY (5) desde a criacao
+  // do 1o objeto (fila do StorageTask_InitQueue em RTOS_QUEUES) ate'
+  // osKernelStart() - inclusive o TIM6 (prio 15), base de tempo do HAL.
+  // Com uwTick parado, HAL_Delay() do ciclo de escrita e os timeouts de
+  // HAL_I2C_Mem_* nunca expiram: o boot travava e o IWDG resetava em loop
+  // (achado de bancada 2026-10-21: call stack preso em
+  // I2C_WaitOnTXISFlagUntilTimeout). Aqui o tick roda: falha de I2C vira
+  // erro em EEPROM_I2C_TIMEOUT_MS, com o codigo em g_eeprom_i2c_error.
+  if (EEPROM_Storage_Init(&hi2c1, 0u) != 0u) {
+#if BRINGUP_PROVISION_DEV_KEY
+    // Grava 1x; depois volte a flag pra 0 (nao precisa regravar todo boot).
+    EEPROM_Storage_SaveDevKey(DEV_KEY_PROVISION);
+#endif
+    g_dev_key_valid = EEPROM_Storage_LoadDevKey(g_dev_key);
+  } else {
+    g_dev_key_valid = 0u;
+  }
+  g_eeprom_i2c_error = hi2c1.ErrorCode; // Live Watch: 0 = ok, 0x04 = NACK, 0x20 = timeout, 0x01 = BERR
 #endif
 #else
   // --- INICIALIZACAO DOS MODULOS ---
@@ -718,7 +888,8 @@ int main(void)
   }
 
   // 8. Interface Grafica (HMI)
-  HMI_Init(&g_runtime_data, &g_system_cfg);
+  UiBackendStm32_Bind(&g_runtime_data, &g_system_cfg);
+  HMI_Init(lv_port_indev_get_default());
 #endif /* APP_MODE_BRINGUP */
   /* USER CODE END 2 */
 
@@ -749,6 +920,16 @@ int main(void)
   // osKernelInitialize(), antes dos osThreadNew() — mesmo marcador que o
   // CubeMX ja' reserva para filas (USER CODE BEGIN/END RTOS_QUEUES).
   StorageTask_InitQueue(); // cria a fila; storageTask monta o SD sozinha ao rodar
+#endif
+#if BRINGUP_ENABLE_USB
+  UsbRxRing_Init(&g_usb_rx_ring); // nao depende do kernel, mas fica junto por simetria
+
+  read_device_uid(g_device_serial);
+
+  // Chave DEV ja' carregada em USER CODE 2 (antes de osKernelInitialize(),
+  // ver comentario la') quando BRINGUP_ENABLE_EEPROM_DEVKEY=1; com a flag
+  // em 0, g_dev_key_valid fica 0 (AUTH_RESPONSE so' nega, fail-safe).
+  UsbProtoAuth_Init(&g_usb_auth_session, g_dev_key, g_dev_key_valid);
 #endif
   /* USER CODE END RTOS_QUEUES */
 
@@ -826,12 +1007,19 @@ void SystemClock_Config(void)
 
   while(!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) {}
 
+  /** Configure LSE Drive Capability
+  */
+  HAL_PWR_EnableBkUpAccess();
+  __HAL_RCC_LSEDRIVE_CONFIG(RCC_LSEDRIVE_HIGH);
+
   /** Initializes the RCC Oscillators according to the specified parameters
   * in the RCC_OscInitTypeDef structure.
   */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSI48|RCC_OSCILLATORTYPE_HSI
-                              |RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE;
+                              |RCC_OSCILLATORTYPE_LSI|RCC_OSCILLATORTYPE_HSE
+                              |RCC_OSCILLATORTYPE_LSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
+  RCC_OscInitStruct.LSEState = RCC_LSE_ON;
   RCC_OscInitStruct.HSIState = RCC_HSI_DIV1;
   RCC_OscInitStruct.HSICalibrationValue = 64;
   RCC_OscInitStruct.LSIState = RCC_LSI_ON;
@@ -1063,6 +1251,13 @@ static void MX_RTC_Init(void)
   }
 
   /* USER CODE BEGIN Check_RTC_BKUP */
+  // Se o dominio de backup precisou ser resetado neste boot (troca LSI<->LSE
+  // ou falha do CSS do LSE), a hora de antes foi guardada: regrava em vez de
+  // voltar para a data padrao. Ver rtc_service.h.
+  if (RtcService_RestoreSavedCalendar(&hrtc) != 0u) {
+    HAL_RTCEx_BKUPWrite(&hrtc, RTC_CALENDAR_INITIALIZED_BKP_REG, RTC_CALENDAR_INITIALIZED_MAGIC);
+    return;
+  }
   if (HAL_RTCEx_BKUPRead(&hrtc, RTC_CALENDAR_INITIALIZED_BKP_REG) == RTC_CALENDAR_INITIALIZED_MAGIC) {
     // Calendario ja foi ajustado antes e o dominio de backup (VBAT) manteve
     // o valor — nao sobrescrever com a data/hora padrao abaixo.
@@ -1451,74 +1646,6 @@ static void MX_TIM15_Init(void)
 }
 
 /**
-  * @brief USB_OTG_HS Initialization Function
-  * @param None
-  * @retval None
-  */
-static void MX_USB_OTG_HS_PCD_Init(void)
-{
-
-  /* USER CODE BEGIN USB_OTG_HS_PCD_Init 0 */
-
-  /* USER CODE END USB_OTG_HS_PCD_Init 0 */
-
-  /* USER CODE BEGIN USB_OTG_HS_PCD_Init 1 */
-
-  /* USER CODE END USB_OTG_HS_PCD_Init 1 */
-  hpcd_USB_OTG_HS.Instance = USB_OTG_HS;
-  hpcd_USB_OTG_HS.Init.dev_endpoints = 9;
-  hpcd_USB_OTG_HS.Init.speed = PCD_SPEED_FULL;
-  hpcd_USB_OTG_HS.Init.dma_enable = DISABLE;
-  hpcd_USB_OTG_HS.Init.phy_itface = USB_OTG_EMBEDDED_PHY;
-  hpcd_USB_OTG_HS.Init.Sof_enable = DISABLE;
-  hpcd_USB_OTG_HS.Init.low_power_enable = DISABLE;
-  hpcd_USB_OTG_HS.Init.lpm_enable = ENABLE;
-  hpcd_USB_OTG_HS.Init.vbus_sensing_enable = ENABLE;
-  hpcd_USB_OTG_HS.Init.use_dedicated_ep1 = DISABLE;
-  hpcd_USB_OTG_HS.Init.use_external_vbus = DISABLE;
-  if (HAL_PCD_Init(&hpcd_USB_OTG_HS) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USB_OTG_HS_PCD_Init 2 */
-
-  /* USER CODE END USB_OTG_HS_PCD_Init 2 */
-
-}
-
-/**
-  * @brief USB_OTG_HS Initialization Function
-  * @param None
-  * @retval None
-  */
-void MX_USB_OTG_HS_HCD_Init(void)
-{
-
-  /* USER CODE BEGIN USB_OTG_HS_HCD_Init 0 */
-
-  /* USER CODE END USB_OTG_HS_HCD_Init 0 */
-
-  /* USER CODE BEGIN USB_OTG_HS_HCD_Init 1 */
-
-  /* USER CODE END USB_OTG_HS_HCD_Init 1 */
-  hhcd_USB_OTG_HS.Instance = USB_OTG_HS;
-  hhcd_USB_OTG_HS.Init.Host_channels = 16;
-  hhcd_USB_OTG_HS.Init.speed = HCD_SPEED_FULL;
-  hhcd_USB_OTG_HS.Init.dma_enable = ENABLE;
-  hhcd_USB_OTG_HS.Init.phy_itface = USB_OTG_EMBEDDED_PHY;
-  hhcd_USB_OTG_HS.Init.Sof_enable = DISABLE;
-  hhcd_USB_OTG_HS.Init.low_power_enable = DISABLE;
-  if (HAL_HCD_Init(&hhcd_USB_OTG_HS) != HAL_OK)
-  {
-    Error_Handler();
-  }
-  /* USER CODE BEGIN USB_OTG_HS_HCD_Init 2 */
-
-  /* USER CODE END USB_OTG_HS_HCD_Init 2 */
-
-}
-
-/**
   * Enable DMA controller clock
   */
 static void MX_DMA_Init(void)
@@ -1550,6 +1677,7 @@ static void MX_GPIO_Init(void)
   /* USER CODE END MX_GPIO_Init_1 */
 
   /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOE_CLK_ENABLE();
   __HAL_RCC_GPIOC_CLK_ENABLE();
   __HAL_RCC_GPIOH_CLK_ENABLE();
   __HAL_RCC_GPIOA_CLK_ENABLE();
@@ -1569,9 +1697,35 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(GPIOD, LED_2_Pin|VALVE_3_Pin|VALVE_2_Pin|VALVE_1_Pin
                           |EN_VBUS_Pin, GPIO_PIN_RESET);
 
+  /*Configure GPIO pins : PE2 PE3 PE4 PE5
+                           PE6 PE7 PE8 PE9
+                           PE10 PE11 PE12 PE13
+                           PE14 PE15 PE0 PE1 */
+  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_3|GPIO_PIN_4|GPIO_PIN_5
+                          |GPIO_PIN_6|GPIO_PIN_7|GPIO_PIN_8|GPIO_PIN_9
+                          |GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12|GPIO_PIN_13
+                          |GPIO_PIN_14|GPIO_PIN_15|GPIO_PIN_0|GPIO_PIN_1;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PC13 PC0 PC1 PC2
+                           PC3 */
+  GPIO_InitStruct.Pin = GPIO_PIN_13|GPIO_PIN_0|GPIO_PIN_1|GPIO_PIN_2
+                          |GPIO_PIN_3;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
+
   /*Configure GPIO pins : ENCODER_BT_Pin BT_USER_Pin */
   GPIO_InitStruct.Pin = ENCODER_BT_Pin|BT_USER_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PA4 PA15 */
+  GPIO_InitStruct.Pin = GPIO_PIN_4|GPIO_PIN_15;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOA, &GPIO_InitStruct);
 
@@ -1596,10 +1750,26 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(TFT_RES_GPIO_Port, &GPIO_InitStruct);
 
-  /*Configure GPIO pins : LED_2_Pin VALVE_3_Pin VALVE_2_Pin VALVE_1_Pin
-                           EN_VBUS_Pin */
-  GPIO_InitStruct.Pin = LED_2_Pin|VALVE_3_Pin|VALVE_2_Pin|VALVE_1_Pin
-                          |EN_VBUS_Pin;
+  /*Configure GPIO pins : PB2 PB10 PB11 PB12
+                           PB13 PB14 PB15 PB4
+                           PB5 PB7 */
+  GPIO_InitStruct.Pin = GPIO_PIN_2|GPIO_PIN_10|GPIO_PIN_11|GPIO_PIN_12
+                          |GPIO_PIN_13|GPIO_PIN_14|GPIO_PIN_15|GPIO_PIN_4
+                          |GPIO_PIN_5|GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOB, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : PD8 PD9 PD10 PD1
+                           PD3 PD6 PD7 */
+  GPIO_InitStruct.Pin = GPIO_PIN_8|GPIO_PIN_9|GPIO_PIN_10|GPIO_PIN_1
+                          |GPIO_PIN_3|GPIO_PIN_6|GPIO_PIN_7;
+  GPIO_InitStruct.Mode = GPIO_MODE_ANALOG;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  /*Configure GPIO pins : LED_2_Pin VALVE_3_Pin VALVE_2_Pin EN_VBUS_Pin */
+  GPIO_InitStruct.Pin = LED_2_Pin|VALVE_3_Pin|VALVE_2_Pin|EN_VBUS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
@@ -1610,6 +1780,13 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOD, &GPIO_InitStruct);
+
+  /*Configure GPIO pin : VALVE_1_Pin */
+  GPIO_InitStruct.Pin = VALVE_1_Pin;
+  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_OD;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
+  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
+  HAL_GPIO_Init(VALVE_1_GPIO_Port, &GPIO_InitStruct);
 
   /*Configure GPIO pin : USB_HS_INT_Pin */
   GPIO_InitStruct.Pin = USB_HS_INT_Pin;
@@ -1641,6 +1818,8 @@ static void MX_GPIO_Init(void)
 /* USER CODE END Header_StartControlTask */
 void StartControlTask(void *argument)
 {
+  /* init code for USB_DEVICE */
+  MX_USB_DEVICE_Init();
   /* USER CODE BEGIN 5 */
   // Prioridade mais alta (osPriorityRealtime) — reservado para o loop de
   // controle de pressao a 1 ms (Fase 3/4). Hoje inerte: em APP_MODE_BRINGUP=1
@@ -1654,6 +1833,7 @@ void StartControlTask(void *argument)
     ControlLoop_Update();
     g_control_last_error = (uint32_t)ControlLoop_GetLastError();
     g_control_jitter_us = ControlLoop_GetMaxJitterCycles() / (SystemCoreClock / 1000000u);
+    g_control_pid_diag = *ControlLoop_GetPidDiag();
 #elif BRINGUP_ENABLE_PRESSURE
     ADC_Acq_Update();
 #if BRINGUP_ENABLE_ACTUATORS
@@ -1869,11 +2049,133 @@ void StartAppTask(void *argument)
 void StartUsbProtoTask(void *argument)
 {
   /* USER CODE BEGIN StartUsbProtoTask */
-  // Reservado para o parser do protocolo USB CDC (Fase 7). Nada ainda.
+#if (APP_MODE_BRINGUP && BRINGUP_ENABLE_USB)
+  // Buffers estaticos (fora da pilha da task - so' 2KB, ver usbProtoTaskBuffer)
+  // dimensionados para os comandos desta entrega (HELLO/GET_STATUS, payload
+  // pequeno/vazio). Vai precisar crescer quando FS_READ/PARAM_* (payload ate'
+  // 1024B, Fase 7.5+) entrarem — ver USB_PROTO_MAX_PAYLOAD em usb_proto_frame.h.
+#define USB_PROTO_BRINGUP_BUF_LEN (256U)
+  static uint8_t s_usb_raw_frame[USB_PROTO_BRINGUP_BUF_LEN];   /* COBS-encoded acumulado entre 0x00 */
+  static uint8_t s_usb_decoded[USB_PROTO_BRINGUP_BUF_LEN];     /* header+payload+crc decodificado */
+  static uint8_t s_usb_rsp_payload[USB_PROTO_BRINGUP_BUF_LEN]; /* payload montado pelo dispatch */
+  static uint8_t s_usb_rsp_frame[USB_PROTO_BRINGUP_BUF_LEN];   /* header+payload+crc da resposta */
+  static uint8_t s_usb_rsp_encoded[COBS_MAX_ENCODED_LEN(USB_PROTO_BRINGUP_BUF_LEN) + 1U]; /* +1 = delimitador 0x00 */
+  size_t raw_len = 0U;
+  uint8_t raw_overflow = 0U;
+
+  for (;;)
+  {
+    uint8_t byte;
+    while (UsbRxRing_Pop(&g_usb_rx_ring, &byte, 1U) == 1U)
+    {
+      if (byte == 0x00U)
+      {
+        if ((raw_len > 0U) && (raw_overflow == 0U))
+        {
+          size_t decoded_len = 0U;
+          if (Cobs_Decode(s_usb_raw_frame, raw_len, s_usb_decoded, sizeof(s_usb_decoded), &decoded_len) == COBS_OK)
+          {
+            UsbProtoFrame_t req_frame;
+            if ((UsbProtoFrame_Parse(s_usb_decoded, decoded_len, &req_frame) == USB_PROTO_FRAME_OK)
+                && (req_frame.type == USB_PROTO_TYPE_REQ))
+            {
+              UsbProtoStatusSnapshot_t snap;
+              UsbProtoDispatchCtx_t ctx;
+              UsbProtoFrame_t rsp_frame;
+              uint8_t challenge_random[USB_PROTO_AUTH_NONCE_LEN];
+              size_t rsp_payload_len;
+              size_t rsp_frame_len = 0U;
+              size_t rsp_encoded_len = 0U;
+
+              snap.system_state = (uint8_t)g_control_runtime->state;
+              snap.pressure_mmhg = g_control_runtime->pressure_display;
+              snap.setpoint_mmhg = g_control_runtime->setpoint_mmhg;
+              snap.rtc_valid = (RtcService_GetFlags() == 0U) ? 1U : 0U; // atualizado tambem por ajuste de hora na IHM
+#if BRINGUP_ENABLE_STORAGE
+              snap.sd_mounted = g_storage_stats.sd_mounted;
+#else
+              snap.sd_mounted = 0U;
+#endif
+              snap.active_error = (uint8_t)g_control_last_error;
+              snap.cycle_number = 0U; /* ainda nao rastreado - ver Fase 7.3/9 */
+              fill_weak_random_nonce(challenge_random); /* so' usado se cmd==AUTH_CHALLENGE */
+              ctx.status = &snap;
+              ctx.device_serial = g_device_serial;
+              ctx.auth = &g_usb_auth_session;
+              ctx.now_ms = HAL_GetTick();
+              ctx.challenge_random = challenge_random;
+
+              rsp_payload_len = UsbProtoDispatch_Handle(req_frame.cmd, req_frame.payload, req_frame.len,
+                                                          &ctx, s_usb_rsp_payload, sizeof(s_usb_rsp_payload));
+
+              /* Apendice A: "qualquer comando com papel insuficiente retorna
+               * SEM_PERMISSAO, e o evento e' gravado no log" (tentativa de
+               * acesso negada). NAO_AUTENTICADO entra no mesmo criterio -
+               * e' uma tentativa de AUTH_RESPONSE que falhou. */
+              if ((rsp_payload_len >= 1U)
+                  && ((s_usb_rsp_payload[0] == (uint8_t)USB_PROTO_RSP_SEM_PERMISSAO)
+                      || (s_usb_rsp_payload[0] == (uint8_t)USB_PROTO_RSP_NAO_AUTENTICADO)))
+              {
+                static uint32_t s_auth_log_seq;
+                StorageFormat_LogEntry_t entry = {0};
+                build_log_datetime_now(&entry.datetime);
+                entry.tz_offset_hours = -3; /* America/Sao_Paulo - ver storage_format.h */
+                entry.seq = ++s_auth_log_seq; /* placeholder local - nao e' a seq oficial do log (Fase 7.9?) */
+                entry.level = STORAGE_LOG_LEVEL_AUDIT;
+                entry.code = "";
+                entry.test_id = 0U;
+                entry.state_name = "";
+                entry.pressure_mmhg = g_control_runtime->pressure_display;
+                entry.message = (s_usb_rsp_payload[0] == (uint8_t)USB_PROTO_RSP_NAO_AUTENTICADO)
+                                     ? "USB AUTH_RESPONSE negado (HMAC/nonce invalido)"
+                                     : "USB comando negado (SEM_PERMISSAO)";
+                (void)StorageTask_LogAudit(&entry);
+              }
+
+              rsp_frame.ver = USB_PROTO_VERSION;
+              rsp_frame.type = USB_PROTO_TYPE_RSP;
+              rsp_frame.seq = req_frame.seq;
+              rsp_frame.cmd = req_frame.cmd;
+              rsp_frame.len = (uint16_t)rsp_payload_len;
+              rsp_frame.payload = s_usb_rsp_payload;
+
+              if (UsbProtoFrame_Build(&rsp_frame, s_usb_rsp_frame, sizeof(s_usb_rsp_frame), &rsp_frame_len) == USB_PROTO_FRAME_OK)
+              {
+                if (Cobs_Encode(s_usb_rsp_frame, rsp_frame_len, s_usb_rsp_encoded, sizeof(s_usb_rsp_encoded), &rsp_encoded_len) == COBS_OK)
+                {
+                  // Delimitador 0x00 no MESMO buffer/chamada de transmissao:
+                  // CDC_Transmit_HS retorna USBD_BUSY se a transmissao anterior
+                  // ainda nao terminou, e sem retry uma 2a chamada separada so'
+                  // para o delimitador podia ser silenciosamente descartada,
+                  // quebrando o framing do lado do PC.
+                  s_usb_rsp_encoded[rsp_encoded_len] = 0x00U;
+                  (void)CDC_Transmit_HS(s_usb_rsp_encoded, (uint16_t)(rsp_encoded_len + 1U));
+                }
+              }
+            }
+          }
+        }
+        raw_len = 0U;
+        raw_overflow = 0U;
+      }
+      else if (raw_len < sizeof(s_usb_raw_frame))
+      {
+        s_usb_raw_frame[raw_len] = byte;
+        raw_len++;
+      }
+      else
+      {
+        raw_overflow = 1U; /* frame maior que o buffer - descarta at'e o proximo 0x00 */
+      }
+    }
+    osDelay(2);
+  }
+#else
   for(;;)
   {
     osDelay(100);
   }
+#endif
   /* USER CODE END StartUsbProtoTask */
 }
 
@@ -1940,43 +2242,10 @@ void StartUiTask(void *argument)
     }
 
 #if BRINGUP_ENABLE_CONTROL
-    // HUD de bancada (ver globais acima, USER CODE 2): o arco e' o knob do
-    // setpoint, os labels mostram estado/pressao/erro.
-    //
-    // BUG corrigido (2026-10): escrevia em
-    // g_bringup_sys_cfg.current_setpoint_mmhg, mas o Control_Core so' le
-    // g_control_runtime->setpoint_mmhg (copiado de current_setpoint_mmhg
-    // UMA VEZ, em ControlLoop_Init — nunca mais depois) — girar o encoder
-    // nao tinha efeito nenhum no ensaio, o label ficava preso em 40 mmHg.
-    // ControlLoop_SetSetpointMmHg() e' a API publica certa: atualiza os
-    // dois campos (runtime + cfg) com o clamping devido.
-    {
-      int16_t setpoint_knob = lv_arc_get_value(s_ctrl_arc);
-      char line[48];
-      uint32_t state_idx = (uint32_t)g_control_runtime->state;
-
-      ControlLoop_SetSetpointMmHg((float)setpoint_knob);
-
-      {
-        char pres_str[16];
-        char sp_str[16];
-        format_1dp(g_control_runtime->pressure_display, pres_str, sizeof(pres_str));
-        format_1dp(g_control_runtime->setpoint_mmhg, sp_str, sizeof(sp_str));
-        snprintf(line, sizeof(line), "%s",
-                (state_idx < (sizeof(s_state_names) / sizeof(s_state_names[0])))
-                    ? s_state_names[state_idx] : "?");
-        lv_label_set_text(s_ctrl_label_state, line);
-        snprintf(line, sizeof(line), "%s / %s mmHg", pres_str, sp_str);
-        lv_label_set_text(s_ctrl_label_pressure, line);
-      }
-
-      if (g_control_last_error != 0u) {
-        snprintf(line, sizeof(line), "ERRO E%03u", (unsigned)g_control_last_error);
-      } else {
-        snprintf(line, sizeof(line), " ");
-      }
-      lv_label_set_text(s_ctrl_label_error, line);
-    }
+    // IHM real (Fase 6) — ver HMI_Init() em USER CODE 2. HMI_Update() so'
+    // toca LVGL, mesmo criterio do lv_timer_handler() acima: so' roda aqui,
+    // na uiTask (LVGL nao e' thread-safe).
+    HMI_Update();
 #endif
 #endif
     osDelay(TASK_LVGL_HANDLER_PERIOD_MS);

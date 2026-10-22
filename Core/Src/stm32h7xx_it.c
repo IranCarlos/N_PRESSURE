@@ -57,6 +57,7 @@
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
+extern PCD_HandleTypeDef hpcd_USB_OTG_HS;
 extern DMA_HandleTypeDef hdma_adc2;
 extern ADC_HandleTypeDef hadc2;
 extern I2C_HandleTypeDef hi2c1;
@@ -65,8 +66,6 @@ extern DMA_HandleTypeDef hdma_spi1_tx;
 extern SPI_HandleTypeDef hspi1;
 extern TIM_HandleTypeDef htim3;
 extern TIM_HandleTypeDef htim4;
-extern PCD_HandleTypeDef hpcd_USB_OTG_HS;
-extern HCD_HandleTypeDef hhcd_USB_OTG_HS;
 extern TIM_HandleTypeDef htim6;
 
 /* USER CODE BEGIN EV */
@@ -85,9 +84,11 @@ void NMI_Handler(void)
 
   /* USER CODE END NonMaskableInt_IRQn 0 */
   /* USER CODE BEGIN NonMaskableInt_IRQn 1 */
-   while (1)
-  {
-  }
+  /* NMI = falha do HSE detectada pelo CSS (o hardware ja' trocou o SYSCLK
+   * para HSI) ou erro de ECC. Antes: while(1) puro, com bomba/valvulas no
+   * ultimo estado ate' o IWDG resetar. Error_Handler() poe a bomba off e
+   * as valvulas abertas antes de travar (IWDG reseta em ~8 s). */
+  Error_Handler();
   /* USER CODE END NonMaskableInt_IRQn 1 */
 }
 
@@ -331,7 +332,7 @@ void OTG_HS_EP1_OUT_IRQHandler(void)
   /* USER CODE BEGIN OTG_HS_EP1_OUT_IRQn 0 */
 
   /* USER CODE END OTG_HS_EP1_OUT_IRQn 0 */
-  HAL_HCD_IRQHandler(&hhcd_USB_OTG_HS);
+  HAL_PCD_IRQHandler(&hpcd_USB_OTG_HS);
   /* USER CODE BEGIN OTG_HS_EP1_OUT_IRQn 1 */
 
   /* USER CODE END OTG_HS_EP1_OUT_IRQn 1 */
@@ -345,7 +346,7 @@ void OTG_HS_EP1_IN_IRQHandler(void)
   /* USER CODE BEGIN OTG_HS_EP1_IN_IRQn 0 */
 
   /* USER CODE END OTG_HS_EP1_IN_IRQn 0 */
-  HAL_HCD_IRQHandler(&hhcd_USB_OTG_HS);
+  HAL_PCD_IRQHandler(&hpcd_USB_OTG_HS);
   /* USER CODE BEGIN OTG_HS_EP1_IN_IRQn 1 */
 
   /* USER CODE END OTG_HS_EP1_IN_IRQn 1 */
@@ -359,17 +360,7 @@ void OTG_HS_IRQHandler(void)
   /* USER CODE BEGIN OTG_HS_IRQn 0 */
 
   /* USER CODE END OTG_HS_IRQn 0 */
-
-  if (hpcd_USB_OTG_HS.State==HAL_PCD_STATE_READY)
-  {
-    HAL_PCD_IRQHandler(&hpcd_USB_OTG_HS);
-  }
-
-  if (hhcd_USB_OTG_HS.State==HAL_HCD_STATE_READY)
-  {
-    HAL_HCD_IRQHandler(&hhcd_USB_OTG_HS);
-  }
-
+  HAL_PCD_IRQHandler(&hpcd_USB_OTG_HS);
   /* USER CODE BEGIN OTG_HS_IRQn 1 */
 
   /* USER CODE END OTG_HS_IRQn 1 */

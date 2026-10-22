@@ -74,7 +74,7 @@ typedef struct {
     uint16_t    cycle_number;     /* "Ciclo N" */
     StorageFormat_DateTime_t datetime;
     CycleRecord_Metrics_t metrics; /* mesmas metricas usadas em CycleRecord_Evaluate() */
-    const char *device_id;        /* ex.: "nPressure NP001" */
+    const char *device_id;        /* ex.: "myPRESSURE NP001" (fw_version.h) */
     const char *firmware_version; /* ex.: "FW 1.0.3" */
     StorageFormat_DateTime_t last_calibration;
 } StorageFormat_RecInfo_t;

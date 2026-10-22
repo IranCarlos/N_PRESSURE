@@ -51,6 +51,22 @@ uint8_t EEPROM_Storage_Save(const SystemConfig_t *cfg);
  */
 void EEPROM_Storage_LoadDefaults(SystemConfig_t *cfg);
 
+/**
+ * @brief Load the USB protocol DEV auth key (Fase 7.2, usb_proto_auth.h).
+ *        Regiao independente de SystemConfig_t - ver eeprom_storage.h.
+ * @param key Output buffer, 32 bytes (USB_PROTO_AUTH_DEV_KEY_LEN).
+ * @return 1 if a valid key was loaded (magic/versao/CRC ok), 0 otherwise
+ *         (nunca provisionada, ou corrompida - key fica zerado).
+ */
+uint8_t EEPROM_Storage_LoadDevKey(uint8_t key[32]);
+
+/**
+ * @brief Save the USB protocol DEV auth key.
+ * @param key 32 bytes (USB_PROTO_AUTH_DEV_KEY_LEN).
+ * @return 1 on success, 0 on failure.
+ */
+uint8_t EEPROM_Storage_SaveDevKey(const uint8_t key[32]);
+
 #ifdef __cplusplus
 }
 #endif
