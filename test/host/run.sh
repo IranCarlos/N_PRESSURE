@@ -31,7 +31,8 @@ run test_usb_proto_frame test/host/test_usb_proto_frame.c \
 run test_usb_proto_dispatch test/host/test_usb_proto_dispatch.c \
     Core/Services/UsbProto/Src/usb_proto_dispatch.c Core/Services/UsbProto/Src/usb_proto_auth.c \
     Core/Services/UsbProto/Src/hmac_sha256.c Core/Services/Audit_Trail/Src/sha256.c \
-    Core/Services/UsbProto/Src/usb_telemetry.c
+    Core/Services/UsbProto/Src/usb_telemetry.c Core/Services/UsbProto/Src/usb_proto_fs.c
+run test_usb_proto_fs test/host/test_usb_proto_fs.c Core/Services/UsbProto/Src/usb_proto_fs.c
 run test_usb_telemetry test/host/test_usb_telemetry.c Core/Services/UsbProto/Src/usb_telemetry.c
 run test_event_watch test/host/test_event_watch.c Core/Services/Event_Watch/Src/event_watch.c
 run test_usb_proto_policy test/host/test_usb_proto_policy.c Core/Services/UsbProto/Src/usb_proto_policy.c

@@ -12,6 +12,8 @@
 #include "task.h"   /* taskENTER_CRITICAL: cauda do log em RAM */
 #include "cmsis_os2.h"
 #include "system_types.h"
+#include "sha256.h"
+#include "usb_crc32.h"
 #include <string.h>
 
 /* Fila estatica (DTCM ja' esta' ~85% usada — ver 00-auditoria.md; manter a
@@ -27,7 +29,8 @@ typedef enum {
     STORAGE_MSG_LOG_EVENT = 0,
     STORAGE_MSG_LOG_ERROR,
     STORAGE_MSG_LOG_AUDIT,
-    STORAGE_MSG_TEST_REC
+    STORAGE_MSG_TEST_REC,
+    STORAGE_MSG_FS_JOB      /* Fase 7.5: pedido de leitura do USB (dados em s_fs_job) */
 } StorageTask_MsgType_t;
 
 typedef struct {
@@ -56,6 +59,10 @@ typedef struct {
 static StaticQueue_t             s_queue_cb;
 static StorageTask_QueueMsg_t    s_queue_buf[STORAGE_QUEUE_DEPTH];
 static osMessageQueueId_t        s_queue;
+
+/* Fase 7.5: fim de um pedido de leitura do USB (ver process_fs_job). */
+static osSemaphoreId_t           s_fs_done;
+static StaticSemaphore_t         s_fs_done_cb;
 
 static StorageTask_Stats_t       s_stats;
 
@@ -102,6 +109,15 @@ void StorageTask_InitQueue(void)
     attr.mq_size = sizeof(s_queue_buf);
 
     s_queue = osMessageQueueNew(STORAGE_QUEUE_DEPTH, sizeof(StorageTask_QueueMsg_t), &attr);
+
+    {
+        osSemaphoreAttr_t sattr;
+        memset(&sattr, 0, sizeof(sattr));
+        sattr.name = "storageFsDone";
+        sattr.cb_mem = &s_fs_done_cb;
+        sattr.cb_size = sizeof(s_fs_done_cb);
+        s_fs_done = osSemaphoreNew(1u, 0u, &sattr); /* binario, comeca vazio */
+    }
 
     if (s_chains_initialized == 0u) {
         AuditChain_Init(&s_chain_events, NULL);
@@ -398,6 +414,316 @@ static int process_message(const StorageTask_QueueMsg_t *msg)
     return process_log_message(msg);
 }
 
+/* ---- Fase 7.5: leitura do cartao para o USB ------------------------------
+ *
+ * Um pedido por vez, em s_fs_job (unico cliente: usbProtoTask). Protocolo
+ * entre as duas tarefas:
+ *   cliente:  s_fs_in_flight==0? -> esvazia o semaforo (sinal velho de um
+ *             pedido que estourou o tempo) -> preenche s_fs_job -> in_flight=1
+ *             -> poe STORAGE_MSG_FS_JOB na fila -> espera s_fs_done.
+ *   storage:  executa, preenche o resultado em s_fs_job, in_flight=0, libera
+ *             s_fs_done.
+ * Se o cliente desistir (timeout), ele NAO mexe em s_fs_job ate' in_flight
+ * voltar a 0 - a storageTask termina o pedido antigo sem atropelar o novo.
+ */
+typedef enum {
+    FS_JOB_LIST = 0,
+    FS_JOB_STAT,
+    FS_JOB_READ,
+    FS_JOB_HASH
+} FsJobOp_t;
+
+typedef struct {
+    FsJobOp_t op;
+    char      path[100];   /* "0:" + caminho absoluto (<= 96) */
+    uint32_t  offset;      /* READ */
+    uint16_t  len;         /* READ */
+    uint16_t  start;       /* LIST */
+    uint8_t   max;         /* LIST */
+
+    StorageFs_Result_t result;
+    uint16_t  n_read;      /* READ */
+    uint8_t   n;           /* LIST */
+    uint8_t   more;        /* LIST */
+    StorageFs_Entry_t entries[STORAGE_FS_LIST_MAX]; /* LIST (STAT usa entries[0]) */
+    uint32_t  size;        /* HASH */
+    uint32_t  crc32;       /* HASH */
+    uint8_t   sha256[32];  /* HASH */
+} FsJob_t;
+
+static FsJob_t s_fs_job;
+static volatile uint8_t s_fs_in_flight;
+
+/* Leitura: FIL proprio (fp->buf vai por DMA - mesmo motivo do
+ * s_append_file) e buffer de dados em RAM_D1. f_read de setores inteiros
+ * manda o DMA direto no buffer do chamador (sd_diskio.c sem
+ * ENABLE_SCRATCH_BUFFER), por isso nao se le direto no destino do cliente
+ * (pilha/DTCM): le aqui e copia. Alinhado a 32 B (linha de cache). */
+static FIL s_read_file DMA_BUFFER;
+static uint8_t s_fs_data[STORAGE_FS_READ_MAX] DMA_BUFFER __attribute__((aligned(32)));
+
+/* FILINFO com nome longo (_USE_LFN=2) tem ~270 B: estatico, fora da pilha. */
+static FILINFO s_fs_info;
+static DIR s_fs_dir;
+
+static StorageFs_Result_t fr_to_result(FRESULT fr)
+{
+    switch (fr) {
+        case FR_OK:            return STORAGE_FS_OK;
+        case FR_NO_FILE:
+        case FR_NO_PATH:
+        case FR_INVALID_NAME:  return STORAGE_FS_NOT_FOUND;
+        case FR_NOT_READY:
+        case FR_NOT_ENABLED:
+        case FR_NO_FILESYSTEM: return STORAGE_FS_NO_SD;
+        default:               return STORAGE_FS_IO_ERROR;
+    }
+}
+
+static void fill_entry(StorageFs_Entry_t *e, const FILINFO *fi)
+{
+    e->is_dir = ((fi->fattrib & AM_DIR) != 0u) ? 1u : 0u;
+    e->size = (uint32_t)fi->fsize;
+    e->fdate = fi->fdate;
+    e->ftime = fi->ftime;
+    copy_str(e->name, sizeof(e->name), fi->fname);
+}
+
+static void fs_job_list(FsJob_t *j)
+{
+    FRESULT fr = f_opendir(&s_fs_dir, j->path);
+    uint32_t index = 0u;
+
+    j->n = 0u;
+    j->more = 0u;
+    if (fr != FR_OK) {
+        j->result = fr_to_result(fr);
+        return;
+    }
+    for (;;) {
+        fr = f_readdir(&s_fs_dir, &s_fs_info);
+        if ((fr != FR_OK) || (s_fs_info.fname[0] == '\0')) {
+            break; /* erro ou fim do diretorio */
+        }
+        if (strlen(s_fs_info.fname) > STORAGE_FS_NAME_MAX) {
+            continue; /* o firmware nunca cria nomes assim; nao cabe no protocolo */
+        }
+        if (index >= j->start) {
+            if (j->n >= j->max) {
+                j->more = 1u;
+                break;
+            }
+            fill_entry(&j->entries[j->n], &s_fs_info);
+            j->n++;
+        }
+        index++;
+    }
+    (void)f_closedir(&s_fs_dir);
+    j->result = fr_to_result(fr);
+}
+
+static void fs_job_stat(FsJob_t *j)
+{
+    FRESULT fr;
+
+    /* f_stat nao aceita a raiz: trata a parte. */
+    if (strcmp(j->path, "0:/") == 0) {
+        memset(&j->entries[0], 0, sizeof(j->entries[0]));
+        j->entries[0].is_dir = 1u;
+        j->result = STORAGE_FS_OK;
+        return;
+    }
+    fr = f_stat(j->path, &s_fs_info);
+    if (fr == FR_OK) {
+        fill_entry(&j->entries[0], &s_fs_info);
+    }
+    j->result = fr_to_result(fr);
+}
+
+static void fs_job_read(FsJob_t *j)
+{
+    FRESULT fr = f_open(&s_read_file, j->path, FA_READ);
+    UINT br = 0u;
+
+    j->n_read = 0u;
+    if (fr != FR_OK) {
+        j->result = fr_to_result(fr);
+        return;
+    }
+    if (j->offset < (uint32_t)f_size(&s_read_file)) {
+        fr = f_lseek(&s_read_file, j->offset);
+        if (fr == FR_OK) {
+            fr = f_read(&s_read_file, s_fs_data, j->len, &br);
+        }
+    } /* offset >= tamanho: fim do arquivo, n_read = 0 */
+    (void)f_close(&s_read_file); /* so' leitura: nada para sincronizar */
+    j->n_read = (uint16_t)br;
+    j->result = fr_to_result(fr);
+}
+
+static void fs_job_hash(FsJob_t *j)
+{
+    static Sha256_Ctx_t sha;
+    FRESULT fr = f_open(&s_read_file, j->path, FA_READ);
+    uint32_t crc = UsbCrc32_Init();
+    UINT br;
+
+    if (fr != FR_OK) {
+        j->result = fr_to_result(fr);
+        return;
+    }
+    Sha256_Init(&sha);
+    j->size = (uint32_t)f_size(&s_read_file);
+    for (;;) {
+        br = 0u;
+        fr = f_read(&s_read_file, s_fs_data, 512u, &br);
+        if ((fr != FR_OK) || (br == 0u)) {
+            break;
+        }
+        Sha256_Update(&sha, s_fs_data, (size_t)br);
+        crc = UsbCrc32_Update(crc, s_fs_data, (size_t)br);
+    }
+    (void)f_close(&s_read_file);
+    Sha256_Final(&sha, j->sha256);
+    j->crc32 = crc;
+    j->result = fr_to_result(fr);
+}
+
+static void process_fs_job(void)
+{
+    FsJob_t *j = &s_fs_job;
+
+    if (s_stats.sd_mounted == 0u) {
+        j->result = STORAGE_FS_NO_SD;
+    } else {
+        switch (j->op) {
+            case FS_JOB_LIST: fs_job_list(j); break;
+            case FS_JOB_STAT: fs_job_stat(j); break;
+            case FS_JOB_READ: fs_job_read(j); break;
+            case FS_JOB_HASH: fs_job_hash(j); break;
+            default:          j->result = STORAGE_FS_IO_ERROR; break;
+        }
+    }
+    s_fs_in_flight = 0u;
+    (void)osSemaphoreRelease(s_fs_done);
+}
+
+/* Lado do cliente: prepara, posta e espera. Devolve OK se a storageTask
+ * respondeu (o resultado em si fica em s_fs_job.result). */
+static StorageFs_Result_t fs_submit(FsJobOp_t op, const char *path, uint32_t timeout_ms)
+{
+    StorageTask_QueueMsg_t msg;
+
+    if ((s_queue == NULL) || (s_fs_done == NULL) || (path == NULL) || (strlen(path) > 96u)) {
+        return STORAGE_FS_BUSY;
+    }
+    if (s_fs_in_flight != 0u) {
+        return STORAGE_FS_BUSY; /* o pedido anterior (que estourou o tempo) ainda esta' rodando */
+    }
+    (void)osSemaphoreAcquire(s_fs_done, 0u); /* descarta sinal velho */
+
+    s_fs_job.op = op;
+    s_fs_job.path[0] = '0'; /* unidade logica do FatFS (SDPath = "0:/") */
+    s_fs_job.path[1] = ':';
+    copy_str(&s_fs_job.path[2], sizeof(s_fs_job.path) - 2u, path);
+    s_fs_in_flight = 1u;
+
+    memset(&msg, 0, sizeof(msg));
+    msg.type = STORAGE_MSG_FS_JOB;
+    if (osMessageQueuePut(s_queue, &msg, 0u, 0u) != osOK) {
+        s_fs_in_flight = 0u;
+        return STORAGE_FS_BUSY; /* fila cheia de gravacoes */
+    }
+    if (osSemaphoreAcquire(s_fs_done, timeout_ms) != osOK) {
+        return STORAGE_FS_BUSY; /* in_flight continua 1 ate' a storageTask terminar */
+    }
+    return STORAGE_FS_OK;
+}
+
+StorageFs_Result_t StorageTask_FsList(const char *path, uint16_t start, StorageFs_Entry_t *out,
+                                      uint8_t max, uint8_t *n, uint8_t *more, uint32_t timeout_ms)
+{
+    StorageFs_Result_t r;
+
+    if ((out == NULL) || (n == NULL) || (more == NULL)) {
+        return STORAGE_FS_IO_ERROR;
+    }
+    if (s_fs_in_flight == 0u) {
+        s_fs_job.start = start;
+        s_fs_job.max = (max > STORAGE_FS_LIST_MAX) ? (uint8_t)STORAGE_FS_LIST_MAX : max;
+    }
+    r = fs_submit(FS_JOB_LIST, path, timeout_ms);
+    if (r != STORAGE_FS_OK) {
+        return r;
+    }
+    if (s_fs_job.result == STORAGE_FS_OK) {
+        memcpy(out, s_fs_job.entries, (size_t)s_fs_job.n * sizeof(StorageFs_Entry_t));
+        *n = s_fs_job.n;
+        *more = s_fs_job.more;
+    }
+    return s_fs_job.result;
+}
+
+StorageFs_Result_t StorageTask_FsStat(const char *path, StorageFs_Entry_t *out, uint32_t timeout_ms)
+{
+    StorageFs_Result_t r;
+
+    if (out == NULL) {
+        return STORAGE_FS_IO_ERROR;
+    }
+    r = fs_submit(FS_JOB_STAT, path, timeout_ms);
+    if (r != STORAGE_FS_OK) {
+        return r;
+    }
+    if (s_fs_job.result == STORAGE_FS_OK) {
+        *out = s_fs_job.entries[0];
+    }
+    return s_fs_job.result;
+}
+
+StorageFs_Result_t StorageTask_FsRead(const char *path, uint32_t offset, uint8_t *dst, uint16_t len,
+                                      uint16_t *n_read, uint32_t timeout_ms)
+{
+    StorageFs_Result_t r;
+
+    if ((dst == NULL) || (n_read == NULL) || (len == 0u) || (len > STORAGE_FS_READ_MAX)) {
+        return STORAGE_FS_IO_ERROR;
+    }
+    if (s_fs_in_flight == 0u) {
+        s_fs_job.offset = offset;
+        s_fs_job.len = len;
+    }
+    r = fs_submit(FS_JOB_READ, path, timeout_ms);
+    if (r != STORAGE_FS_OK) {
+        return r;
+    }
+    if (s_fs_job.result == STORAGE_FS_OK) {
+        memcpy(dst, s_fs_data, s_fs_job.n_read);
+        *n_read = s_fs_job.n_read;
+    }
+    return s_fs_job.result;
+}
+
+StorageFs_Result_t StorageTask_FsHash(const char *path, uint32_t *size, uint32_t *crc32,
+                                      uint8_t sha256[32], uint32_t timeout_ms)
+{
+    StorageFs_Result_t r;
+
+    if ((size == NULL) || (crc32 == NULL) || (sha256 == NULL)) {
+        return STORAGE_FS_IO_ERROR;
+    }
+    r = fs_submit(FS_JOB_HASH, path, timeout_ms);
+    if (r != STORAGE_FS_OK) {
+        return r;
+    }
+    if (s_fs_job.result == STORAGE_FS_OK) {
+        *size = s_fs_job.size;
+        *crc32 = s_fs_job.crc32;
+        memcpy(sha256, s_fs_job.sha256, 32u);
+    }
+    return s_fs_job.result;
+}
+
 void StorageTask_Run(void)
 {
     uint32_t remount_wait_ms = 0u;
@@ -436,7 +762,12 @@ void StorageTask_Run(void)
         }
 
         if (osMessageQueueGet(s_queue, &msg, NULL, STORAGE_TASK_POLL_MS) == osOK) {
-            if (s_stats.sd_mounted == 0u) {
+            if (msg.type == STORAGE_MSG_FS_JOB) {
+                /* Leitura do USB: responde sempre (NO_SD se sem cartao) e
+                 * NUNCA desmonta por falha - so' gravacao falha derruba o
+                 * cartao. */
+                process_fs_job();
+            } else if (s_stats.sd_mounted == 0u) {
                 s_stats.messages_discarded_no_sd++;
             } else if (process_message(&msg) != 0) {
                 s_stats.write_errors++;

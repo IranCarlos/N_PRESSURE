@@ -490,8 +490,192 @@ static void test_log_tail_paging_and_limits(void)
     CHECK(small[1] == 1U); /* parou quando nao cabia mais */
 }
 
+/* ---- Fase 7.5: FS_* com operacoes falsas ------------------------------ */
+
+static char s_fs_last_path[128];
+static uint32_t s_fs_last_offset;
+static uint16_t s_fs_last_len;
+static uint16_t s_fs_last_start;
+static UsbProtoFs_Result_t s_fs_result;
+static uint8_t s_fs_entries_avail; /* quantas entradas a listagem falsa tem */
+
+static UsbProtoFs_Result_t ffs_list(const char *path, uint16_t start, UsbProtoFsEntry_t *out,
+                                    uint8_t max, uint8_t *n, uint8_t *more)
+{
+    uint8_t i;
+    strcpy(s_fs_last_path, path);
+    s_fs_last_start = start;
+    *n = 0U;
+    *more = 0U;
+    for (i = 0U; (i < max) && ((uint32_t)start + i < s_fs_entries_avail); i++) {
+        memset(&out[i], 0, sizeof(out[i]));
+        out[i].is_dir = (i == 0U) ? 1U : 0U;
+        out[i].size = 1000U + i;
+        out[i].fdate = 0x5B56U;
+        out[i].ftime = 0x7000U;
+        snprintf(out[i].name, sizeof(out[i].name), "T%08u.rec", (unsigned)(start + i));
+        (*n)++;
+    }
+    *more = ((uint32_t)start + *n < s_fs_entries_avail) ? 1U : 0U;
+    return s_fs_result;
+}
+
+static UsbProtoFs_Result_t ffs_stat(const char *path, UsbProtoFsEntry_t *out)
+{
+    strcpy(s_fs_last_path, path);
+    memset(out, 0, sizeof(*out));
+    out->size = 123456U;
+    out->fdate = 0x5B56U;
+    return s_fs_result;
+}
+
+static UsbProtoFs_Result_t ffs_read(const char *path, uint32_t offset, uint8_t *dst,
+                                    uint16_t len, uint16_t *n_read)
+{
+    uint16_t i;
+    uint16_t avail = (offset >= 2500U) ? 0U : (uint16_t)(2500U - offset); /* arquivo de 2500 B */
+    strcpy(s_fs_last_path, path);
+    s_fs_last_offset = offset;
+    s_fs_last_len = len;
+    *n_read = (len < avail) ? len : avail;
+    for (i = 0U; i < *n_read; i++) {
+        dst[i] = (uint8_t)((offset + i) & 0xFFU);
+    }
+    return s_fs_result;
+}
+
+static UsbProtoFs_Result_t ffs_hash(const char *path, uint32_t *size, uint32_t *crc32, uint8_t sha256[32])
+{
+    strcpy(s_fs_last_path, path);
+    *size = 2500U;
+    *crc32 = 0xCAFEBABEU;
+    memset(sha256, 0xAB, 32U);
+    return s_fs_result;
+}
+
+static const UsbProtoFsOps_t FAKE_FS = { ffs_list, ffs_stat, ffs_read, ffs_hash };
+
+static size_t fs_call(uint16_t cmd, const uint8_t *req, uint16_t len, UsbProtoRole_t role, uint8_t *rsp, size_t cap)
+{
+    UsbProtoAuthSession_t sess;
+    UsbProtoDispatchCtx_t ctx = { .auth = &sess, .fs = &FAKE_FS };
+    UsbProtoAuth_Init(&sess, KEY, 1U);
+    sess.role = role;
+    return UsbProtoDispatch_Handle(cmd, req, len, &ctx, rsp, cap);
+}
+
+static void test_fs_list_paging(void)
+{
+    uint8_t req[2 + 6] = { 0U, 0U, '/', 't', 'e', 's', 't', 's' };
+    uint8_t rsp[1024];
+    size_t n;
+
+    s_fs_result = USB_PROTO_FS_OK;
+    s_fs_entries_avail = 20U;
+    n = fs_call(USB_PROTO_CMD_FS_LIST, req, sizeof(req), USB_PROTO_ROLE_USER, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_OK);
+    CHECK(rsp[1] == USB_PROTO_FS_LIST_MAX);
+    CHECK(rsp[2] == 1U); /* mais = sim */
+    CHECK(strcmp(s_fs_last_path, "/tests") == 0);
+    CHECK(rsp[3] == 1U);                       /* 1a e' diretorio */
+    CHECK(rd32(&rsp[4]) == 1000U);
+    CHECK(rsp[12] == 13U);                     /* "T00000000.rec" */
+    CHECK(memcmp(&rsp[13], "T00000000.rec", 13U) == 0);
+    CHECK(n == 3U + USB_PROTO_FS_LIST_MAX * (10U + 13U));
+
+    req[0] = 12U; /* 2a pagina */
+    (void)fs_call(USB_PROTO_CMD_FS_LIST, req, sizeof(req), USB_PROTO_ROLE_USER, rsp, sizeof(rsp));
+    CHECK(s_fs_last_start == 12U);
+    CHECK((rsp[1] == 8U) && (rsp[2] == 0U));
+}
+
+static void test_fs_permissions_and_errors(void)
+{
+    const uint8_t audit[2 + 11] = { 0U, 0U, '/', 'l', 'o', 'g', 's', '/', 'a', 'u', 'd', 'i', 't' };
+    const uint8_t bad[2 + 4] = { 0U, 0U, '/', '.', '.', '/' };
+    const uint8_t stat_req[] = { '/', 't', 'e', 's', 't', 's', '/', 'x' };
+    uint8_t rsp[64];
+
+    s_fs_result = USB_PROTO_FS_OK;
+    (void)fs_call(USB_PROTO_CMD_FS_LIST, audit, sizeof(audit), USB_PROTO_ROLE_USER, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_SEM_PERMISSAO);
+    (void)fs_call(USB_PROTO_CMD_FS_LIST, audit, sizeof(audit), USB_PROTO_ROLE_DEV, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_OK);
+    (void)fs_call(USB_PROTO_CMD_FS_LIST, bad, sizeof(bad), USB_PROTO_ROLE_DEV, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO);
+
+    s_fs_result = USB_PROTO_FS_NOT_FOUND;
+    CHECK(fs_call(USB_PROTO_CMD_FS_STAT, stat_req, sizeof(stat_req), USB_PROTO_ROLE_USER, rsp, sizeof(rsp)) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_NAO_ENCONTRADO);
+    s_fs_result = USB_PROTO_FS_NO_SD;
+    (void)fs_call(USB_PROTO_CMD_FS_STAT, stat_req, sizeof(stat_req), USB_PROTO_ROLE_USER, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_ERRO_SD);
+    s_fs_result = USB_PROTO_FS_BUSY;
+    (void)fs_call(USB_PROTO_CMD_FS_STAT, stat_req, sizeof(stat_req), USB_PROTO_ROLE_USER, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_OCUPADO);
+
+    s_fs_result = USB_PROTO_FS_OK;
+    CHECK(fs_call(USB_PROTO_CMD_FS_STAT, stat_req, sizeof(stat_req), USB_PROTO_ROLE_USER, rsp, sizeof(rsp)) == 10U);
+    CHECK(rd32(&rsp[2]) == 123456U);
+}
+
+static void test_fs_read_chunks_and_eof(void)
+{
+    uint8_t req[6 + 8] = { 0U, 0U, 0U, 0U, 0xF8U, 0x03U, '/', 't', 'e', 's', 't', 's', '/', 'x' }; /* 1016 B */
+    uint8_t rsp[1024];
+    size_t n;
+
+    s_fs_result = USB_PROTO_FS_OK;
+    n = fs_call(USB_PROTO_CMD_FS_READ, req, sizeof(req), USB_PROTO_ROLE_USER, rsp, sizeof(rsp));
+    CHECK(n == 7U + 1016U);
+    CHECK((rsp[5] | (rsp[6] << 8)) == 1016);
+    CHECK(rsp[7] == 0U && rsp[7 + 255] == 255U && rsp[7 + 256] == 0U);
+
+    req[0] = (uint8_t)(2460U & 0xFFU); /* offset 2460: faltam 40 B para o fim */
+    req[1] = (uint8_t)(2460U >> 8);
+    n = fs_call(USB_PROTO_CMD_FS_READ, req, sizeof(req), USB_PROTO_ROLE_USER, rsp, sizeof(rsp));
+    CHECK(rd32(&rsp[1]) == 2460U);
+    CHECK((rsp[5] | (rsp[6] << 8)) == 40); /* n < pedido = fim do arquivo */
+    CHECK(n == 7U + 40U);
+
+    req[4] = 0xF9U; /* 1017 > maximo */
+    (void)fs_call(USB_PROTO_CMD_FS_READ, req, sizeof(req), USB_PROTO_ROLE_USER, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_FORA_DE_FAIXA);
+    req[4] = 0U; req[5] = 0U;   /* 0 */
+    (void)fs_call(USB_PROTO_CMD_FS_READ, req, sizeof(req), USB_PROTO_ROLE_USER, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_FORA_DE_FAIXA);
+    (void)fs_call(USB_PROTO_CMD_FS_READ, req, 6U, USB_PROTO_ROLE_USER, rsp, sizeof(rsp)); /* sem caminho */
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO);
+}
+
+static void test_fs_crc(void)
+{
+    const uint8_t req[] = { '/', 't', 'e', 's', 't', 's', '/', 'x' };
+    uint8_t rsp[64];
+
+    s_fs_result = USB_PROTO_FS_OK;
+    CHECK(fs_call(USB_PROTO_CMD_FS_CRC, req, sizeof(req), USB_PROTO_ROLE_USER, rsp, sizeof(rsp)) == 41U);
+    CHECK(rd32(&rsp[1]) == 2500U);
+    CHECK(rd32(&rsp[5]) == 0xCAFEBABEU);
+    CHECK((rsp[9] == 0xABU) && (rsp[40] == 0xABU));
+}
+
+static void test_fs_without_ops_is_ocupado(void)
+{
+    UsbProtoDispatchCtx_t ctx = { 0 };
+    const uint8_t req[] = { '/' };
+    uint8_t rsp[8];
+    CHECK(UsbProtoDispatch_Handle(USB_PROTO_CMD_FS_STAT, req, 1U, &ctx, rsp, sizeof(rsp)) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_OCUPADO);
+}
+
 int main(void)
 {
+    test_fs_list_paging();
+    test_fs_permissions_and_errors();
+    test_fs_read_chunks_and_eof();
+    test_fs_crc();
+    test_fs_without_ops_is_ocupado();
     test_stream_rate_limits_by_role();
     test_log_tail_user_hides_audit();
     test_log_tail_paging_and_limits();

@@ -324,3 +324,79 @@ void UsbActionsStm32_LogAuthExpired(void)
 {
     log_usb_command(STORAGE_LOG_LEVEL_AUDIT, "USB: sessao DEV expirada por inatividade");
 }
+
+/* --- Fase 7.5 ----------------------------------------------------------- */
+
+#define USB_FS_TIMEOUT_MS      (500u)    /* LIST/STAT/READ: um setor ou um diretorio */
+#define USB_FS_HASH_TIMEOUT_MS (15000u)  /* FS_CRC le o arquivo inteiro */
+
+static UsbProtoFs_Result_t fs_result(StorageFs_Result_t r)
+{
+    switch (r) {
+        case STORAGE_FS_OK:        return USB_PROTO_FS_OK;
+        case STORAGE_FS_NO_SD:     return USB_PROTO_FS_NO_SD;
+        case STORAGE_FS_NOT_FOUND: return USB_PROTO_FS_NOT_FOUND;
+        case STORAGE_FS_BUSY:      return USB_PROTO_FS_BUSY;
+        case STORAGE_FS_IO_ERROR:
+        default:                   return USB_PROTO_FS_IO_ERROR;
+    }
+}
+
+static void copy_entry(UsbProtoFsEntry_t * dst, const StorageFs_Entry_t * src)
+{
+    dst->is_dir = src->is_dir;
+    dst->size = src->size;
+    dst->fdate = src->fdate;
+    dst->ftime = src->ftime;
+    memcpy(dst->name, src->name, sizeof(dst->name)); /* mesmo tamanho (64 + 1) */
+    dst->name[sizeof(dst->name) - 1u] = '\0';
+}
+
+static UsbProtoFs_Result_t fs_list(const char * path, uint16_t start, UsbProtoFsEntry_t * out,
+                                   uint8_t max, uint8_t * n, uint8_t * more)
+{
+    /* static: 12 entradas nao vao para a pilha da usbProtoTask */
+    static StorageFs_Entry_t s_tmp[STORAGE_FS_LIST_MAX];
+    StorageFs_Result_t r;
+    uint8_t i;
+
+    *n = 0u;
+    *more = 0u;
+    r = StorageTask_FsList(path, start, s_tmp, max, n, more, USB_FS_TIMEOUT_MS);
+    if (r == STORAGE_FS_OK) {
+        for (i = 0u; i < *n; i++) {
+            copy_entry(&out[i], &s_tmp[i]);
+        }
+    }
+    return fs_result(r);
+}
+
+static UsbProtoFs_Result_t fs_stat(const char * path, UsbProtoFsEntry_t * out)
+{
+    StorageFs_Entry_t e;
+    StorageFs_Result_t r = StorageTask_FsStat(path, &e, USB_FS_TIMEOUT_MS);
+
+    if (r == STORAGE_FS_OK) {
+        copy_entry(out, &e);
+    }
+    return fs_result(r);
+}
+
+static UsbProtoFs_Result_t fs_read(const char * path, uint32_t offset, uint8_t * dst,
+                                   uint16_t len, uint16_t * n_read)
+{
+    *n_read = 0u;
+    return fs_result(StorageTask_FsRead(path, offset, dst, len, n_read, USB_FS_TIMEOUT_MS));
+}
+
+static UsbProtoFs_Result_t fs_hash(const char * path, uint32_t * size, uint32_t * crc32, uint8_t sha256[32])
+{
+    return fs_result(StorageTask_FsHash(path, size, crc32, sha256, USB_FS_HASH_TIMEOUT_MS));
+}
+
+static const UsbProtoFsOps_t s_fs_ops = { fs_list, fs_stat, fs_read, fs_hash };
+
+const UsbProtoFsOps_t * UsbActionsStm32_GetFsOps(void)
+{
+    return &s_fs_ops;
+}

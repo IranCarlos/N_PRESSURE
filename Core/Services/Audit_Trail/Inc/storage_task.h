@@ -63,6 +63,54 @@ typedef struct {
  * Pode ser chamada de qualquer tarefa (secao critica curta por dentro). */
 uint8_t StorageTask_GetLogTail(uint32_t newest_offset, StorageTask_LogTailEntry_t *out);
 
+/* ---- Fase 7.5: leitura do cartao para o USB (FS_*) ----------------------
+ * A storageTask continua sendo a UNICA tarefa que toca o FatFS: estas
+ * funcoes postam um pedido na mesma fila das gravacoes e BLOQUEIAM quem
+ * chama (a usbProtoTask) ate' a storageTask responder ou `timeout_ms`
+ * estourar. Um pedido por vez (so' existe um cliente): enquanto um pedido
+ * que estourou o tempo ainda estiver em andamento, o proximo volta BUSY.
+ *
+ * Nenhum arquivo fica aberto entre pedidos: com _FS_LOCK um arquivo aberto
+ * para leitura impediria a proxima linha de log de abrir o MESMO arquivo
+ * para escrita (FR_LOCKED -> o cartao seria desmontado como falha). Cada
+ * FS_READ abre, posiciona (f_lseek), le e fecha.
+ *
+ * `path` e' absoluto ("/tests/2026/10/T00000123.rec"), ja' validado pelo
+ * chamador (usb_proto_fs.h). Nada aqui grava no cartao. */
+typedef enum {
+    STORAGE_FS_OK = 0,
+    STORAGE_FS_NO_SD,
+    STORAGE_FS_NOT_FOUND,
+    STORAGE_FS_BUSY,
+    STORAGE_FS_IO_ERROR
+} StorageFs_Result_t;
+
+#define STORAGE_FS_NAME_MAX  (64u)  /* nomes maiores nao sao listados */
+#define STORAGE_FS_LIST_MAX  (12u)
+#define STORAGE_FS_READ_MAX  (1024u)
+
+typedef struct {
+    uint8_t  is_dir;
+    uint32_t size;
+    uint16_t fdate;  /* formato FAT cru */
+    uint16_t ftime;
+    char     name[STORAGE_FS_NAME_MAX + 1u];
+} StorageFs_Entry_t;
+
+/* Lista a partir da entrada `start` (paginacao), ate' `max` (<= LIST_MAX).
+ * *more = 1 se o diretorio tem mais entradas depois das devolvidas. */
+StorageFs_Result_t StorageTask_FsList(const char *path, uint16_t start, StorageFs_Entry_t *out,
+                                      uint8_t max, uint8_t *n, uint8_t *more, uint32_t timeout_ms);
+StorageFs_Result_t StorageTask_FsStat(const char *path, StorageFs_Entry_t *out, uint32_t timeout_ms);
+/* Le ate' `len` (<= READ_MAX) bytes a partir de `offset`; *n_read < len = fim. */
+StorageFs_Result_t StorageTask_FsRead(const char *path, uint32_t offset, uint8_t *dst, uint16_t len,
+                                      uint16_t *n_read, uint32_t timeout_ms);
+/* Tamanho, CRC32 (mesmo do frame USB) e SHA-256 do arquivo inteiro. Le em
+ * blocos de 512 B - num arquivo grande ocupa a storageTask; os logs que
+ * chegarem nesse meio tempo esperam na fila. */
+StorageFs_Result_t StorageTask_FsHash(const char *path, uint32_t *size, uint32_t *crc32,
+                                      uint8_t sha256[32], uint32_t timeout_ms);
+
 /* Corpo da tarefa (chamar de dentro de StartStorageTask() em main.c, dentro
  * do for(;;) — esta funcao JA e' o loop infinito, nunca retorna). Tenta
  * montar o cartao; se falhar, tenta de novo periodicamente (E005 — nunca

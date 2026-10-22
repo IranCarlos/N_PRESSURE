@@ -7,6 +7,7 @@
 #include "usb_proto_dispatch.h"
 #include "usb_proto_frame.h"
 #include "fw_version.h"
+#include "usb_proto_fs.h"
 #include <string.h>  /* memcpy: serializa float sem type punning */
 
 static void write_u32_le(uint8_t *p, uint32_t v)
@@ -478,6 +479,197 @@ static size_t handle_get_log_tail(const UsbProtoDispatchCtx_t *ctx,
     return idx;
 }
 
+/* ---- Fase 7.5: leitura do cartao SD ----------------------------------- */
+
+static void write_u16_le(uint8_t *p, uint16_t v)
+{
+    p[0] = (uint8_t)(v & 0xFFU);
+    p[1] = (uint8_t)((v >> 8) & 0xFFU);
+}
+
+static UsbProtoRspStatus_t fs_result_to_rsp(UsbProtoFs_Result_t r)
+{
+    switch (r) {
+        case USB_PROTO_FS_OK:        return USB_PROTO_RSP_OK;
+        case USB_PROTO_FS_NOT_FOUND: return USB_PROTO_RSP_NAO_ENCONTRADO;
+        case USB_PROTO_FS_BUSY:      return USB_PROTO_RSP_OCUPADO;
+        case USB_PROTO_FS_NO_SD:
+        case USB_PROTO_FS_IO_ERROR:
+        default:                     return USB_PROTO_RSP_ERRO_SD;
+    }
+}
+
+/* Valida o caminho que ocupa payload[skip..len). Devolve OK e preenche
+ * `path`, ou o status de recusa (PARAM_INVALIDO / SEM_PERMISSAO). */
+static UsbProtoRspStatus_t fs_take_path(const UsbProtoDispatchCtx_t *ctx, const uint8_t *req_payload,
+                                        uint16_t req_len, uint16_t skip, uint8_t for_listing, char *path)
+{
+    UsbProtoFs_PathCheck_t chk;
+
+    if ((req_payload == NULL) || (req_len <= skip)) {
+        return USB_PROTO_RSP_PARAM_INVALIDO;
+    }
+    chk = UsbProtoFs_CheckPath(&req_payload[skip], (size_t)(req_len - skip), ctx_role(ctx), for_listing, path);
+    if (chk == USB_PROTO_FS_PATH_DENIED) {
+        return USB_PROTO_RSP_SEM_PERMISSAO;
+    }
+    return (chk == USB_PROTO_FS_PATH_OK) ? USB_PROTO_RSP_OK : USB_PROTO_RSP_PARAM_INVALIDO;
+}
+
+static uint8_t fs_ops_ok(const UsbProtoDispatchCtx_t *ctx)
+{
+    return ((ctx != NULL) && (ctx->fs != NULL) && (ctx->fs->list != NULL) && (ctx->fs->stat != NULL) &&
+            (ctx->fs->read != NULL) && (ctx->fs->hash != NULL)) ? 1U : 0U;
+}
+
+static size_t handle_fs_list(const UsbProtoDispatchCtx_t *ctx, const uint8_t *req_payload,
+                             uint16_t req_len, uint8_t *rsp_payload, size_t rsp_cap)
+{
+    /* static: 12 x ~76 B nao cabem com folga na pilha de 2 KB da usbProtoTask;
+     * o dispatch so' roda nessa tarefa. */
+    static UsbProtoFsEntry_t s_entries[USB_PROTO_FS_LIST_MAX];
+    char path[USB_PROTO_FS_PATH_MAX + 1U];
+    UsbProtoRspStatus_t st;
+    UsbProtoFs_Result_t r;
+    uint8_t n = 0U;
+    uint8_t more = 0U;
+    uint8_t i;
+    size_t idx = 3U;
+
+    if ((fs_ops_ok(ctx) == 0U) || (rsp_cap < 3U)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_OCUPADO);
+    }
+    st = fs_take_path(ctx, req_payload, req_len, 2U, 1U, path);
+    if (st != USB_PROTO_RSP_OK) {
+        return rsp_status(rsp_payload, st);
+    }
+
+    r = ctx->fs->list(path, read_u16_le(req_payload), s_entries, (uint8_t)USB_PROTO_FS_LIST_MAX, &n, &more);
+    if (r != USB_PROTO_FS_OK) {
+        return rsp_status(rsp_payload, fs_result_to_rsp(r));
+    }
+    if (n > (uint8_t)USB_PROTO_FS_LIST_MAX) {
+        n = (uint8_t)USB_PROTO_FS_LIST_MAX;
+    }
+
+    for (i = 0U; i < n; i++) {
+        size_t name_len = bounded_strlen(s_entries[i].name, USB_PROTO_FS_NAME_MAX);
+        if ((idx + 10U + name_len) > rsp_cap) {
+            more = 1U; /* nao coube: o PC pede a proxima pagina a partir daqui */
+            break;
+        }
+        rsp_payload[idx] = s_entries[i].is_dir;
+        write_u32_le(&rsp_payload[idx + 1U], s_entries[i].size);
+        write_u16_le(&rsp_payload[idx + 5U], s_entries[i].fdate);
+        write_u16_le(&rsp_payload[idx + 7U], s_entries[i].ftime);
+        rsp_payload[idx + 9U] = (uint8_t)name_len;
+        memcpy(&rsp_payload[idx + 10U], s_entries[i].name, name_len);
+        idx += 10U + name_len;
+    }
+
+    rsp_payload[0] = (uint8_t)USB_PROTO_RSP_OK;
+    rsp_payload[1] = i;
+    rsp_payload[2] = more;
+    return idx;
+}
+
+static size_t handle_fs_stat(const UsbProtoDispatchCtx_t *ctx, const uint8_t *req_payload,
+                             uint16_t req_len, uint8_t *rsp_payload, size_t rsp_cap)
+{
+    char path[USB_PROTO_FS_PATH_MAX + 1U];
+    UsbProtoFsEntry_t e;
+    UsbProtoRspStatus_t st;
+    UsbProtoFs_Result_t r;
+
+    if ((fs_ops_ok(ctx) == 0U) || (rsp_cap < 10U)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_OCUPADO);
+    }
+    st = fs_take_path(ctx, req_payload, req_len, 0U, 0U, path);
+    if (st != USB_PROTO_RSP_OK) {
+        return rsp_status(rsp_payload, st);
+    }
+    r = ctx->fs->stat(path, &e);
+    if (r != USB_PROTO_FS_OK) {
+        return rsp_status(rsp_payload, fs_result_to_rsp(r));
+    }
+    rsp_payload[0] = (uint8_t)USB_PROTO_RSP_OK;
+    rsp_payload[1] = e.is_dir;
+    write_u32_le(&rsp_payload[2], e.size);
+    write_u16_le(&rsp_payload[6], e.fdate);
+    write_u16_le(&rsp_payload[8], e.ftime);
+    return 10U;
+}
+
+static size_t handle_fs_read(const UsbProtoDispatchCtx_t *ctx, const uint8_t *req_payload,
+                             uint16_t req_len, uint8_t *rsp_payload, size_t rsp_cap)
+{
+    char path[USB_PROTO_FS_PATH_MAX + 1U];
+    UsbProtoRspStatus_t st;
+    UsbProtoFs_Result_t r;
+    uint32_t offset;
+    uint16_t len;
+    uint16_t n_read = 0U;
+
+    if ((fs_ops_ok(ctx) == 0U) || (rsp_cap < 7U)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_OCUPADO);
+    }
+    if ((req_payload == NULL) || (req_len < 7U)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_PARAM_INVALIDO);
+    }
+    offset = (uint32_t)req_payload[0] | ((uint32_t)req_payload[1] << 8) |
+             ((uint32_t)req_payload[2] << 16) | ((uint32_t)req_payload[3] << 24);
+    len = read_u16_le(&req_payload[4]);
+    if ((len == 0U) || (len > USB_PROTO_FS_READ_MAX)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_FORA_DE_FAIXA);
+    }
+    if ((7U + (size_t)len) > rsp_cap) {
+        len = (uint16_t)(rsp_cap - 7U);
+    }
+    st = fs_take_path(ctx, req_payload, req_len, 6U, 0U, path);
+    if (st != USB_PROTO_RSP_OK) {
+        return rsp_status(rsp_payload, st);
+    }
+
+    /* Le direto para dentro do payload da resposta (sem buffer extra). */
+    r = ctx->fs->read(path, offset, &rsp_payload[7], len, &n_read);
+    if (r != USB_PROTO_FS_OK) {
+        return rsp_status(rsp_payload, fs_result_to_rsp(r));
+    }
+    if (n_read > len) {
+        n_read = len;
+    }
+    rsp_payload[0] = (uint8_t)USB_PROTO_RSP_OK;
+    write_u32_le(&rsp_payload[1], offset);
+    write_u16_le(&rsp_payload[5], n_read);
+    return 7U + (size_t)n_read;
+}
+
+static size_t handle_fs_crc(const UsbProtoDispatchCtx_t *ctx, const uint8_t *req_payload,
+                            uint16_t req_len, uint8_t *rsp_payload, size_t rsp_cap)
+{
+    char path[USB_PROTO_FS_PATH_MAX + 1U];
+    UsbProtoRspStatus_t st;
+    UsbProtoFs_Result_t r;
+    uint32_t size = 0U;
+    uint32_t crc = 0U;
+
+    if ((fs_ops_ok(ctx) == 0U) || (rsp_cap < 41U)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_OCUPADO);
+    }
+    st = fs_take_path(ctx, req_payload, req_len, 0U, 0U, path);
+    if (st != USB_PROTO_RSP_OK) {
+        return rsp_status(rsp_payload, st);
+    }
+    r = ctx->fs->hash(path, &size, &crc, &rsp_payload[9]);
+    if (r != USB_PROTO_FS_OK) {
+        return rsp_status(rsp_payload, fs_result_to_rsp(r));
+    }
+    rsp_payload[0] = (uint8_t)USB_PROTO_RSP_OK;
+    write_u32_le(&rsp_payload[1], size);
+    write_u32_le(&rsp_payload[5], crc);
+    return 41U;
+}
+
 size_t UsbProtoDispatch_Handle(uint16_t cmd,
                                 const uint8_t *req_payload, uint16_t req_len,
                                 const UsbProtoDispatchCtx_t *ctx,
@@ -514,6 +706,14 @@ size_t UsbProtoDispatch_Handle(uint16_t cmd,
             return handle_stream_stop(ctx, rsp_payload);
         case USB_PROTO_CMD_GET_LOG_TAIL:
             return handle_get_log_tail(ctx, req_payload, req_len, rsp_payload, rsp_cap);
+        case USB_PROTO_CMD_FS_LIST:
+            return handle_fs_list(ctx, req_payload, req_len, rsp_payload, rsp_cap);
+        case USB_PROTO_CMD_FS_STAT:
+            return handle_fs_stat(ctx, req_payload, req_len, rsp_payload, rsp_cap);
+        case USB_PROTO_CMD_FS_READ:
+            return handle_fs_read(ctx, req_payload, req_len, rsp_payload, rsp_cap);
+        case USB_PROTO_CMD_FS_CRC:
+            return handle_fs_crc(ctx, req_payload, req_len, rsp_payload, rsp_cap);
         default:
             rsp_payload[0] = (uint8_t)USB_PROTO_RSP_CMD_DESCONHECIDO;
             return 1U;

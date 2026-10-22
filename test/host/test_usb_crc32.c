@@ -34,8 +34,20 @@ static void test_deterministic(void)
     CHECK(UsbCrc32_Compute(a, sizeof(a)) == UsbCrc32_Compute(a, sizeof(a)));
 }
 
+/* Fase 7.5: CRC em pedacos (FS_CRC le o arquivo em blocos) == de uma vez. */
+static void test_incremental_matches_one_shot(void)
+{
+    const uint8_t *data = (const uint8_t *)"123456789";
+    uint32_t crc = UsbCrc32_Init();
+    crc = UsbCrc32_Update(crc, data, 4U);
+    crc = UsbCrc32_Update(crc, &data[4], 0U);
+    crc = UsbCrc32_Update(crc, &data[4], 5U);
+    CHECK(crc == 0x0376E6E7UL);
+}
+
 int main(void)
 {
+    test_incremental_matches_one_shot();
     test_empty_input_is_init_value();
     test_known_vector_check_string();
     test_different_inputs_differ();

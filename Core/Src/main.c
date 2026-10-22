@@ -2279,8 +2279,10 @@ void StartUsbProtoTask(void *argument)
 #endif
 #if BRINGUP_ENABLE_STORAGE
               ctx.get_log_entry = UsbActionsStm32_GetLogEntry;
+              ctx.fs = UsbActionsStm32_GetFsOps(); /* Fase 7.5 - leitura do SD via storageTask */
 #else
               ctx.get_log_entry = NULL;
+              ctx.fs = NULL;
 #endif
 
               rsp_payload_len = UsbProtoDispatch_Handle(req_frame.cmd, req_frame.payload, req_frame.len,

@@ -26,6 +26,12 @@ extern "C" {
 
 uint32_t UsbCrc32_Compute(const uint8_t *data, size_t len);
 
+/* Fase 7.5 - CRC em pedacos (FS_CRC de um arquivo inteiro): sem reflexao e
+ * sem XOR final, o estado intermediario JA' e' o CRC, entao
+ * Update(Update(Init(), a), b) == Compute(a || b). */
+uint32_t UsbCrc32_Init(void);
+uint32_t UsbCrc32_Update(uint32_t crc, const uint8_t *data, size_t len);
+
 #ifdef __cplusplus
 }
 #endif

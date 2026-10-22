@@ -11,7 +11,17 @@
 
 uint32_t UsbCrc32_Compute(const uint8_t *data, size_t len)
 {
-    uint32_t crc = (uint32_t)USB_CRC32_INIT;
+    return UsbCrc32_Update(UsbCrc32_Init(), data, len);
+}
+
+uint32_t UsbCrc32_Init(void)
+{
+    return (uint32_t)USB_CRC32_INIT;
+}
+
+uint32_t UsbCrc32_Update(uint32_t crc_in, const uint8_t *data, size_t len)
+{
+    uint32_t crc = crc_in;
     size_t i;
 
     for (i = 0U; i < len; i++) {

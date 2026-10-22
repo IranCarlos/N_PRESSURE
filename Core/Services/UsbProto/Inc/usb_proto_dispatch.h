@@ -82,7 +82,8 @@ typedef enum {
     USB_PROTO_RSP_ESTADO_INVALIDO  = 5,
     USB_PROTO_RSP_ERRO_SD          = 6,
     USB_PROTO_RSP_FORA_DE_FAIXA    = 7,
-    USB_PROTO_RSP_NAO_AUTENTICADO  = 8
+    USB_PROTO_RSP_NAO_AUTENTICADO  = 8,
+    USB_PROTO_RSP_NAO_ENCONTRADO   = 9  /* Fase 7.5: arquivo/diretorio inexistente (acrescimo ao Apendice A) */
 } UsbProtoRspStatus_t;
 
 #define USB_PROTO_DEVICE_ID_FIELD_LEN  (16U)
@@ -176,6 +177,54 @@ typedef uint8_t (*UsbProtoGetLogEntryFn)(uint32_t newest_offset, UsbProtoLogEntr
  * FORA_DE_FAIXA). STREAM_STOP: sem payload. Formato do frame STREAM em
  * usb_telemetry.h. */
 
+/* ---- Fase 7.5: leitura do cartao SD (FS_*), SOMENTE LEITURA ----------
+ * Caminhos e permissao por papel: usb_proto_fs.h. Quem acessa o cartao de
+ * verdade e' a storageTask (unica dona do FatFS); o dispatch so' chama as
+ * UsbProtoFsOps_t injetadas.
+ *
+ *   FS_LIST  req: u16 inicio (paginacao), caminho
+ *            rsp: status, u8 n, u8 mais (1 = ha' mais entradas), n x
+ *                 { u8 diretorio, u32 tamanho, u16 data_fat, u16 hora_fat,
+ *                   u8 tam_nome, nome }
+ *   FS_STAT  req: caminho
+ *            rsp: status, u8 diretorio, u32 tamanho, u16 data_fat, u16 hora_fat
+ *   FS_READ  req: u32 offset, u16 tamanho (1..USB_PROTO_FS_READ_MAX), caminho
+ *            rsp: status, u32 offset, u16 n, n bytes (n < pedido = fim do arquivo)
+ *   FS_CRC   req: caminho
+ *            rsp: status, u32 tamanho, u32 crc32 (mesmo CRC do frame), sha256[32]
+ * data/hora_fat: formato FAT cru (data = (ano-1980)<<9 | mes<<5 | dia,
+ * hora = h<<11 | min<<5 | seg/2). Nomes maiores que USB_PROTO_FS_NAME_MAX
+ * nao aparecem na listagem (o firmware nunca cria nomes assim). */
+#define USB_PROTO_FS_NAME_MAX  (64U)
+#define USB_PROTO_FS_LIST_MAX  (12U)    /* 12 x 74 B cabe em 1024 */
+#define USB_PROTO_FS_READ_MAX  (1016U)  /* 1024 - status - offset - n, multiplo de 8 */
+
+typedef enum {
+    USB_PROTO_FS_OK = 0,
+    USB_PROTO_FS_NO_SD,      /* -> ERRO_SD */
+    USB_PROTO_FS_NOT_FOUND,  /* -> NAO_ENCONTRADO */
+    USB_PROTO_FS_BUSY,       /* storageTask nao respondeu a tempo -> OCUPADO */
+    USB_PROTO_FS_IO_ERROR    /* -> ERRO_SD */
+} UsbProtoFs_Result_t;
+
+typedef struct {
+    uint8_t  is_dir;
+    uint32_t size;
+    uint16_t fdate;
+    uint16_t ftime;
+    char     name[USB_PROTO_FS_NAME_MAX + 1U];
+} UsbProtoFsEntry_t;
+
+typedef struct {
+    UsbProtoFs_Result_t (*list)(const char *path, uint16_t start, UsbProtoFsEntry_t *out,
+                                uint8_t max, uint8_t *n, uint8_t *more);
+    UsbProtoFs_Result_t (*stat)(const char *path, UsbProtoFsEntry_t *out);
+    UsbProtoFs_Result_t (*read)(const char *path, uint32_t offset, uint8_t *dst,
+                                uint16_t len, uint16_t *n_read);
+    UsbProtoFs_Result_t (*hash)(const char *path, uint32_t *size, uint32_t *crc32,
+                                uint8_t sha256[32]);
+} UsbProtoFsOps_t;
+
 /* status == NULL -> CMD_GET_STATUS responde OCUPADO (snapshot ainda nao
  * disponivel; nao deveria acontecer em operacao normal, mas evita servir
  * lixo se a task de protocolo rodar antes da primeira atualizacao).
@@ -193,6 +242,7 @@ typedef struct {
     const UsbProtoActions_t *actions; /* Fase 7.3 - comandos de controle (setpoint, hora, ensaio, operador) */
     UsbTelemetry_t *telemetry;        /* Fase 7.4 - STREAM_START/STOP (NULL -> OCUPADO) */
     UsbProtoGetLogEntryFn get_log_entry; /* Fase 7.4 - GET_LOG_TAIL (NULL -> OCUPADO) */
+    const UsbProtoFsOps_t *fs;        /* Fase 7.5 - FS_* (NULL -> OCUPADO) */
 } UsbProtoDispatchCtx_t;
 
 /**

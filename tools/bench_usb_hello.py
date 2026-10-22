@@ -59,6 +59,11 @@ CMD_AUTH_LOGOUT = 0x0042
 CMD_STREAM_START = 0x0010
 CMD_STREAM_STOP = 0x0011
 CMD_GET_LOG_TAIL = 0x0030
+CMD_FS_LIST = 0x0020
+CMD_FS_STAT = 0x0021
+CMD_FS_READ = 0x0022
+CMD_FS_CRC = 0x0023
+FS_READ_MAX = 1016
 
 # Fase 7.4: eventos assincronos (usb_proto_events.h)
 EVT_NAMES = {0x0301: "ESTADO_MUDOU", 0x0302: "ENSAIO_CONCLUIDO", 0x0303: "ERRO",
@@ -74,7 +79,7 @@ NONCE_LEN = 16
 RSP_STATUS_NAMES = {
     0: "OK", 1: "CMD_DESCONHECIDO", 2: "SEM_PERMISSAO", 3: "PARAM_INVALIDO",
     4: "OCUPADO", 5: "ESTADO_INVALIDO", 6: "ERRO_SD", 7: "FORA_DE_FAIXA",
-    8: "NAO_AUTENTICADO",
+    8: "NAO_AUTENTICADO", 9: "NAO_ENCONTRADO",
 }
 
 DEVICE_ID_FIELD_LEN = 16
@@ -299,6 +304,94 @@ def run_log_tail(ser: serial.Serial, seq: int, count: int, timeout_s: float) -> 
     return True
 
 
+def fat_datetime(fdate: int, ftime: int) -> str:
+    if fdate == 0:
+        return "-"
+    return (f"{fdate & 0x1F:02d}/{(fdate >> 5) & 0x0F:02d}/{1980 + (fdate >> 9)} "
+            f"{ftime >> 11:02d}:{(ftime >> 5) & 0x3F:02d}:{(ftime & 0x1F) * 2:02d}")
+
+
+def run_ls(ser: serial.Serial, seq: int, path: str, timeout_s: float) -> bool:
+    """FS_LIST com paginacao ate' acabar o diretorio."""
+    start = 0
+    total = 0
+    while True:
+        rsp = send_and_receive(ser, seq, CMD_FS_LIST, struct.pack("<H", start) + path.encode("ascii"), timeout_s)
+        seq += 1
+        p = rsp["payload"]
+        if p[0] != 0:
+            print(f"<-- {path}: status={RSP_STATUS_NAMES.get(p[0], p[0])}")
+            return False
+        n, more = p[1], p[2]
+        off = 3
+        for _ in range(n):
+            is_dir = p[off]
+            (size,) = struct.unpack("<I", p[off + 1:off + 5])
+            fdate, ftime = struct.unpack("<HH", p[off + 5:off + 9])
+            nlen = p[off + 9]
+            name = p[off + 10:off + 10 + nlen].decode("ascii", "replace")
+            off += 10 + nlen
+            kind = "<DIR>" if is_dir else f"{size:>10}"
+            print(f"    {kind:>10}  {fat_datetime(fdate, ftime)}  {name}")
+        total += n
+        if not more or n == 0:
+            break
+        start += n
+    print(f"<-- {total} entrada(s) em {path}")
+    return True
+
+
+def run_stat(ser: serial.Serial, seq: int, path: str, timeout_s: float) -> bool:
+    p = send_and_receive(ser, seq, CMD_FS_STAT, path.encode("ascii"), timeout_s)["payload"]
+    if p[0] != 0:
+        print(f"<-- {path}: status={RSP_STATUS_NAMES.get(p[0], p[0])}")
+        return False
+    (size,) = struct.unpack("<I", p[2:6])
+    fdate, ftime = struct.unpack("<HH", p[6:10])
+    print(f"<-- {path}: {'diretorio' if p[1] else f'{size} bytes'}, {fat_datetime(fdate, ftime)}")
+    return True
+
+
+def run_get(ser: serial.Serial, seq: int, path: str, out_file: str, timeout_s: float) -> bool:
+    """Baixa o arquivo em blocos FS_READ, mede a vazao e confere com FS_CRC."""
+    data = bytearray()
+    t0 = time.monotonic()
+    while True:
+        req = struct.pack("<IH", len(data), FS_READ_MAX) + path.encode("ascii")
+        p = send_and_receive(ser, seq, CMD_FS_READ, req, timeout_s)["payload"]
+        seq += 1
+        if p[0] != 0:
+            print(f"<-- FS_READ offset={len(data)}: status={RSP_STATUS_NAMES.get(p[0], p[0])}")
+            return False
+        (off,) = struct.unpack("<I", p[1:5])
+        (n,) = struct.unpack("<H", p[5:7])
+        if off != len(data):
+            print(f"FALHA: offset devolvido {off} != pedido {len(data)}", file=sys.stderr)
+            return False
+        data += p[7:7 + n]
+        if n < FS_READ_MAX:
+            break
+    dt = time.monotonic() - t0
+    with open(out_file, "wb") as f:
+        f.write(data)
+    rate = (len(data) / 1024.0) / dt if dt > 0 else 0.0
+    print(f"<-- {len(data)} bytes em {dt:.2f} s ({rate:.0f} kB/s) -> {out_file}")
+
+    p = send_and_receive(ser, seq, CMD_FS_CRC, path.encode("ascii"), max(timeout_s, 20.0))["payload"]
+    if p[0] != 0:
+        print(f"<-- FS_CRC: status={RSP_STATUS_NAMES.get(p[0], p[0])}")
+        return False
+    size, crc = struct.unpack("<II", p[1:9])
+    sha_dev = p[9:41]
+    sha_local = hashlib.sha256(bytes(data)).digest()
+    crc_local = usb_crc32(bytes(data))
+    ok = (size == len(data)) and (sha_dev == sha_local) and (crc == crc_local)
+    print(f"<-- FS_CRC: tamanho={size} crc32={crc:#010x} sha256={sha_dev.hex()}")
+    print("INTEGRO: copia identica ao arquivo do cartao" if ok else
+          f"DIVERGENTE: local tamanho={len(data)} crc32={crc_local:#010x} sha256={sha_local.hex()}")
+    return ok
+
+
 def run_listen(ser: serial.Serial, seq: int, seconds: float, timeout_s: float) -> bool:
     """Manda um HELLO (ativa os eventos nesta conexao) e so' escuta."""
     send_and_receive(ser, seq, CMD_HELLO, b"", timeout_s)
@@ -408,7 +501,9 @@ def main():
     parser.add_argument("--list", action="store_true", help="Lista as portas seriais disponiveis e sai")
     parser.add_argument("--cmd", choices=["hello", "status", "auth", "both",
                                           "setpoint", "datetime", "operator", "start", "abort",
-                                          "stream", "logtail", "listen"], default="both")
+                                          "stream", "logtail", "listen", "ls", "stat", "get"], default="both")
+    parser.add_argument("--path", default="/", help="Caminho no cartao (--cmd ls/stat/get)")
+    parser.add_argument("--out", help="Arquivo local de destino (--cmd get; padrao = nome do arquivo)")
     parser.add_argument("--rate", type=int, default=50, help="Taxa do stream em Hz (--cmd stream; USER ate' 50)")
     parser.add_argument("--seconds", type=float, default=10.0, help="Duracao de --cmd stream/listen")
     parser.add_argument("--count", type=int, default=20, help="Linhas do log (--cmd logtail, 1..32)")
@@ -479,6 +574,22 @@ def main():
                 # Estado logo depois, para conferir o efeito
                 rsp = send_and_receive(ser, seq, CMD_GET_STATUS, timeout_s=args.timeout)
                 print(f"<-- GET_STATUS {fmt_get_status(rsp['payload'])}")
+            except (ValueError, TimeoutError) as exc:
+                print(f"FALHA: {exc}", file=sys.stderr)
+                ok = False
+
+        if args.cmd in ("ls", "stat", "get"):
+            try:
+                if args.dev_key_hex:  # /config e /logs/audit exigem sessao DEV
+                    ok = run_auth_flow(ser, seq, bytes.fromhex(args.dev_key_hex), args.timeout, logout=False)
+                    seq += 10
+                if args.cmd == "ls":
+                    ok = ok and run_ls(ser, seq, args.path, args.timeout)
+                elif args.cmd == "stat":
+                    ok = ok and run_stat(ser, seq, args.path, args.timeout)
+                else:
+                    out = args.out or args.path.rstrip("/").split("/")[-1] or "download.bin"
+                    ok = ok and run_get(ser, seq, args.path, out, args.timeout)
             except (ValueError, TimeoutError) as exc:
                 print(f"FALHA: {exc}", file=sys.stderr)
                 ok = False

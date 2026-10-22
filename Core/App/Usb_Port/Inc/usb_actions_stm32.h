@@ -70,6 +70,13 @@ uint8_t UsbActionsStm32_GetLogEntry(uint32_t newest_offset, UsbProtoLogEntry_t *
 /* Linha de auditoria "sessao DEV expirou" (chamada junto com o EVT). */
 void UsbActionsStm32_LogAuthExpired(void);
 
+/* --- Fase 7.5 ----------------------------------------------------------- */
+
+/* Tabela para UsbProtoDispatchCtx_t.fs: FS_LIST/STAT/READ/CRC executados
+ * pela storageTask (StorageTask_Fs*), com a usbProtoTask bloqueada
+ * esperando (ate' 0,5 s; FS_CRC ate' 15 s). */
+const UsbProtoFsOps_t * UsbActionsStm32_GetFsOps(void);
+
 #ifdef __cplusplus
 }
 #endif
