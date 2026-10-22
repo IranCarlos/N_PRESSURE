@@ -162,6 +162,13 @@ Todos os pinos de GPIO de válvula/backlight/TFT são reiniciados para `GPIO_PIN
   `eeprom_storage_io.c` já passam isso corretamente). Ainda não confirmado: existência de um
   segundo chip físico para a cópia redundante A/B exigida pela Parte A, seção 5 — a esclarecer
   quando a Fase 5 chegar nesse ponto (nada bloqueante agora).
+- **Pull-up de SDA/SCL (2026-10-21)**: a placa rev 1 **nao tem pull-up externo efetivo** no I2C1
+  — sem pull-up o I2C1 nem colocava o endereco no barramento (timeout, `ErrorCode=0x20`).
+  Contornado com `GPIO_PULLUP` interno em PB8/PB9 (`.ioc`), validado em bancada (leitura e escrita
+  da chave DEV OK). O pull-up interno do H7 e' fraco (~40 kΩ) para 400 kHz: funciona com
+  barramento curto e um so' dispositivo, mas a borda de subida fica lenta. **TODO(HW) proxima
+  revisao**: resistores externos de 2,2–4,7 kΩ em SDA/SCL. Se aparecer erro intermitente de I2C
+  antes disso, baixar para 100 kHz e' o paliativo.
 
 ## USB-C
 
@@ -264,7 +271,7 @@ Todos os pinos de GPIO de válvula/backlight/TFT são reiniciados para `GPIO_PIN
 | H4 | Válvulas NA/NF + comportamento em reset/tri-state | **Resolvido**: NA, estado de reset = aberta, compatível com o software atual |
 | H5 | Modelo do chip EEPROM + 2º chip para redundância A/B | **Resolvido**: CAT24C512WI-GT3. Redundância A/B ainda em aberto (não bloqueante agora) |
 | H6/H7 | Papel real do USB (device puro vs. dual-role) + resistores CC1/CC2 | **Resolvido e configurado**: OTG/Dual_Role_Device confirmado no CubeMX (Device+Host lado a lado). Lógica de decisão de papel em runtime é trabalho de firmware da Fase 7+ |
-| H8 | Cristal LSE + bateria/VBAT do RTC | **Resolvido e configurado**: LSE+RTC ativos no `.ioc`, `MX_RTC_Init()` gerado, build limpo |
+| H8 | Cristal LSE + bateria/VBAT do RTC | **Resolvido e configurado**: LSE+RTC ativos no `.ioc`, `MX_RTC_Init()` gerado. **2026-10-21**: VBAT validado (hora avança com a placa desligada); **CSS do LSE desligado** no CubeMX — dava falso alarme no power-cycle e apagava a hora (ver `00-auditoria.md`, bancada 2026-10-21) |
 | H9 | Driver de potência do motor (tolerância de frequência de PWM) | **Resolvido e configurado**: `Prescaler=0`, `Period=13750`, ≈19,8-20 kHz, build limpo |
 | H10 (novo) | Buzzer: `PC7` → PWM de timer | **Resolvido e configurado**: `TIM8_CH2` ativo, `MX_TIM8_Init()` gerado, build limpo. Driver do buzzer ainda não usa o PWM (pendente Fase 2) |
 | — | Topologia de alimentação / monitoramento de tensão | **Em aberto** — não perguntado ainda; necessário para erro E014 |

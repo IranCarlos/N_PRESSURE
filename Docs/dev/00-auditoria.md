@@ -888,3 +888,607 @@ alvo original) — mais estavel neste hardware especifico ao longo de toda a ses
 (HardFaults, SDMMC/PLL2 side-effects ao mirar 550MHz). D-Cache do Cortex-M7 fica **desabilitado**
 (`SCB_EnableDCache()` comentado em `main.c`) — reabilitar causa HardFault em `disp_flush()`, ja'
 tentado duas vezes nesta sessao.
+
+## Fase 6 — Reescrita completa da IHM (2026-10-12, build limpo, NUNCA testada em hardware)
+
+`Core/App/HMI_UI/*` existia desde Fase 3/4 mas nunca rodava de verdade (`HMI_Init()`/`HMI_Update()`
+presos no `#else` morto de `APP_MODE_BRINGUP`) — o que rodava no lugar era um HUD cru (arco+3
+labels) direto em `main.c`. A "tela de configuracao" tambem era na real um painel de ENGENHARIA
+(ganhos PID crus, calibracao do sensor, PWM manual, valvulas, teste de vazamento), nao a tela
+clinica de operador do prompt do projeto. Reescrita completa, plano salvo em
+`.claude/plans/smooth-wishing-wirth.md` (fora do repo, so' nesta maquina).
+
+- **Telas novas** (`Core/App/HMI_UI/{Inc,Src}`): `ui_theme` (paleta/estilo unico, antes repetido em
+  cada arquivo), `ui_session` (operador/participante/ciclo — IDs numericos simples, "OP03"/"P037";
+  cadastro com nome fica para quando houver teclado virtual), `ui_boot_screen` (logo estatico +
+  status real de SD/RTC, SEM a animacao via streaming do Apendice C — fora de escopo), `ui_home_screen`
+  (tela principal: pressao/estado/setpoint/tempo-decorrido-e-pico/operador-participante/data-hora/
+  status do SD), `ui_menu_screen` (hub: Novo Ensaio/Ajustes/Voltar), `ui_new_test_screen` (operador/
+  participante/setpoint, "Iniciar" ja' chama `ControlLoop_StartInflation()`), `ui_result_popup`
+  (NC00-NC08 + pico/tempo/overshoot, **primeira vez que a IHM grava um ensaio REAL no SD** via
+  `StorageTask_SubmitTestRecord()` — antes so' existia o teste de bancada periodico, removido),
+  `ui_error_popup` (E001-E004/E013 em pt-BR, tabela do Apendice D, fallback generico para codigos
+  ainda nao implementados). `ui_config_screen.c/h` (painel de engenharia) virou `ui_settings_screen`,
+  mesmo conteudo + data/hora (`HAL_RTC_SetTime/SetDate`, novo) + operador ativo + info (FW/device
+  id/status do SD). `ui_main_screen.c/h` removido (virou boot_screen + home_screen).
+- **Achado de arquitetura importante**: o "1 clique em IDLE inicia o ensaio" (prompt, secao 2.2) JA'
+  estava implementado corretamente em `inputTask` (`main.c`, `StartInputTask`, roda a 1ms) — NAO era
+  um atalho de bancada descartavel como a 1a leitura sugeria; e' a implementacao certa do requisito
+  de latencia <=2ms (a UI roda a 20ms, lenta demais). A IHM so' observa a transicao de estado
+  resultante para avancar `UiSession_t.cycle_number` (`ui_home_screen.c`, `ui_track_cycle()`) —
+  funciona tanto pelo clique fisico quanto pelo botao "Iniciar" da tela de novo ensaio, sem contar
+  duas vezes.
+- **Novo em `Control_Loop`**: `ControlLoop_GetCycleStats()` (so' repassa
+  `ControlCore_GetCycleStats(&s_control.cc)` — nenhuma mudanca de comportamento de PID/maquina de
+  estados, so' expoe o que ja' existia para quem nao tem acesso ao `ControlCore_t` interno).
+- **`fw_version.h`** (`Core/Common/Inc`, novo): `FIRMWARE_VERSION`/`DEVICE_ID` — 1a fonte real
+  desses dados (antes so' preenchidos por teste de host com valor fixo); `StorageFormat_RecInfo_t.
+  last_calibration` continua zerado (workflow de calibracao ainda nao existe).
+- **`main.c`**: HUD cru removido (`s_ctrl_arc`/`s_ctrl_label_*`/`s_state_names`/`format_1dp`/
+  `ARC_SETPOINT_MAX_MMHG`), substituido por `HMI_Init()`/`HMI_Update()` atras do mesmo
+  `BRINGUP_ENABLE_CONTROL` que ja' guardava `ControlLoop_Init()` (a IHM chama
+  `ControlLoop_StartInflation()`/`GetCycleStats()`/`GetLastError()`, precisa de Control_Loop
+  inicializado). Com `BRINGUP_ENABLE_CONTROL=0` mantem so' um arco de teste minimo (bring-up isolado
+  de display/encoder sem controle).
+- **Fora de escopo nesta entrega** (ver plano): streaming da animacao de boot do SD (Apendice B —
+  formato `.anim`, `tools/make_bootanim.py`); deteccao nova de E005-E014 (SD/RTC/EEPROM/USB/
+  watchdog) em outros modulos — a IHM so' consome o que ja' existe; brilho/volume (backlight e' GPIO
+  liga/desliga, sem PWM); apps de PC/USB.
+- Build Debug limpo, zero warnings sob `-Wextra -Wconversion -Wshadow -Wundef -Wdouble-promotion
+  -Wformat=2 -Werror` (ja' aplicado a `Core/App` via `CMakeLists.txt`). FLASH subiu de ~464KB para
+  ~584KB (+120KB, esperado — bastante tela LVGL nova); DTCM 88,2% (+376B, estavel).
+- **NUNCA testada em hardware** — pendente checklist de bancada: navegacao completa por
+  encoder (girar/clique/clique longo) em todas as telas; clique fisico em IDLE inicia o ensaio;
+  popup de resultado some sozinho/por clique e o `.rec`/`index.csv` aparece no cartao com dados
+  reais (nao mais so' "Teste de bancada #N"); popup de erro forcando E001-E004; ajuste de data/hora
+  persiste apos reset; teste de vazamento da tela de ajustes NAO dispara o popup de resultado
+  (supressao deliberada, ver comentario em `hmi_ui.c`).
+
+## Correcao de escopo da IHM + diagnostico de PID (2026-10-14)
+
+Usuario revisou o prompt do projeto e observou que a tela de Ajustes (acima) portava o painel de
+ENGENHARIA inteiro (ganhos PID crus, offset/escala do sensor, PWM manual livre, toggle solto de
+V1/V2/V3) — o prompt e' explicito que isso nao pertence ao nivel USER da IHM ("Nenhuma variavel de
+controle, calibracao ou ajuste de fabrica", secao 2.6); e' exclusivo do app DEV de PC via USB
+autenticado (Fase 7/9, nao construida ainda). Decisao do usuario: tirar da IHM agora (nao construir
+Fase 7/8/9 de passagem), sintonia fina do PID continua so' por bancada/depurador ate' o app de PC
+existir.
+
+- **`ui_settings_screen.c` reescrita de novo**: removido painel de engenharia inteiro (KP/KI/KD/FF/
+  Out min/max/I min/max/Ts/Offset/Scale/Banda/Tempo estab./PWM manual/V1,V2,V3 soltas). Mantido so'
+  o que o usuario listou como "ajuste necessario pro uso": setpoint (1 spinbox, bound por
+  `max_setpoint_mmhg` agora FIXO — nao editavel na IHM), unidade, buzzer (novo: liga/muta + testar),
+  calibracao de pressao (novo, ver abaixo), teste de vazamento (mantido — e' diagnostico de uso, nao
+  ajuste de engenharia), data/hora, operador ativo, informacoes.
+- **Calibracao de pressao (novo)**: reaproveita `PressureCore_CalibrateTwoPoint()`
+  (`Pressure_Core/Inc/pressure_core.h`) — ja' existia, pronta e testada no host (`test_pressure_core.c`),
+  nunca tinha UI. Fluxo: "Zerar (ar)" chama `ADC_Acq_ZeroNow()` (autocalibracao do zero atmosferico);
+  spinbox de "pressao de teste (%)" reaproveita `ControlLoop_SetManualActuators(pct, 1,1,1)` — ABRE
+  V3 (manometro de referencia) junto, de proposito, unica excecao ao "sem atuador manual na IHM"
+  porque a calibracao precisa disso; "Capturar P1/P2" le `ADC_Acq_GetDiagnostics()->raw_kpa -
+  atmospheric_kpa` e o valor que o usuario leu no manometro externo; "Calcular e salvar" roda os 2
+  pontos, grava em `s_cfg->sensor_cal` + `EEPROM_Storage_Save()` imediato (nao espera o "Voltar").
+- **Buzzer (novo)**: `UiSession_t.buzzer_enabled` (RAM apenas, de proposito — reseta "ligado" a cada
+  boot, mais seguro pra' um alarme medico que nao fica mudo pra' sempre por esquecimento). Popups de
+  resultado/erro agora TOCAM som de verdade (antes nao tocavam nada) — prompt secao 4 pede tom no
+  boot/conclusao/erro; `Buzzer_Beep()` e' sincrono (`osDelay`), bloqueia uiTask ~100-300ms por bipe,
+  aceitavel pra' tom curto.
+- **Confirmado, sem mudanca de codigo necessaria** (duvidas do usuario que ja' estavam resolvidas):
+  calibracao de offset/linearidade do ADC roda no boot (`ADC_Acq_Init()` chama
+  `HAL_ADCEx_Calibration_Start(hadc, ADC_CALIB_OFFSET_LINEARITY, ...)`); valvulas V1/V2 ja' ficam
+  ABERTAS no power-up (NA por hardware + `Valve_InitGpio()`/`ControlLoop_Init()` confirmam) —
+  atmosfera alcanca o sensor pelo caminho principal desde o boot, sem acao extra.
+- **Diagnostico de PID (novo, `ControlCore_PidDiag_t` em control_core.h)**: achado do usuario em
+  bancada — "a bomba enche muito devagar e quase nunca chega ao setpoint, sempre fica abaixo".
+  Confirmado que NAO e' bug: `test/host/run.sh` (`control_core: OK`) mostra que o PROPRIO simulador
+  (`sim_plant.c`), com os MESMOS ganhos atuais, alcanca o setpoint normalmente (overshoot 1.8-11.4
+  mmHg nos dois casos de teste) — ou seja, o modelo de bomba do simulador nao bate com a bomba real
+  (vazao/curva PWM diferente), nao um erro de implementacao do PID. Em vez de adivinhar ganhos novos
+  as cegas, `run_pid_iteration()` (control_core.c) agora preenche `cc->pid_diag` a cada passo:
+  `error_mmhg`, `p_term_kpa`, `i_term_kpa` (integral ja' com clamp), `d_term_kpa`, `ff_term_kpa`,
+  `output_kpa` (soma antes de dividir por `out_max`), `pump_power_pid` (o que o PID pediu, saturado em
+  [0,1]) vs `pump_power_final` (o que realmente foi pro PWM, depois do piso de 30%/alivio),
+  `floor_applied`/`relief_active`. Exposto via `ControlCore_GetPidDiag()` ->
+  `ControlLoop_GetPidDiag()` -> global `g_control_pid_diag` (Live Watch, atualizado a 1ms em
+  `StartControlTask`, mesmo padrao de `g_control_last_error`/`g_control_jitter_us`). **Proximo passo
+  de bancada**: rodar um ensaio, ler `g_control_pid_diag` durante INFLATING — se `pump_power_pid` e
+  `pump_power_final` ficarem baixos com `error_mmhg` grande por muito tempo, o ganho integral
+  (`Ki`/`i_max`) provavelmente esta' baixo demais pro pneumatico real (nunca acumula o suficiente pra'
+  vencer o que quer que esteja segurando a pressao); se `pump_power_final` ficar sistematicamente MUITO
+  menor que `pump_power_pid`, o piso/alivio esta' cortando demais.
+- Build Debug limpo do zero (`-Wextra -Wconversion -Wshadow -Wformat=2 -Werror`), testes de host
+  passando (`control_core: OK` confirma que os campos novos de diagnostico nao mudaram nenhum
+  comportamento). FLASH ~583KB, **DTCM subiu pra' 91,4%** (de 88,2%) — acompanhar; ainda compila/linka
+  sem estourar a regiao, mas a margem esta' ficando pequena (~11 KB livres de 128 KB). Nao investigado
+  a fundo de onde exatamente vieram os ~4 KB a mais desta rodada (nenhum global novo e' grande o
+  bastante sozinho pra' explicar — provavelmente soma de varias mudancas pequenas); se a margem
+  continuar caindo, proxima sessao vale medir com `arm-none-eabi-size -A` antes/depois de cada mudanca
+  em vez de so' no final.
+- **NUNCA testada em hardware.**
+
+### MemManage_Handler ao abrir Ajustes — bug de array, nao falta de memoria (2026-10-14)
+
+1o teste em bancada apos a reescrita acima: `MemManage_Handler` disparava sempre que o usuario
+abria a tela de Ajustes (Call Stack: `ui_settings_event_cb -> UI_SettingsScreen_Show ->
+HMI_EncoderGroup_Load -> lv_group_add_obj -> lv_group_remove_obj -> lv_obj_get_group`). DTCM
+estava em 91,4% na hora, levantando suspeita de esgotamento de heap do LVGL — **descartado**:
+`g_lv_mem` (Live Watch) mostrou `used_pct=20%`, `free_biggest_size=49380` (48 KB livres
+contiguos), `frag_pct=3%` — heap do LVGL saudavel.
+
+Causa real: `UI_SETTINGS_FOCUSABLE_COUNT` estava `19`, mas `UI_SettingsScreen_Show()` escreve 20
+itens em `focusables[i++] = ...` (contagem apos a reescrita da tela cresceu de 19 ->20 e a
+constante nao acompanhou). `lv_obj_t * focusables[19]` e' array LOCAL (pilha da uiTask); a 20a
+escrita (`s_btn_back`) saiu do array, corrompendo a pilha bem ali — `HMI_EncoderGroup_Load()`
+depois leu esse ponteiro corrompido de volta como se fosse um `lv_obj_t*` valido, e
+`lv_obj_get_group()` tentou desreferenciar lixo. Fix: `UI_SETTINGS_FOCUSABLE_COUNT = 20`,
+comentario novo no define lembrando de conferir a contagem (`grep -c` sugerido) sempre que um
+item for adicionado/removido do grupo desta tela. As outras 3 telas (home/menu/new_test)
+conferidas e já batiam certo (array declarado == atribuicoes).
+
+### `out_max=1000` — causa raiz real do "nunca alcanca o setpoint" (2026-10-14)
+
+Apos o fix do crash acima, usuario testou de novo e reportou `g_control_pid_diag` em bancada:
+`ff_term_kpa` sempre ~20 (constante — esperado, so' depende do setpoint), `pump_power_final`
+reportado preso em ~0.3 num teste e em 0.0223 (2,2%) noutro, "o PID so' atua perto do setpoint,
+diminuindo ainda mais a potencia". Com os ganhos reais expandidos no Live Watch
+(`g_bringup_sys_cfg.pid`: kp=0.8 ki=0.015 kd=0.15 ff=1.5 out_min=0 out_max=1000 i_min=-8 i_max=8)
+a conta fechou: todos os termos do PID sao calculados em kPa (`ff_term=ff*setpoint_kpa`,
+`p_term=kp*erro_kpa`, `i_min/i_max=+-8` ja' em kPa) — a soma (`output_kpa`) fica tipicamente
+entre ~20 e ~45 kPa, mas dividir por `out_max=1000` esmagava isso pra' ~0,02-0,05 sempre — o PID
+ficava praticamente inerte; so' o piso de partida (`CONTROL_CORE_PUMP_MIN_EFFECTIVE=0.30`,
+control_core.c) dava alguma potencia real, e so' enquanto `error_mmhg > banda`; perto do setpoint
+o piso parava de valer e a saida "de verdade" do PID (~2%) assumia — exatamente o comportamento
+reportado. Nao era bug de implementacao nem "sintonia fina" — era erro de ESCALA de ~2 ordens de
+grandeza num unico parametro, hardcoded em `EEPROM_Storage_LoadDefaults()`
+(`eeprom_storage_io.c`) desde sempre como placeholder do simulador, nunca bench-verificado.
+
+- **Fix**: `out_max` 1000.0f -> 40.0f (mesma ordem de grandeza do `output_kpa` tipico). Ainda e'
+  so' um ponto de partida calculado, nao bench-verificado — proxima bancada deve observar
+  `g_control_pid_diag` de novo com esse valor.
+- `EEPROM_STORAGE_LAYOUT_VERSION` 0x0002 -> 0x0003 — achado: o caminho de bring-up ativo chama
+  `EEPROM_Storage_LoadDefaults()` incondicionalmente a cada boot (main.c ~linha 542), nunca
+  `EEPROM_Storage_Load()`, entao o fix do default ja' vale no proximo boot sozinho; o bump de
+  versao e' pro caminho de producao (ainda morto) nao carregar um blob salvo com o valor errado.
+- Build limpo, `test/host/run.sh` (`control_core: OK`) sem mudanca — o teste de host usa seus
+  proprios parametros fixos, nao `EEPROM_Storage_LoadDefaults()`.
+
+### Fase 7.1 — framing do protocolo USB (COBS+CRC32+frame+dispatch), sem hardware ainda (2026-10-14)
+
+Inicio da Fase 7 (protocolo USB, Apendice A). Levantamento antes de codar: o `.ioc` so' tem o
+periferico cru (`MX_USB_OTG_HS_PCD_Init`/`MX_USB_OTG_HS_HCD_Init`, dual-role Device+Host no PHY FS
+embutido — ver `Docs/dev/hardware.md` H6/H7, ja' resolvido: implementar so' o papel Device/CDC nas
+Fases 7-9); **nenhum middleware `USB_DEVICE`/CDC existe no repositorio** (sem pasta `USB_DEVICE/`,
+sem `Middlewares/ST/STM32_USB_Device_Library`, sem `usbd_cdc_if.c`). `StartUsbProtoTask()` em
+`main.c` continua stub (`for(;;) osDelay(100);`, sem guarda `#if`).
+
+Decisao de escopo (ver plano salvo nesta sessao): Fase 7 e' grande demais pra uma entrega so' (igual
+Fase 5/Fase 6 foram divididas) — este primeiro pedaco (7.1) so' implementa a camada de framing, C
+puro, testavel no host, SEM tocar ainda no hardware USB de verdade (isso depende do usuario habilitar
+o middleware USB_DEVICE/CDC no CubeMX primeiro — "Passo 0" do plano, ainda pendente).
+
+Novo modulo `Core/Services/UsbProto/{Inc,Src}`, seguindo o precedente de `sha256.c` (C puro, sem
+HAL, host-testavel):
+
+- `cobs.h/.c` — COBS encode/decode (Cheshire & Baker) com checagem de overflow de saida e deteccao
+  de entrada malformada (nao confia que o buffer recebido do USB esteja bem formado).
+- `usb_crc32.h/.c` — CRC32 software, poly `0x04C11DB7`/init `0xFFFFFFFF`/sem reflect/sem XOR final
+  (= config de fabrica do periferico CRC do H7 alimentado byte a byte) — mesmo precedente do SHA256:
+  software agora, hardware e' otimizacao futura, so' confirmar que a config bate antes de trocar.
+  Validado contra o vetor de referencia publico do CRC-32/MPEG-2 (`"123456789"` -> `0x0376E6E7`).
+- `usb_proto_frame.h/.c` — monta/valida o cabecalho `VER|TYPE|SEQ|CMD|LEN|PAYLOAD|CRC32` do
+  Apendice A (sem o delimitador 0x00, isso fica pro leitor do fio).
+- `usb_proto_dispatch.h/.c` — tabela comando->handler; nesta entrega so' `CMD_HELLO` e
+  `CMD_GET_STATUS`, sem sessao/autenticacao (Fase 7.2). Todos os demais codigos do Apendice A ja'
+  ficam reservados como `#define` comentados com a sub-fase que vai implementa-los (7.2 auth, 7.3
+  comandos de controle, 7.4 telemetria, 7.5 arquivos, 7.6 parametros — destrava o ajuste fino de PID
+  que o usuario pediu pra deixar pra depois, ver auditoria de 2026-10 mais acima —, 7.7 modo manual,
+  7.8 calibracao via USB, 7.9 resto). `GET_STATUS` recebe os dados por snapshot injetado pelo
+  chamador (`UsbProtoStatusSnapshot_t`), sem incluir `main.h`/`SystemRuntime_t` direto — mesmo padrao
+  de injecao do `ControlLoop_Init()`.
+
+Testes de host novos (`test_cobs.c`, `test_usb_crc32.c`, `test_usb_proto_frame.c`,
+`test_usb_proto_dispatch.c`, adicionados a `test/host/run.sh`): roundtrip COBS com runs >254 bytes e
+zeros misturados, overflow/malformado, vetor de CRC conhecido, frame truncado/CRC corrompido/payload
+grande demais, HELLO/GET_STATUS com e sem snapshot disponivel. Todos passando. Build Debug completo
+(ARM, `-Wextra -Wconversion -Wshadow -Wformat=2 -Werror`) limpo depois de acrescentar
+`Core/Services/UsbProto/Inc` em `N_PRESSURE_INC_DIRS` (CMakeLists.txt) — o glob de fontes pega
+arquivo novo automaticamente, mas o include path e' uma lista explicita por modulo, precisou do
+acrescimo manual.
+
+### Fase 7.1 (continuacao) — integracao com o hardware real, nunca testada em bancada (2026-10-14)
+
+Usuario habilitou o middleware `USB_DEVICE` no `.ioc` e gerou ("Passo 0" do plano). Diff revisado
+antes de tocar em qualquer coisa:
+
+- `.ioc`: `USB_OTG_HS` saiu de dual-role (`OTG/Dual_Role_Device_FS`) para `Device_Only_FS`; novo IP
+  `USB_DEVICE` com `VirtualModeHS=Cdc_HS`. Faz sentido — o papel Host nunca ia ser implementado (ver
+  decisao em `hardware.md`), e o usuario aproveitou para simplificar o periferico pra Device puro em
+  vez de manter o dual-role inerte.
+- Consequencia em cascata, tudo coerente: `hal_hcd.c/.h` removidos (`HAL_HCD_MODULE_ENABLED` comentado
+  em `stm32h7xx_hal_conf.h`), os 3 handlers de IRQ do OTG_HS em `stm32h7xx_it.c` agora so' chamam
+  `HAL_PCD_IRQHandler` (antes faziam dispatch condicional PCD/HCD), `MX_USB_OTG_HS_HCD_Init()` e
+  `hhcd_USB_OTG_HS` desapareceram de `main.c`/`main.h`.
+- O handle `hpcd_USB_OTG_HS` e o MSP (`HAL_PCD_MspInit/MspDeInit` — clock HSI48, GPIO PA9
+  VBUS/PA10 ID/PA11-12 DM-DP, NVIC) saem de `stm32h7xx_hal_msp.c` e passam a viver em
+  `USB_DEVICE/Target/usbd_conf.c` — comportamento padrao do CubeMX quando o middleware USB_DEVICE
+  entra, nao uma perda de configuracao (conferido lado a lado, nada faltando).
+- Novos arquivos vendorizados: `USB_DEVICE/{App,Target}` (`usb_device.c`, `usbd_desc.c`,
+  `usbd_cdc_if.c`, `usbd_conf.c`) e `Middlewares/ST/STM32_USB_Device_Library/{Core,Class/CDC}`;
+  `cmake/stm32cubemx/CMakeLists.txt` ganhou os includes/sources/lib (`USB_Device_Library`) certos —
+  nada manual necessario ali (e' gerado). A classe e' CDC **HS** (sufixo `_HS` nas funcoes/buffers —
+  `CDC_Receive_HS`/`CDC_Transmit_HS`/`UserRxBufferHS`/`hUsbDeviceHS`), por causa do
+  `VirtualModeHS=Cdc_HS` escolhido no `.ioc` (o PHY continua Full-Speed embutido; "HS" aqui e' so' o
+  nome do IP `USB_OTG_HS`, nao a velocidade).
+- Achado aceito, nao corrigido: o CubeMX inseriu a chamada `MX_USB_DEVICE_Init()` (fora de marcador
+  USER CODE, portanto nao e' pra eu mexer) no **topo de `StartControlTask`**, nao de
+  `StartUsbProtoTask` — escolha dele de qual task roda o init pos-kernel do middleware, nao
+  configuravel por aqui. E' uma chamada unica antes do `for(;;)` da task (nao repete por iteracao),
+  entao nao afeta o jitter do controle — mas se algum dia isso incomodar, so' tem efeito se o
+  `.ioc` mudar a ordem/numero de tasks RTOS; nao vale a pena forcar via USER CODE.
+
+Integracao implementada (C/host-testavel onde possivel, resto em `Core/Src/main.c` e
+`USB_DEVICE/App/usbd_cdc_if.c` dentro de marcadores USER CODE):
+
+- `Core/Services/UsbProto/{Inc,Src}/usb_rx_ring.h/.c` (novo): ring buffer de bytes SPSC sem lock
+  (produtor = ISR via `CDC_Receive_HS`, consumidor = `StartUsbProtoTask`) — mesmo padrao "ISR so'
+  enfileira, task processa" do `storage_task`. C puro, testavel no host (`test_usb_rx_ring.c`:
+  roundtrip, pop com menos disponivel que o pedido, overflow descarta o excedente, wraparound do
+  indice circular). Capacidade 1024 bytes (potencia de 2, mascara em vez de modulo).
+- `usbd_cdc_if.c`, dentro de `USER CODE BEGIN 11` (`CDC_Receive_HS`): em vez de ecoar, copia os
+  bytes recebidos pro `g_usb_rx_ring` (`extern`, definido em `main.c`) ANTES de re-armar
+  `USBD_CDC_ReceivePacket` — tem que ser antes porque o CubeMX reusa o mesmo buffer
+  (`UserRxBufferHS`) pra proxima recepcao.
+- `main.c`: novo flag `BRINGUP_ENABLE_USB` (mesma filosofia dos outros `BRINGUP_ENABLE_*` — com a
+  flag em 0 a task volta a ser idle-loop). `StartUsbProtoTask` com a flag em 1: drena o ring buffer
+  byte a byte, acumula entre delimitadores `0x00`, roda `Cobs_Decode` -> `UsbProtoFrame_Parse`
+  (rejeita frames que nao sejam `TYPE_REQ`) -> monta `UsbProtoStatusSnapshot_t` a partir de
+  `g_control_runtime`/`g_rtc_status`/`g_storage_stats`/`g_control_last_error` ->
+  `UsbProtoDispatch_Handle` -> `UsbProtoFrame_Build` -> `Cobs_Encode` -> um unico
+  `CDC_Transmit_HS` (payload + delimitador `0x00` no MESMO buffer/chamada — duas chamadas separadas
+  arriscavam a segunda ser descartada com `USBD_BUSY` se a 1a transmissao ainda nao tivesse
+  terminado, quebrando o framing do lado do PC).
+  - Buffers estaticos dimensionados em 256 bytes (nao os 1024 do limite teorico do protocolo) —
+    suficiente para HELLO/GET_STATUS desta entrega; vai precisar crescer quando comandos de payload
+    grande (FS_READ/PARAM_*, Fase 7.5+) entrarem. DTCM esta' em 93,90% de uso (chegou a 91,38% so'
+    com a Fase 6) — motivo pra nao superdimensionar esses buffers antes de precisar de verdade.
+  - `cycle_number` do snapshot fica fixo em 0 — nada no projeto rastreia um contador de ciclo
+    hoje; nao e' bloqueante pro HELLO/GET_STATUS, mas precisa de uma fonte real antes da Fase 7.9
+    (`GET_DIAG`) ou de qualquer streaming que dependa disso.
+
+Build Debug ARM limpo (zero warnings) com os arquivos tocados; `test/host/run.sh` com o teste novo
+passando junto dos demais (11 suites).
+
+**Checkpoint de bancada: PASSOU (2026-10-14).** Novo script `tools/bench_usb_hello.py` (reimplementa
+COBS+CRC32 em Python, espelhando `cobs.c`/`usb_crc32.c` byte a byte, validado antes contra o vetor
+de referencia do CRC-32/MPEG-2 e um roundtrip COBS com zeros embutidos — ver mensagem da sessao).
+Rodado contra a placa real na porta COM virtual:
+
+```
+--> HELLO (seq=1)
+<-- status=OK protocol_version=1 device_id='myPRESSURE NP001' fw_version='0.6.0' role=USER
+--> GET_STATUS (seq=2)
+<-- status=OK system_state=1 pressure_mmhg=-114.8 setpoint_mmhg=40.0 rtc_valid=0 sd_mounted=1 active_error=0 cycle_number=0
+```
+
+Confirma de ponta a ponta: enlace fisico USB CDC (middleware `USB_DEVICE`, classe CDC HS) + ring
+buffer de recepcao (ISR -> `usbProtoTask`) + COBS decode + validacao de frame + CRC32 + dispatch +
+COBS encode + `CDC_Transmit_HS` + CRC32 verificado do lado do PC. HELLO devolveu `DEVICE_ID`/
+`FIRMWARE_VERSION` corretos (`fw_version.h`). GET_STATUS devolveu valores plausiveis para o estado
+atual do bring-up: `rtc_valid=0` (calendario ainda nao inicializado nesta bancada — consistente,
+nao e' bug do protocolo) e `sd_mounted=1` (cartao montado, bate com `g_storage_stats`).
+
+**Observacao fora do escopo do protocolo USB, registrada mas NAO investigada agora**:
+`pressure_mmhg=-114.8` e' fisicamente implausivel (fora da faixa esperada em repouso/atmosferica) —
+pode ser calibracao do ADC/EEPROM ainda no default de fabrica nesta bancada especifica, sensor
+desconectado, ou outra causa no caminho `ADC_Acq`/`Control_Core` ja existente antes desta fase; o
+papel do `GET_STATUS` aqui foi so' expor o valor que `g_control_runtime->pressure_display` ja' tinha
+no momento do request, nao calcula nada por conta propria. Investigar se/quando isso importar para
+o ensaio real (nao e' o foco desta sub-fase).
+
+Comandos alem de HELLO/GET_STATUS (autenticacao, controle, arquivos, parametros, modo manual,
+calibracao) continuam fora desta entrega — ver sub-fases 7.2-7.10 documentadas em
+`usb_proto_dispatch.h`. Fase 7.1 (framing + bring-up do CDC + 1o checkpoint de bancada) esta'
+**concluida**.
+
+### Fase 7.2 — Autenticacao USB (sessoes USER/DEV), nunca testada em hardware (2026-10-14)
+
+Implementa AUTH_CHALLENGE/AUTH_RESPONSE/AUTH_LOGOUT (Apendice A) — desafio-resposta
+HMAC-SHA256(chave_dev, nonce||serial) que eleva a sessao de USER a DEV. Nenhum comando de
+controle/parametros ainda existe (Fases 7.3+), entao nada *perigoso* e' alcancavel como DEV nesta
+entrega — o objetivo foi so' a mecanica de sessao em si, correta e testada.
+
+**Duas decisoes de design (documentadas e aceitas antes de implementar, ver plano desta sessao)**:
+1. **"serial" do Apendice A = UID de 96 bits do STM32H7** (`UID_BASE`, 12 bytes, fabrica, zero
+   provisionamento) — `DEVICE_ID` (`fw_version.h`) e' nome de produto, igual em toda unidade, nao
+   serve pra vincular o HMAC a UM aparelho. **Mudou o payload do HELLO** (Fase 7.1): 31 -> 43 bytes
+   (12 bytes de serial acrescentados no fim). `tools/bench_usb_hello.py` e os testes de host
+   atualizados junto.
+2. **Nonce por software** (`PortDWT_GetCycles()` + `HAL_GetTick()` + contador, mistura tipo LCG) —
+   periferico `RNG` nao habilitado no `.ioc`. Mesmo precedente de `usb_crc32.c`/`sha256.c` (software
+   agora, hardware e' otimizacao futura). Nao e' CSPRNG — documentado no codigo
+   (`fill_weak_random_nonce`, `main.c`), proporcional a' postura de seguranca do resto do projeto
+   (chave em EEPROM I2C comum, sem elemento seguro).
+
+Novos modulos (C puro, host-testavel, mesmo padrao de `sha256.c`):
+- `hmac_sha256.h/.c` — HMAC-SHA256 (RFC 2104) sobre `Sha256_*`. Testado contra os vetores do RFC
+  4231 (casos 1, 2, e o de chave >64B que forca hashear a chave primeiro).
+- `usb_proto_auth.h/.c` — sessao USER/DEV: papel atual, nonce pendente + instante de emissao
+  (expira em 10 s), comparacao de HMAC em tempo constante, nonce de uso unico (consumido em
+  sucesso OU falha — sem retry sem challenge novo). `dev_key_valid=0` -> `AUTH_RESPONSE` falha
+  sempre (fail-safe, nunca serve "quase certo"). `now_ms`/bytes do nonce injetados pelo chamador —
+  sem HAL, testavel no host com vetores sinteticos.
+
+Mudancas em modulos existentes:
+- `usb_proto_dispatch.h/.c`: `UsbProtoRole_t`; `UsbProtoDispatchCtx_t` ganhou `device_serial`,
+  `auth`, `now_ms`, `challenge_random`. 3 handlers novos com checagem de papel (CHALLENGE/RESPONSE
+  so' em sessao USER, LOGOUT so' em sessao DEV — `SEM_PERMISSAO` senao, igual ao resto do Apendice
+  A). `handle_hello()` agora reporta o papel real (antes hardcoded 0=USER) e anexa o serial.
+- `eeprom_storage.h`: nova regiao (0x0500+) para a chave DEV, com magic/versao PROPRIOS —
+  independente do magic/versao de `SystemConfig_t` (a chave nao pode se perder so' porque o layout
+  de config mudou de versao). `eeprom_storage_io.h/.c`:
+  `EEPROM_Storage_{Load,Save}DevKey()`.
+- `main.c`: le o UID 1x no boot (`read_device_uid`, registrador de CPU, sem HAL); carrega a chave
+  da EEPROM (`g_dev_key`/`g_dev_key_valid`) — **1a vez que o bring-up fala com a EEPROM I2C de
+  verdade** (antes, so' `EEPROM_Storage_LoadDefaults()` em RAM, sem tocar hardware; nunca testado
+  em bancada ainda); inicializa `g_usb_auth_session`. Novo flag `BRINGUP_PROVISION_DEV_KEY` (0 por
+  padrao) — liga 1x pra gravar a chave de `dev_key_secret.h` (nunca comitado — ver
+  `.gitignore`/`dev_key_secret.h.example`/`tools/gen_dev_key.py`) na EEPROM, depois volta a 0.
+  `StartUsbProtoTask` preenche o `ctx` novo e, se a resposta vier `SEM_PERMISSAO` ou
+  `NAO_AUTENTICADO`, grava uma linha de auditoria via `StorageTask_LogAudit()` (regra do Apendice A:
+  "comando com papel insuficiente... o evento e' gravado no log"). `seq` desse log e' um contador
+  local em RAM (placeholder) — nao e' a sequencia oficial do log encadeado entre reboots; revisitar
+  quando essa sequencia oficial existir (nenhum outro lugar do projeto chama `StorageTask_Log*()`
+  ainda, entao nao ha' uma convencao estabelecida para quebrar).
+
+Testes de host novos/atualizados: `test_hmac_sha256.c`, `test_usb_proto_auth.c` (challenge->response
+valido eleva a DEV, HMAC errado rejeita, nonce expirado rejeita, nonce consumido nao repete, sem
+chave sempre falha, logout sem sessao DEV rejeita), `test_usb_proto_dispatch.c` (HELLO com serial,
+fluxo completo HELLO->CHALLENGE->RESPONSE->HELLO(role=DEV)->LOGOUT via dispatch, papel incorreto em
+CHALLENGE/RESPONSE/LOGOUT). 13 suites de host passando. Build Debug ARM limpo (zero warnings) —
+**achado de processo**: precisou reconfigurar o CMake (`cmake --preset Debug`) depois de criar os
+`.c` novos antes de religar — o link falhou com "undefined reference" na 1a tentativa porque o
+`file(GLOB_RECURSE ...)` so' roda na configuracao, nao no build incremental (ja documentado no
+comentario do `CMakeLists.txt`, mas vale reforcar: sempre reconfigurar apos novo arquivo). DTCM em
+93,98% (vs. 93,90% ao fim da Fase 7.1) — folga ficando curta, buffers novos tem que continuar
+enxutos.
+
+Tambem corrigido durante o desenvolvimento (achado no proprio processo, nao pelo usuario): o
+primeiro `test_hmac_sha256.c` tinha o tamanho de 2 dos 3 vetores do RFC 4231 errado por contagem
+manual (29/56 em vez de 28/54) — lia 1-2 bytes depois do fim do literal C (UB silenciosa,
+nao-deterministica entre builds). Trocado por `strlen()` nos literais de teste pra eliminar essa
+classe de erro.
+
+**Ainda NAO testado em hardware** — depende de bancada com `BRINGUP_PROVISION_DEV_KEY=1` por uma
+vez (grava a chave gerada por `tools/gen_dev_key.py` na EEPROM) antes de rodar
+`tools/bench_usb_hello.py --cmd auth --dev-key-hex <chave>`. `AUTH_EXPIROU` (expirar sessao DEV por
+inatividade via evento assincrono) fica pra Fase 7.4, quando o mecanismo de EVT existir — por
+enquanto a sessao DEV so' cai de volta a USER por `AUTH_LOGOUT` explicito ou reboot.
+
+### Fase 7.2 (achado de bancada) — EEPROM I2C travando o boot em loop de reset (2026-10)
+
+1o teste em hardware: com `BRINGUP_ENABLE_USB=1` e `BRINGUP_PROVISION_DEV_KEY=1`, a placa ficou
+reiniciando sozinha. Suspeita (nao confirmada ainda — sem osciloscopio/logic analyzer no barramento
+ate' agora): `EEPROM_Storage_Init()`/`EEPROM_Storage_{Load,Save}DevKey()` rodam dentro de "USER CODE
+BEGIN RTOS_QUEUES" — depois de `osKernelInitialize()`, mas ANTES de qualquer `osThreadNew()` e de
+`osKernelStart()`. Se `HAL_I2C_Mem_Read`/`Mem_Write` travarem (barramento sem a EEPROM respondendo,
+ou travado por falta de pull-up/fiacao) por mais tempo do que o IWDG tolera (~8,2s,
+`hiwdg1.Init.Reload=4095`/`Prescaler=64`), main() nunca chega a `osKernelStart()` — nenhuma task
+(inclusive `safetyTask`, que refresca o IWDG) chega a rodar, e o watchdog reseta o chip. Essa e' a
+MESMA familia de bug ja' documentada uma vez neste arquivo pra' `StorageTask_InitQueue()` (algo
+rodando fora de hora, antes do kernel estar de pe', deixando `HAL_Delay()`/`uwTick` presos) — ainda
+nao confirmado se e' exatamente isso ou um problema real de hardware no barramento/EEPROM (nunca
+testado antes desta sessao, nem no caminho de producao "morto" que ja' chamava
+`EEPROM_Storage_Init()` ha' mais tempo).
+
+**Mitigacao aplicada**: todo o caminho que toca `EEPROM_Storage_Init()`/`LoadDevKey()`/`SaveDevKey()`
+foi isolado atras de uma flag PROPRIA, `BRINGUP_ENABLE_EEPROM_DEVKEY` (default **0**) — separada de
+`BRINGUP_ENABLE_USB` e de `BRINGUP_PROVISION_DEV_KEY` (que agora exige a nova flag tambem). Com
+`BRINGUP_ENABLE_EEPROM_DEVKEY=0`, `g_dev_key_valid` fica sempre 0 e **nenhum I2C e' tocado** por esse
+caminho — o resto do protocolo USB (HELLO/GET_STATUS/framing da Fase 7.1, e a mecanica de sessao da
+Fase 7.2: `AUTH_RESPONSE` so' nega com `NAO_AUTENTICADO`, sem travar nada) continua testavel
+normalmente. `BRINGUP_PROVISION_DEV_KEY` tambem foi devolvido a 0.
+
+**Pendente antes de religar `BRINGUP_ENABLE_EEPROM_DEVKEY`**: confirmar em bancada que o barramento
+I2C1/EEPROM respondem de verdade (scan de endereco, osciloscopio/logic analyzer em SCL/SDA, ou um
+teste isolado so' do I2C fora do caminho de boot) — igual ao resto do bring-up deste projeto, "uma
+peca de cada vez" antes de reativar.
+
+## LSE — causa provavel encontrada (2026-10-17): CSS do LSE armado durante a partida do cristal
+
+- **Sintoma**: com LSE ligado no CubeMX (drive High + CSS do LSE), a placa nao liga / fica em loop de
+  reset. Mesmo padrao das duas falhas anteriores (Low e Medium High), atribuidas ao cristal.
+- **Causa (software)**: `SystemClock_Config()` liga o LSE e, no fim, `HAL_RCCEx_EnableLSECSS()`.
+  Depois, `MX_RTC_Init()` -> `HAL_RTC_MspInit()` -> `HAL_RCCEx_PeriphCLKConfig(RTC=LSE)`: como o
+  `RTCSEL` do dominio de backup estava em LSI (ou vazio), a HAL reseta o dominio de backup e
+  restaura o `RCC_BDCR` inteiro de uma vez — `LSEON` **e** `LSECSSON` juntos, com o cristal parado.
+  O RM0468 exige `LSECSSON` so' depois de `LSERDY`. O CSS acusa falha (`LSECSSD`), que fica travada
+  ate' outro reset do dominio: o RTC fica sem clock, `HAL_RTC_Init()` estoura o timeout,
+  `Error_Handler()`, IWDG reseta — e como `RTCSEL` ja' ficou em LSE, o proximo boot nao reseta o
+  dominio e repete a falha para sempre. Nas duas tentativas anteriores o CubeMX tambem tinha ligado
+  o CSS do LSE junto (ver §2.3).
+- **Corrigido (sobrevive a regeneracao, so' USER CODE + Services)**:
+  - `RtcService_ConfigureClock()` substitui o `PeriphCLKConfig(RTC)` gerado (USER CODE
+    `RTC_MspInit 0` + `return`): troca de fonte so' quando precisa, LSE partido **sem** CSS,
+    espera de ate' 3 s alimentando o IWDG, CSS religado so' depois de `LSERDY`; se o cristal nao
+    partir, cai para LSI e o boot segue (`RtcService_CheckAtBoot` acusa `LSE_NOT_READY`).
+    O registro de HardFault (BKP0..12) e' preservado quando o reset do dominio e' inevitavel.
+  - `RtcService_RecoverLseFailureEarly()` antes de `SystemClock_Config()`: limpa um `LSECSSD`
+    travado (destrava placas que ja' ficaram presas no loop).
+  - `NMI_Handler` (CSS do HSE / ECC): `Error_Handler()` (bomba off, valvulas abertas) no lugar do
+    `while(1)` com os atuadores no ultimo estado.
+  - Diagnostico: `g_rtc_clock_info` (Live Watch) — `lse_ok`, `lse_startup_ms`,
+    `lse_css_failure_seen`, `backup_domain_reset`, `bdcr_at_entry`.
+- **Risco que continua**: com o LSE ligado no CubeMX, se o cristal realmente nao oscilar,
+  `SystemClock_Config()` (gerado) espera 5 s e cai em `Error_Handler()` antes do IWDG. Para eliminar
+  isso de vez: CubeMX com LSE desligado e RTC em LSI — o `RtcService_ConfigureClock()` liga o LSE
+  sozinho com fallback, independente do que o CubeMX pedir.
+- **Pendente de bancada**: confirmar com `g_rtc_clock_info` apos power-on frio.
+
+## HardFault no power-on / resets repetidos ao energizar — ECC da AXI SRAM nao inicializado (2026-10-17)
+
+- **Evidencia (Fault_Manager, Live Watch)**: `g_boot_rsr = 0x01420000` (SFTRSTF+PINRSTF+CPURSTF =
+  reset por software do Fault_Manager), `g_boot_fault_pending = 1`, `cfsr = 0x400` (IMPRECISERR),
+  `hfsr = 0x40000000` (FORCED), `pc = 0x08023916` = instrucao logo apos o `DSB` de
+  `SCB_CleanDCache_by_Addr()` dentro de `disp_flush()` (lv_port_disp.c), `r12 = 0xA5A5A5A5`
+  (pilha de tarefa FreeRTOS).
+- **Causa**: a AXI SRAM (RAM_D1) tem ECC por palavra de 64 bits, aleatorio no power-on.
+  `.dma_buffer` (buf_1/buf_2 do LVGL, buffer do ADC) e `.fatfs_dma_buffer` sao NOLOAD e nunca eram
+  escritos inteiros; as escritas de 16 bits do LVGL (RGB565) viram leitura-modifica-escrita, a
+  leitura acha ECC invalido -> erro de barramento imprecise, acusado na barreira seguinte. O reset
+  por software preserva a RAM, entao cada tentativa deixava mais palavras validas ate' a aplicacao
+  "pegar" — os "varios resets antes de iniciar". Com depurador quase nunca aparecia (RAM ja'
+  inicializada pelas sessoes anteriores). E' tambem a causa provavel do IMPRECISERR intermitente
+  em `circ_calc_aa4` registrado como problema aberto (DISDEFWBUF nao o tornava preciso porque o
+  MPU region 0 cobre todo o mapa — DISDEFWBUF so' vale para o mapa padrao).
+- **Corrigido**: `PortRamEcc_InitAxiSram()` (Core/Bsp/Port) como primeira linha de `main()` (USER
+  CODE 1): zera toda a AXI SRAM com `STRD` alinhado (palavra de ECC inteira), tamanho lido de
+  `FLASH_OPTSR2_CUR.TCM_AXI_SHARED`. Confirmado no disassembly Debug e Release (`strd`, sem
+  `memset`). D2/D3 SRAM nao sao usadas hoje — inicializar tambem se passarem a ser.
+- **Pendente de bancada**: power-on frio varias vezes; `g_boot_rsr` deve mostrar PORRSTF (bit 23)
+  e `g_boot_fault_pending = 0`.
+- **Atualizacao (mesmo dia)**: so' a AXI SRAM nao bastou — o HardFault continuou (PC no laco de
+  `SCB_CleanDCache_by_Addr` do `disp_flush`, CFSR=0x400). Com `DIAG_PRECISE_BUSFAULT=1` (AXI SRAM e
+  perifericos strongly-ordered via MPU) o fault **continuou IMPRECISERR**, provando que a escrita
+  ruim nao ia para AXI nem perifericos. Resta a DTCM (ECC de 32 bits): o trecho `_end`..`_estack`
+  (~11,5 KB: heap do newlib + MSP, a pilha de TODAS as ISRs depois do scheduler) nunca era escrito.
+  Uma ISR gravando byte/meia-palavra ali dispara o erro, atribuido ao codigo interrompido (o laco
+  longo do flush). Corrigido com `PortRamEcc_InitDtcmFree()` logo apos `PortRamEcc_InitAxiSram()`.
+  `DIAG_PRECISE_BUSFAULT` voltou a 0 (fica no codigo para a proxima investigacao). Pendente de
+  bancada.
+- **Atualizacao 2 (mesmo dia)**: com AXI e DTCM inicializadas o fault continuou, SEMPRE dentro do
+  laco de `SCB_CleanDCache_by_Addr()` do `disp_flush`, em iteracao aleatoria (`r3` = endereco do
+  buffer `0x240009C0`/`0x24000A60` ou tamanho restante). A D-Cache nunca e' ligada neste projeto
+  (so' `SCB_EnableICache()`), mas nunca era invalidada: apos o power-on tags/valido/sujo/dados sao
+  indefinidos e a manutencao por endereco operava sobre lixo (linha aleatoria "suja" casando com o
+  endereco -> write-back -> erro imprecise). Corrigido com `SCB_InvalidateDCache()` no inicio de
+  `main()` (USER CODE 1). As inicializacoes de ECC (AXI/DTCM) continuam — sao exigencia do H7 de
+  qualquer forma. Pendente de bancada.
+
+## Atuadores ligados durante o reset / zero do sensor errado no boot (2026-10-17)
+
+- **Sintoma**: bomba, valvulas, backlight e buzzer ligam ao energizar, durante a gravacao e com o
+  botao de RESET **segurado**, ate' a aplicacao assumir. Com o tubo conectado, a bomba a 100% nesse
+  intervalo deixa pre-pressao, que virava o zero do sensor (todas as medidas seguintes erradas).
+- **Diagnostico**: com NRST em nivel baixo nenhum codigo roda e todos os GPIOs do H7 ficam em alta
+  impedancia sem pull interno (os de interesse nao sao pinos de JTAG). Atuadores ligando nesse
+  estado = **problema de hardware** (pull-down nao efetivo, driver com logica invertida, ou entrada
+  do driver puxada para cima por outro caminho). Firmware/.ioc nao age durante o reset. Testado
+  pelo usuario: voltar os pinos para push-pull sem pull nao mudou nada (open-drain + pull-up, que
+  estava no .ioc, so' piorava: nivel "alto" virava divisor fraco com o pull-down externo).
+- **Mitigacoes de firmware**:
+  - `PressureCore`: leitura abaixo do zero (margem 0,1 kPa) faz o zero descer rapido ate' a
+    leitura (`PRESSURE_ATM_DOWN_*`, com trava ate' alcancar). O zero do boot alto se corrige
+    sozinho assim que a pressao escoa pelas valvulas abertas em IDLE. Teste de host novo
+    (`test_baseline_recovers_from_prepressurized_boot`).
+  - Backlight: `ST7789_Init()` preenche a RAM de video de preto antes do Display ON; o backlight so'
+    acende depois (`ST7789_SetBacklight()` em `lv_port_disp_init()`), nao mais em `main()` antes do
+    display existir.
+- **Pendente (hardware)**: medir, com RESET segurado, a tensao no pino do MCU e na entrada de cada
+  driver.
+- **Causa confirmada (usuario, 2026-10-17)**: os atuadores passam por um buffer **SN74HCT541**.
+  Com o MCU em reset (GPIOs em alta impedancia) a entrada do 541 ficava flutuando (~0,48 V medido)
+  e a saida ia a nivel alto. Pull-down adicionado na entrada da bomba (placa rev 1): bomba nao
+  liga mais no power-on. Valvulas/backlight/buzzer ainda piscam brevemente — aceito ate' a proxima
+  revisao de hardware.
+
+## Data/hora voltava ao padrao a cada boot (2026-10-17)
+
+- **Causa (bug da correcao do LSE do mesmo dia)**: quando o LSE nao partia em 3 s e o RTC ficava em
+  LSI, `RtcService_ConfigureClock()` via no boot seguinte "RTCSEL=LSI != LSE" e resetava o dominio
+  de backup para tentar o LSE de novo — apagando calendario e o magic de BKP13, e `MX_RTC_Init()`
+  regravava a data padrao. Em loop, a cada boot.
+- **Corrigido**: testa o LSE primeiro SEM resetar nada; reseta o dominio so' quando e' obrigatorio
+  (trocar LSI->LSE com o LSE comprovadamente pronto, RTCSEL preso em outra fonte, ou LSECSSD
+  travado); nesses casos TR/DR sao salvos antes e regravados por
+  `RtcService_RestoreSavedCalendar()` em `MX_RTC_Init()` (USER CODE Check_RTC_BKUP).
+- **Limite fisico**: se o equipamento for desligado da energia sem bateria boa no VBAT, o dominio de
+  backup inteiro perde alimentacao e a hora se perde de qualquer forma; com o RTC em LSI (LSE sem
+  partir) o relogio tambem para enquanto o equipamento esta' desligado (LSI nao roda no VBAT).
+
+## Valvula de alivio: pulso + acomodacao (2026-10-17)
+
+- **Achado de bancada**: ao abrir a valvula perto do setpoint a pressao lida caia ~20 mmHg e, ao
+  fechar, subia rapido passando do setpoint de novo. Causa provavel: queda LOCAL na tubulacao perto
+  da valvula/sensor (o manguito, maior, continua cheio) — o controle reagia a essa leitura
+  transitoria (fechava cedo, o PID ligava a bomba, a reequalizacao passava do alvo).
+- **Mudanca (control_core.c)**: alivio por pulso de duracao proporcional ao excesso
+  (`RELIEF_MS_PER_MMHG` = 10 ms/mmHg, 20..150 ms), abre com +1/2 banda (pressao filtrada), depois
+  `RELIEF_SETTLE_MS` = 400 ms de acomodacao antes de reavaliar. Durante pulso+acomodacao: bomba
+  off, integrador do PID congelado, STABILIZING nao volta para INFLATING e NAO avanca para
+  STABILIZED (so' estabiliza com |erro| <= banda fora da janela — bug encontrado pelo teste
+  cycle_stats ao introduzir a janela).
+- **Testes**: limites provisorios de overshoot do simulador afrouxados (12 -> 30 mmHg manguito
+  pequeno, 2 -> 6 mmHg grande) por decisao do usuario: a valvula do modelo sangra devagar e nao
+  representa a real; o valor que vale vem da bancada. cycle_stats agora aciona o pedal 500 ms
+  depois de STABILIZED (antes era um tick fixo).
+
+## Bancada 2026-10-21 — EEPROM/chave DEV, RTC no power-cycle, DTCM
+
+### EEPROM travando o boot: tick do HAL parado + falta de pull-up no I2C1 (RESOLVIDO, validado em bancada)
+
+Fecha o achado "Fase 7.2 (achado de bancada)" acima. Eram **dois** problemas sobrepostos:
+
+1. **Software — tick do HAL parado antes do `osKernelStart()`.** O FreeRTOS deixa o BASEPRI
+   mascarando as IRQs de prioridade >= `configMAX_SYSCALL_INTERRUPT_PRIORITY` (5) desde a criacao
+   do 1o objeto do kernel (aqui, a fila de `StorageTask_InitQueue()` em `RTOS_QUEUES`) ate' o
+   escalonador partir — comportamento documentado do port, de proposito. O TIM6 (base de tempo do
+   HAL, prioridade 15) fica mascarado junto: `uwTick` para. Com isso `HAL_Delay()` (ciclo de escrita
+   da EEPROM) e os timeouts de `HAL_I2C_Mem_*` nunca expiram — qualquer falha de I2C virava loop
+   infinito e o IWDG resetava em ~8,2 s. Confirmado pelo call stack de bancada (preso em
+   `I2C_WaitOnTXISFlagUntilTimeout`). E' tambem a causa, nunca isolada na epoca, do bug antigo do
+   `StorageTask_InitQueue()` travando `HAL_Delay()` dentro de `ST7789_Init()`.
+   **Correcao**: carga/provisionamento da chave DEV movidos para o fim do ramo de bring-up de
+   `USER CODE 2` (antes de `osKernelInitialize()`, com o tick rodando). Nova variavel de diagnostico
+   `g_eeprom_i2c_error` (= `hi2c1.ErrorCode` apos a carga). **Regra geral**: nada que dependa de
+   `HAL_GetTick()`/`HAL_Delay()` pode rodar entre `osKernelInitialize()` e `osKernelStart()`.
+2. **Hardware — SDA/SCL sem pull-up.** Com o tick rodando, a falha virou `ErrorCode=0x20`
+   (timeout: o I2C1 nem colocava o endereco no barramento). Resolvido pelo usuario no CubeMX:
+   PB8/PB9 com `GPIO_PULLUP` interno. Ver `hardware.md` (pull-up interno e' fraco para 400 kHz).
+
+Resultado de bancada: `PROVISION=1` grava a chave, com `PROVISION=0` `g_dev_key_valid` continua 1
+apos reboot; `tools/bench_usb_hello.py --cmd auth` com a chave certa eleva para DEV e o LOGOUT volta
+para USER; chave errada → `NAO_AUTENTICADO`. **Fase 7.2 validada em bancada.**
+
+### Status do RTC nao era reavaliado apos ajuste de hora pela IHM (RESOLVIDO, validado)
+
+`RtcService_CheckAtBoot()` so' rodava no boot; ajustar a hora na IHM gravava o RTC mas
+`RtcService_GetFlags()` continuava com o resultado do boot (ex.: `NEVER_SET`) — IHM e `GET_STATUS`
+seguiam dizendo "calendario nao inicializado" ate' o reset. Nova `RtcService_ReevaluateAfterSet()`,
+chamada por `UiBackend_SetDateTime()`; `GET_STATUS` passou a ler `RtcService_GetFlags()` em vez da
+copia de boot `g_rtc_status`.
+
+### Hora voltava a 01/01/2000 a cada power-cycle, com bateria boa (RESOLVIDO, validado)
+
+Diagnostico de bancada apos power-cycle: `g_rtc_clock_info = {lse_ok=1, backup_domain_reset=1,
+lse_css_failure_seen=1, lse_startup_ms=0, bdcr_at_entry=0x3B}`. Ou seja: no inicio do `main()` o
+`LSECSSD` estava ligado → `RtcService_RecoverLseFailureEarly()` resetou o dominio de backup; logo
+depois o LSE partiu imediatamente (o cristal funciona). O VBAT esta' bom: o proprio `LSECSSD` e'
+um bit do dominio de backup e sobreviveu ao desligamento.
+
+- **Bug de firmware**: antes do reset do dominio, `rtc_service_backup_domain_reset()` salvava a hora
+  lendo `RTC->TR/DR` com `BYPSHAD=0` — os registradores-SOMBRA, que apos reset de sistema valem o
+  valor de reset (00:00:00, 01/01/2000) ate' o RTCCLK resincronizar (RSF). Sem LSE nao ha' RTCCLK:
+  o "calendario restaurado" era sempre o default. Corrigido: leitura com `RTC_CR.BYPSHAD=1`
+  (contadores direto), repetida ate' duas leituras baterem.
+- **Causa raiz**: o CSS do LSE dava **falso alarme** na transicao de alimentacao. Teste com
+  "CSS on LSE" desligado no CubeMX (`RCC.EnableCSSLSE` removido, sem
+  `HAL_RCCEx_EnableLSECSS()`): a hora avancou corretamente durante o tempo desligado → o LSE roda
+  normalmente no VBAT. **Decisao: CSS do LSE fica desligado.** A confianca no calendario continua
+  coberta por `LSERDY`, magic em `BKP13` e plausibilidade da data (`rtc_validity.c`). O caminho de
+  recuperacao de `LSECSSD` em `rtc_service.c` permanece (inofensivo sem o CSS, util se for religado).
+
+### DTCM a 97,9%: .bss da IHM movido para RAM_D1 (validado)
+
+Nova secao `.ui_bss (NOLOAD)` em `STM32H723xG_flash.ld`, antes de `.bss`, recolhendo o `.bss` de
+`ThirdParty/lvgl`, `App/HMI_UI`, `App/HMI_Port` e `Bsp/LvglPort` pelo caminho do objeto (sem editar
+o LVGL vendorizado). O grosso era o heap interno do LVGL (`work_mem_int`, 64 KB). Zerada por
+`PortRamEcc_InitAxiSram()` no inicio de `main()` (mesma premissa do `.dma_buffer`). DTCMRAM
+97,92% → 47,02%; RAM_D1 5,05% → 25,41%. IHM sem diferenca perceptivel na bancada. A pilha da
+`uiTask` (8 KB, declarada pelo CubeMX fora de USER CODE) continua em DTCM.
+
+### Regeneracao do `.ioc` revisada (2026-10-21)
+
+Diff conferido: supply LDO e VOS0 mantidos, clock inalterado (HSE 25 MHz /2 ×32 /1), USB em
+`Device_Only_FS` (MSP do PCD agora em `USB_DEVICE/Target/usbd_conf.c`, IRQs OTG prioridade 5),
+PB8/PB9 com pull-up, `uiTask` com 2048 palavras de pilha, CSS do LSE removido. Bloco `PCC.*`
+(calculadora de consumo do CubeMX) e' inofensivo.
