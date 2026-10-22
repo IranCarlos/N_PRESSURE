@@ -74,8 +74,18 @@ void ST7789_Init(void) {
 
     ST7789_SendCmd(0x20); // Display Inversion ON
 
+    // A RAM de video sai do reset com lixo (aparece branco/ruido). Preenche
+    // de preto ANTES do Display ON: quando o backlight acender, a tela ja'
+    // esta' preta em vez de piscar branco.
+    ST7789_FillRect(0u, 0u, 319u, 239u, 0x0000u);
+
     ST7789_SendCmd(0x29); // Display ON
     HAL_Delay(10);
+}
+
+void ST7789_SetBacklight(uint8_t on) {
+    HAL_GPIO_WritePin(TFT_BACKLIGHT_GPIO_Port, TFT_BACKLIGHT_Pin,
+                      (on != 0u) ? GPIO_PIN_SET : GPIO_PIN_RESET);
 }
 
 void ST7789_FillRect(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1, uint16_t color) {

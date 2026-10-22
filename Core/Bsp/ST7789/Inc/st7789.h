@@ -29,7 +29,11 @@ extern SPI_HandleTypeDef hspi1;
 #define ST7789_RST_LOW()  HAL_GPIO_WritePin(ST7789_RES_PORT, ST7789_RES_PIN, GPIO_PIN_RESET)
 #define ST7789_RST_HIGH() HAL_GPIO_WritePin(ST7789_RES_PORT, ST7789_RES_PIN, GPIO_PIN_SET)
 
+/* Inicializa o painel com a RAM de video preenchida de PRETO antes do
+ * Display ON — o backlight continua APAGADO; ligar com
+ * ST7789_SetBacklight(1) quando quiser mostrar a tela. */
 void ST7789_Init(void);
+void ST7789_SetBacklight(uint8_t on);
 void ST7789_SetWindow(uint16_t x0, uint16_t y0, uint16_t x1, uint16_t y1);
 void ST7789_SendCmd(uint8_t cmd);
 void ST7789_SendData(uint8_t data);

@@ -58,8 +58,17 @@ with `Common` as a dependency-free leaf any layer may include:
   app-level config load/save with CRC32). Services must **not** include `main.h`; board-specific
   handles/pins are injected by the caller (e.g. `ControlLoop_Init()` takes a
   `ControlLoop_ValvePins_t`).
-- **`Core/App/HMI_UI/{Inc,Src}`** — UI orchestration: `hmi_ui.c` (facade), `hmi_encoder_group.c`
-  (LVGL group/focus management for encoder navigation), `ui_main_screen.c`, `ui_config_screen.c`.
+- **`Core/App/HMI_UI/{Inc,Src}`** — the UI, **portable**: includes only `lvgl.h` and its own
+  `ui_backend.h` (no HAL, `main.h`, `system_types.h` or services), so the same `.c` files also build
+  in the PC simulator. `hmi_ui.c` (facade/navigation), one `ui_*_screen.c` per screen,
+  `ui_*_popup.c`, `ui_theme.c` (shared static styles), `ui_widgets.c`, `hmi_encoder_group.c`.
+  Decisions and rules: `Core/App/HMI_UI/README_UI.md`.
+- **`Core/App/HMI_Port/{Inc,Src}`** — `ui_backend_stm32.c`, the firmware implementation of
+  `ui_backend.h` (Control_Loop, ADC_Acq, RTC, StorageTask, EEPROM, Buzzer). Bind it with
+  `UiBackendStm32_Bind()` before `HMI_Init()`.
+- **`pc_sim/`** — SDL2 simulator of the UI (separate host CMake project, MSYS2 ucrt64 gcc; see
+  `pc_sim/README.md`). `--shots <dir>` runs a scripted tour and saves a BMP per screen. Never use it
+  to configure the firmware build.
 - **`Core/ThirdParty/lvgl`** — vendored LVGL v9. Has one intentional local patch:
   `src/misc/lv_palette.c` reads its packed-3-byte `lv_color_t` palette tables byte-by-byte instead of
   via the compiler's fused 16-bit load, which otherwise HardFaults on Cortex-M7 (unaligned access) —

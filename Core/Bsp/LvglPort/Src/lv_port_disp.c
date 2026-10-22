@@ -54,8 +54,9 @@ static void disp_flush(lv_display_t * disp, const lv_area_t * area, uint8_t * px
 
 void lv_port_disp_init(void)
 {
-    // Inicializa o Hardware
+    // Inicializa o Hardware (tela ja' preta) e so' entao acende o backlight.
     ST7789_Init();
+    ST7789_SetBacklight(1u);
 
     // LVGL V9: Cria o display
     my_disp = lv_display_create(MY_DISP_HOR_RES, MY_DISP_VER_RES);
