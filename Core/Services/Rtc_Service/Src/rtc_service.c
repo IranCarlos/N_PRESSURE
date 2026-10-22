@@ -258,6 +258,33 @@ uint32_t RtcService_ReevaluateAfterSet(RTC_HandleTypeDef *hrtc)
     return RtcService_CheckAtBoot(hrtc, 0u);
 }
 
+uint8_t RtcService_SetDateTime(RTC_HandleTypeDef *hrtc, const RtcValidity_DateTime_t *dt)
+{
+    RTC_TimeTypeDef t = { 0 };
+    RTC_DateTypeDef d = { 0 };
+
+    if ((hrtc == NULL) || (dt == NULL)) {
+        return 0u;
+    }
+
+    d.Date = dt->day;
+    d.Month = dt->month;
+    d.Year = dt->year_2d;
+    d.WeekDay = RTC_WEEKDAY_MONDAY; /* nao usado pelo firmware (0 e' invalido para a HAL) */
+    t.Hours = dt->hour;
+    t.Minutes = dt->minute;
+    t.Seconds = dt->second;
+    t.DayLightSaving = RTC_DAYLIGHTSAVING_NONE;
+    t.StoreOperation = RTC_STOREOPERATION_RESET;
+
+    if ((HAL_RTC_SetDate(hrtc, &d, RTC_FORMAT_BIN) != HAL_OK) ||
+        (HAL_RTC_SetTime(hrtc, &t, RTC_FORMAT_BIN) != HAL_OK)) {
+        return 0u;
+    }
+    (void)RtcService_ReevaluateAfterSet(hrtc);
+    return 1u;
+}
+
 uint32_t RtcService_GetFlags(void)
 {
     return s_flags;

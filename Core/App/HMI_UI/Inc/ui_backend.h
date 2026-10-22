@@ -107,6 +107,15 @@ bool UiBackend_ConsumeUserButton(void);
  * os Ajustes, onde o fim do teste de vazamento tambem gera essa borda). */
 bool UiBackend_PollCycleResult(UiCycleResult_t * out);
 
+/* Operador/participante definidos REMOTAMENTE (USB SET_OPERATOR, Fase 7.3):
+ * devolve true uma vez por pedido novo e preenche os IDs. A IHM aplica na
+ * propria sessao (UiSession_t e' dado da UI, so' a uiTask escreve nela). */
+bool UiBackend_PollRemoteSession(uint16_t * operator_id, uint16_t * participant_id);
+
+/* Ensaio iniciado REMOTAMENTE (USB START_TEST, Fase 7.3): devolve true uma
+ * vez por inicio remoto, para a IHM avisar quem esta' perto do equipamento. */
+bool UiBackend_PollRemoteStart(void);
+
 /* --- Acoes -------------------------------------------------------------- */
 void UiBackend_SetSetpoint(float mmhg);
 void UiBackend_StartInflation(void);

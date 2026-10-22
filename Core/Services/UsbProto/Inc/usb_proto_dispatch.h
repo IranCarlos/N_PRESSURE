@@ -5,9 +5,11 @@
  * Created: 2026-10-14
  *
  * Tabela de comando->handler do protocolo USB (Apêndice A do prompt do
- * projeto). Fase 7.1: CMD_HELLO e CMD_GET_STATUS. Fase 7.2 (esta entrega):
- * sessão USER/DEV via CMD_AUTH_CHALLENGE/RESPONSE/LOGOUT (ver
- * usb_proto_auth.h) e checagem de papel por comando. Os demais códigos do
+ * projeto). Fase 7.1: CMD_HELLO e CMD_GET_STATUS. Fase 7.2: sessão
+ * USER/DEV via CMD_AUTH_CHALLENGE/RESPONSE/LOGOUT (ver usb_proto_auth.h) e
+ * checagem de papel por comando. Fase 7.3: SET_SETPOINT, SET_DATETIME,
+ * START_TEST, ABORT_TEST e SET_OPERATOR (papel U,D - acesso livre),
+ * executados por UsbProtoActions_t injetadas. Os demais códigos do
  * Apêndice A já ficam reservados como defines (comentados com a sub-fase
  * que vai implementá-los) pra não precisar renumerar nada depois.
  *
@@ -99,6 +101,42 @@ typedef struct {
     uint32_t cycle_number;
 } UsbProtoStatusSnapshot_t;
 
+/* Fase 7.3: data/hora decodificada de SET_DATETIME (ja' validada pelo
+ * dispatch: ano 2000..2099, mes/dia coerentes, h/m/s em faixa). */
+typedef struct {
+    uint16_t year;
+    uint8_t  month;
+    uint8_t  day;
+    uint8_t  hour;
+    uint8_t  minute;
+    uint8_t  second;
+} UsbProtoDateTime_t;
+
+/* Fase 7.3: acoes de controle. O dispatch so' valida o FORMATO do payload
+ * e chama a acao; a decisao "pode neste estado?" (usb_proto_policy.h) e a
+ * execucao ficam com quem implementa (Core/App/Usb_Port) — este modulo
+ * continua sem conhecer Control_Loop/RTC. Cada acao devolve o status da
+ * resposta. Ponteiro NULL (ou ctx->actions NULL) -> OCUPADO. */
+typedef struct {
+    UsbProtoRspStatus_t (*set_setpoint)(float setpoint_mmhg);
+    UsbProtoRspStatus_t (*set_datetime)(const UsbProtoDateTime_t *dt);
+    UsbProtoRspStatus_t (*start_test)(void);
+    UsbProtoRspStatus_t (*abort_test)(void);
+    UsbProtoRspStatus_t (*set_operator)(uint16_t operator_id, uint16_t participant_id);
+} UsbProtoActions_t;
+
+/* Payloads de requisicao da Fase 7.3 (little-endian, tamanho exato):
+ *   SET_SETPOINT : float32 setpoint_mmhg                      (4 B)
+ *   SET_DATETIME : u16 ano, u8 mes, dia, hora, min, seg        (7 B)
+ *   START_TEST   : vazio                                       (0 B)
+ *   ABORT_TEST   : vazio                                       (0 B)
+ *   SET_OPERATOR : u16 operator_id, u16 participant_id         (4 B; 1..9999 cada)
+ * Resposta das cinco: so' o byte de status. */
+#define USB_PROTO_SET_SETPOINT_LEN  (4U)
+#define USB_PROTO_SET_DATETIME_LEN  (7U)
+#define USB_PROTO_SET_OPERATOR_LEN  (4U)
+#define USB_PROTO_SESSION_ID_MAX    (9999U) /* "OP9999"/"P9999": mesma faixa da IHM */
+
 /* status == NULL -> CMD_GET_STATUS responde OCUPADO (snapshot ainda nao
  * disponivel; nao deveria acontecer em operacao normal, mas evita servir
  * lixo se a task de protocolo rodar antes da primeira atualizacao).
@@ -113,6 +151,7 @@ typedef struct {
     uint32_t now_ms; /* usado por AUTH_CHALLENGE (emissao) e AUTH_RESPONSE (expiracao) */
     const uint8_t *challenge_random; /* USB_PROTO_AUTH_NONCE_LEN (16) bytes "aleatorios"
                                        * injetados pelo chamador - so' usado por AUTH_CHALLENGE */
+    const UsbProtoActions_t *actions; /* Fase 7.3 - comandos de controle (setpoint, hora, ensaio, operador) */
 } UsbProtoDispatchCtx_t;
 
 /**

@@ -38,6 +38,14 @@ uint32_t RtcService_CheckAtBoot(RTC_HandleTypeDef *hrtc, uint8_t backup_domain_w
  */
 uint32_t RtcService_ReevaluateAfterSet(RTC_HandleTypeDef *hrtc);
 
+/*
+ * Ajuste de data/hora pelo operador (IHM ou USB SET_DATETIME): grava o
+ * calendario (RTC_FORMAT_BIN, year = 2000..2099) e chama
+ * RtcService_ReevaluateAfterSet(). NAO valida os campos — o chamador ja'
+ * validou (dia do mes, faixas). Retorna 1 se o HAL aceitou as duas escritas.
+ */
+uint8_t RtcService_SetDateTime(RTC_HandleTypeDef *hrtc, const RtcValidity_DateTime_t *dt);
+
 /* Ultimo resultado de RtcService_CheckAtBoot()/ReevaluateAfterSet() (Live Watch / diagnostico). */
 uint32_t RtcService_GetFlags(void);
 

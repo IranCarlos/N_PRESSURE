@@ -329,6 +329,18 @@ bool UiBackend_ConsumeUserButton(void)
     return pressed;
 }
 
+bool UiBackend_PollRemoteSession(uint16_t * operator_id, uint16_t * participant_id)
+{
+    (void)operator_id;
+    (void)participant_id;
+    return false; /* simulador nao tem USB */
+}
+
+bool UiBackend_PollRemoteStart(void)
+{
+    return false; /* simulador nao tem USB */
+}
+
 bool UiBackend_PollCycleResult(UiCycleResult_t * out)
 {
     if (!s_result_ready || (out == NULL)) {

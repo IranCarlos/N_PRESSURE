@@ -87,6 +87,30 @@ void HMI_BindIndev(lv_indev_t * indev)
 
 void HMI_Update(void)
 {
+    uint16_t remote_operator;
+    uint16_t remote_participant;
+
+    if (UiBackend_PollRemoteSession(&remote_operator, &remote_participant)) {
+        UiSession_SetOperator(remote_operator);
+        UiSession_SetParticipant(remote_participant);
+    }
+
+    /* Aviso sonoro de ensaio iniciado pelo PC: trinado agudo/grave
+     * alternado (2600/1800 Hz), diferente dos sons de resultado/erro.
+     * Tons alternados em vez de bipes com pausa: Buzzer_Beep(0, ...) nao
+     * gera silencio (retorna na hora) e a UI portavel nao tem delay proprio.
+     * Toca MESMO com o buzzer desligado na sessao — e' aviso de seguranca (o
+     * manguito vai inflar sem ninguem ter tocado no equipamento), nao
+     * feedback de interface. Bloqueia a uiTask ~400 ms (Buzzer_Beep e'
+     * sincrono), mesmo criterio aceito no popup de resultado. */
+    if (UiBackend_PollRemoteStart()) {
+        UiBackend_BuzzerBeep(2600u, 80u);
+        UiBackend_BuzzerBeep(1800u, 80u);
+        UiBackend_BuzzerBeep(2600u, 80u);
+        UiBackend_BuzzerBeep(1800u, 80u);
+        UiBackend_BuzzerBeep(2600u, 80u);
+    }
+
     UI_HomeScreen_TrackCycle();
 
     switch (s_active_screen) {

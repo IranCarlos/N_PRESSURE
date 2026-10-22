@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
-Teste de bancada dos checkpoints da Fase 7.1 (HELLO/GET_STATUS) e 7.2
-(AUTH_CHALLENGE/RESPONSE/LOGOUT) - ver Docs/dev/00-auditoria.md. Reimplementa
+Teste de bancada dos checkpoints da Fase 7.1 (HELLO/GET_STATUS), 7.2
+(AUTH_CHALLENGE/RESPONSE/LOGOUT) e 7.3 (SET_SETPOINT/SET_DATETIME/START_TEST/
+ABORT_TEST/SET_OPERATOR) - ver Docs/dev/00-auditoria.md. Reimplementa
 COBS + CRC32 em Python (poly 0x04C11DB7, init 0xFFFFFFFF, sem reflect/sem XOR
 final) espelhando Core/Services/UsbProto/Src/cobs.c e usb_crc32.c byte a byte -
 nao e' o "dispositivo virtual" completo da Fase 7.10 (tools/fake_device/, ainda
@@ -13,12 +14,18 @@ Uso:
     python tools/bench_usb_hello.py --port COM5
     python tools/bench_usb_hello.py --port COM5 --cmd status
     python tools/bench_usb_hello.py --port COM5 --cmd auth --dev-key-hex <64 hex chars>
+    python tools/bench_usb_hello.py --port COM5 --cmd setpoint --value 120
+    python tools/bench_usb_hello.py --port COM5 --cmd datetime          (hora atual do PC)
+    python tools/bench_usb_hello.py --port COM5 --cmd operator --operator 3 --participant 37
+    python tools/bench_usb_hello.py --port COM5 --cmd start
+    python tools/bench_usb_hello.py --port COM5 --cmd abort
 
 --dev-key-hex e' a MESMA chave de tools/gen_dev_key.py que voce colou em
 dev_key_secret.h (NUNCA cole a chave aqui dentro do arquivo - so' na linha de
 comando, que nao fica versionada).
 """
 import argparse
+import datetime
 import hmac
 import hashlib
 import struct
@@ -38,6 +45,11 @@ TYPE_RSP = 0x02
 
 CMD_HELLO = 0x0001
 CMD_GET_STATUS = 0x0002
+CMD_SET_SETPOINT = 0x0003
+CMD_SET_DATETIME = 0x0004
+CMD_START_TEST = 0x0005
+CMD_ABORT_TEST = 0x0006
+CMD_SET_OPERATOR = 0x0007
 CMD_AUTH_CHALLENGE = 0x0040
 CMD_AUTH_RESPONSE = 0x0041
 CMD_AUTH_LOGOUT = 0x0042
@@ -226,11 +238,30 @@ def run_auth_flow(ser: serial.Serial, seq: int, dev_key: bytes, timeout_s: float
     return status == 0 and role == 0
 
 
+def build_control_request(args):
+    """Fase 7.3: (nome, cmd, payload) do comando de controle pedido em --cmd."""
+    if args.cmd == "setpoint":
+        return "SET_SETPOINT", CMD_SET_SETPOINT, struct.pack("<f", args.value)
+    if args.cmd == "datetime":
+        now = datetime.datetime.now()
+        payload = struct.pack("<HBBBBB", now.year, now.month, now.day, now.hour, now.minute, now.second)
+        return f"SET_DATETIME {now:%d/%m/%Y %H:%M:%S}", CMD_SET_DATETIME, payload
+    if args.cmd == "operator":
+        return "SET_OPERATOR", CMD_SET_OPERATOR, struct.pack("<HH", args.operator, args.participant)
+    if args.cmd == "start":
+        return "START_TEST", CMD_START_TEST, b""
+    return "ABORT_TEST", CMD_ABORT_TEST, b""
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", help="Porta serial (ex.: COM5)")
     parser.add_argument("--list", action="store_true", help="Lista as portas seriais disponiveis e sai")
-    parser.add_argument("--cmd", choices=["hello", "status", "auth", "both"], default="both")
+    parser.add_argument("--cmd", choices=["hello", "status", "auth", "both",
+                                          "setpoint", "datetime", "operator", "start", "abort"], default="both")
+    parser.add_argument("--value", type=float, default=100.0, help="Setpoint em mmHg (--cmd setpoint)")
+    parser.add_argument("--operator", type=int, default=1, help="ID do operador 1..9999 (--cmd operator)")
+    parser.add_argument("--participant", type=int, default=1, help="ID do participante 1..9999 (--cmd operator)")
     parser.add_argument("--dev-key-hex", help="Chave DEV (64 hex chars / 32 bytes) - exigido por --cmd auth")
     parser.add_argument("--baud", type=int, default=115200, help="Ignorado pelo CDC, mas o pyserial exige um valor")
     parser.add_argument("--timeout", type=float, default=2.0, help="Timeout de leitura em segundos")
@@ -282,6 +313,22 @@ def main():
                 print(f"FALHA: {exc}", file=sys.stderr)
                 ok = False
             seq += 1
+
+        if args.cmd in ("setpoint", "datetime", "operator", "start", "abort"):
+            name, cmd, payload = build_control_request(args)
+            print(f"--> {name} (seq={seq})")
+            try:
+                rsp = send_and_receive(ser, seq, cmd, payload=payload, timeout_s=args.timeout)
+                status = rsp["payload"][0]
+                print(f"<-- status={RSP_STATUS_NAMES.get(status, status)}")
+                ok = (status == 0)
+                seq += 1
+                # Estado logo depois, para conferir o efeito
+                rsp = send_and_receive(ser, seq, CMD_GET_STATUS, timeout_s=args.timeout)
+                print(f"<-- GET_STATUS {fmt_get_status(rsp['payload'])}")
+            except (ValueError, TimeoutError) as exc:
+                print(f"FALHA: {exc}", file=sys.stderr)
+                ok = False
 
         if args.cmd == "auth":
             try:

@@ -236,8 +236,145 @@ static void test_auth_logout_without_dev_session_is_sem_permissao(void)
     CHECK(rsp[1] == (uint8_t)USB_PROTO_ROLE_USER);
 }
 
+/* ---- Fase 7.3: comandos de controle com acoes falsas ------------------ */
+
+static int s_calls;
+static float s_last_sp;
+static UsbProtoDateTime_t s_last_dt;
+static uint16_t s_last_op;
+static uint16_t s_last_part;
+static UsbProtoRspStatus_t s_fake_result;
+
+static UsbProtoRspStatus_t fake_set_setpoint(float sp) { s_calls++; s_last_sp = sp; return s_fake_result; }
+static UsbProtoRspStatus_t fake_set_datetime(const UsbProtoDateTime_t *dt) { s_calls++; s_last_dt = *dt; return s_fake_result; }
+static UsbProtoRspStatus_t fake_start(void) { s_calls++; return s_fake_result; }
+static UsbProtoRspStatus_t fake_abort(void) { s_calls++; return s_fake_result; }
+static UsbProtoRspStatus_t fake_set_operator(uint16_t op, uint16_t part)
+{
+    s_calls++;
+    s_last_op = op;
+    s_last_part = part;
+    return s_fake_result;
+}
+
+static const UsbProtoActions_t FAKE_ACTIONS = {
+    fake_set_setpoint, fake_set_datetime, fake_start, fake_abort, fake_set_operator
+};
+
+static void reset_fakes(UsbProtoRspStatus_t result)
+{
+    s_calls = 0;
+    s_fake_result = result;
+}
+
+static UsbProtoRspStatus_t call(uint16_t cmd, const uint8_t *payload, uint16_t len, const UsbProtoActions_t *actions)
+{
+    UsbProtoDispatchCtx_t ctx = { .actions = actions };
+    uint8_t rsp[8];
+    size_t n = UsbProtoDispatch_Handle(cmd, payload, len, &ctx, rsp, sizeof(rsp));
+    CHECK(n == 1U); /* todos os comandos da 7.3 respondem so' o status */
+    return (UsbProtoRspStatus_t)rsp[0];
+}
+
+static void test_control_cmds_without_actions_are_ocupado(void)
+{
+    static const UsbProtoActions_t EMPTY = { 0 };
+    const uint8_t sp[4] = { 0 };
+
+    CHECK(call(USB_PROTO_CMD_START_TEST, NULL, 0U, NULL) == USB_PROTO_RSP_OCUPADO);
+    CHECK(call(USB_PROTO_CMD_ABORT_TEST, NULL, 0U, NULL) == USB_PROTO_RSP_OCUPADO);
+    CHECK(call(USB_PROTO_CMD_SET_SETPOINT, sp, 4U, &EMPTY) == USB_PROTO_RSP_OCUPADO);
+}
+
+static void test_set_setpoint_decodes_float_le(void)
+{
+    const uint8_t sp_120_5[4] = { 0x00, 0x00, 0xF1, 0x42 }; /* 120.5f = 0x42F10000 */
+
+    reset_fakes(USB_PROTO_RSP_OK);
+    CHECK(call(USB_PROTO_CMD_SET_SETPOINT, sp_120_5, 4U, &FAKE_ACTIONS) == USB_PROTO_RSP_OK);
+    CHECK(s_calls == 1);
+    CHECK(s_last_sp == 120.5f);
+
+    /* status da acao (ex.: politica recusou) passa direto para o PC */
+    reset_fakes(USB_PROTO_RSP_FORA_DE_FAIXA);
+    CHECK(call(USB_PROTO_CMD_SET_SETPOINT, sp_120_5, 4U, &FAKE_ACTIONS) == USB_PROTO_RSP_FORA_DE_FAIXA);
+
+    /* tamanho errado nao chega na acao */
+    reset_fakes(USB_PROTO_RSP_OK);
+    CHECK(call(USB_PROTO_CMD_SET_SETPOINT, sp_120_5, 3U, &FAKE_ACTIONS) == USB_PROTO_RSP_PARAM_INVALIDO);
+    CHECK(call(USB_PROTO_CMD_SET_SETPOINT, NULL, 4U, &FAKE_ACTIONS) == USB_PROTO_RSP_PARAM_INVALIDO);
+    CHECK(s_calls == 0);
+}
+
+static void test_set_datetime_validation(void)
+{
+    const uint8_t ok[7]      = { 0xEA, 0x07, 10, 22, 14, 5, 9 };  /* 22/10/2026 14:05:09 */
+    const uint8_t leap[7]    = { 0xE8, 0x07, 2, 29, 0, 0, 0 };    /* 29/02/2024: bissexto */
+    const uint8_t no_leap[7] = { 0xEA, 0x07, 2, 29, 0, 0, 0 };    /* 29/02/2026: invalido */
+    const uint8_t bad_mon[7] = { 0xEA, 0x07, 13, 1, 0, 0, 0 };
+    const uint8_t bad_hr[7]  = { 0xEA, 0x07, 1, 1, 24, 0, 0 };
+    const uint8_t y1999[7]   = { 0xCF, 0x07, 1, 1, 0, 0, 0 };
+    const uint8_t day31[7]   = { 0xEA, 0x07, 4, 31, 0, 0, 0 };   /* abril tem 30 */
+
+    reset_fakes(USB_PROTO_RSP_OK);
+    CHECK(call(USB_PROTO_CMD_SET_DATETIME, ok, 7U, &FAKE_ACTIONS) == USB_PROTO_RSP_OK);
+    CHECK(s_calls == 1);
+    CHECK((s_last_dt.year == 2026U) && (s_last_dt.month == 10U) && (s_last_dt.day == 22U));
+    CHECK((s_last_dt.hour == 14U) && (s_last_dt.minute == 5U) && (s_last_dt.second == 9U));
+    CHECK(call(USB_PROTO_CMD_SET_DATETIME, leap, 7U, &FAKE_ACTIONS) == USB_PROTO_RSP_OK);
+
+    reset_fakes(USB_PROTO_RSP_OK);
+    CHECK(call(USB_PROTO_CMD_SET_DATETIME, no_leap, 7U, &FAKE_ACTIONS) == USB_PROTO_RSP_PARAM_INVALIDO);
+    CHECK(call(USB_PROTO_CMD_SET_DATETIME, bad_mon, 7U, &FAKE_ACTIONS) == USB_PROTO_RSP_PARAM_INVALIDO);
+    CHECK(call(USB_PROTO_CMD_SET_DATETIME, bad_hr, 7U, &FAKE_ACTIONS) == USB_PROTO_RSP_PARAM_INVALIDO);
+    CHECK(call(USB_PROTO_CMD_SET_DATETIME, y1999, 7U, &FAKE_ACTIONS) == USB_PROTO_RSP_PARAM_INVALIDO);
+    CHECK(call(USB_PROTO_CMD_SET_DATETIME, day31, 7U, &FAKE_ACTIONS) == USB_PROTO_RSP_PARAM_INVALIDO);
+    CHECK(call(USB_PROTO_CMD_SET_DATETIME, ok, 6U, &FAKE_ACTIONS) == USB_PROTO_RSP_PARAM_INVALIDO);
+    CHECK(s_calls == 0);
+}
+
+static void test_start_and_abort(void)
+{
+    const uint8_t junk[3] = { 1, 2, 3 };
+
+    reset_fakes(USB_PROTO_RSP_OK);
+    CHECK(call(USB_PROTO_CMD_START_TEST, NULL, 0U, &FAKE_ACTIONS) == USB_PROTO_RSP_OK);
+    CHECK(s_calls == 1);
+    /* START com payload: recusado sem acionar nada */
+    CHECK(call(USB_PROTO_CMD_START_TEST, junk, 3U, &FAKE_ACTIONS) == USB_PROTO_RSP_PARAM_INVALIDO);
+    CHECK(s_calls == 1);
+    /* ABORT ignora payload de proposito - desinflar sempre passa */
+    CHECK(call(USB_PROTO_CMD_ABORT_TEST, junk, 3U, &FAKE_ACTIONS) == USB_PROTO_RSP_OK);
+    CHECK(s_calls == 2);
+
+    reset_fakes(USB_PROTO_RSP_ESTADO_INVALIDO);
+    CHECK(call(USB_PROTO_CMD_START_TEST, NULL, 0U, &FAKE_ACTIONS) == USB_PROTO_RSP_ESTADO_INVALIDO);
+}
+
+static void test_set_operator(void)
+{
+    const uint8_t ok[4]       = { 0x03, 0x00, 0x25, 0x00 }; /* OP03, P037 */
+    const uint8_t zero_op[4]  = { 0x00, 0x00, 0x25, 0x00 };
+    const uint8_t big_part[4] = { 0x03, 0x00, 0x10, 0x27 }; /* 10000 > 9999 */
+
+    reset_fakes(USB_PROTO_RSP_OK);
+    CHECK(call(USB_PROTO_CMD_SET_OPERATOR, ok, 4U, &FAKE_ACTIONS) == USB_PROTO_RSP_OK);
+    CHECK((s_last_op == 3U) && (s_last_part == 37U));
+
+    reset_fakes(USB_PROTO_RSP_OK);
+    CHECK(call(USB_PROTO_CMD_SET_OPERATOR, zero_op, 4U, &FAKE_ACTIONS) == USB_PROTO_RSP_FORA_DE_FAIXA);
+    CHECK(call(USB_PROTO_CMD_SET_OPERATOR, big_part, 4U, &FAKE_ACTIONS) == USB_PROTO_RSP_FORA_DE_FAIXA);
+    CHECK(call(USB_PROTO_CMD_SET_OPERATOR, ok, 2U, &FAKE_ACTIONS) == USB_PROTO_RSP_PARAM_INVALIDO);
+    CHECK(s_calls == 0);
+}
+
 int main(void)
 {
+    test_control_cmds_without_actions_are_ocupado();
+    test_set_setpoint_decodes_float_le();
+    test_set_datetime_validation();
+    test_start_and_abort();
+    test_set_operator();
     test_hello_ok();
     test_hello_without_serial_is_ocupado();
     test_hello_rsp_cap_too_small();

@@ -54,6 +54,7 @@
 #include "cobs.h"
 #include "usb_proto_frame.h"
 #include "usb_proto_dispatch.h"
+#include "usb_actions_stm32.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -728,6 +729,12 @@ int main(void)
     g_control_runtime = &s_bringup_runtime;
     Pedal_Init(&htim4); // nao chamado em nenhum outro lugar do bring-up
     ControlLoop_Init(&g_bringup_sys_cfg, &htim3, g_control_runtime, &valve_pins);
+#if BRINGUP_ENABLE_USB
+    // Fase 7.3: comandos de controle via USB (START/ABORT/SET_*). Sem
+    // BRINGUP_ENABLE_CONTROL a tabela fica sem bind e esses comandos
+    // respondem OCUPADO (ver StartUsbProtoTask).
+    UsbActionsStm32_Bind(g_control_runtime, &g_bringup_sys_cfg);
+#endif
   }
 #endif
 
@@ -2104,6 +2111,11 @@ void StartUsbProtoTask(void *argument)
               ctx.auth = &g_usb_auth_session;
               ctx.now_ms = HAL_GetTick();
               ctx.challenge_random = challenge_random;
+#if BRINGUP_ENABLE_CONTROL
+              ctx.actions = UsbActionsStm32_Get();
+#else
+              ctx.actions = NULL; /* sem Control_Loop: comandos de controle -> OCUPADO */
+#endif
 
               rsp_payload_len = UsbProtoDispatch_Handle(req_frame.cmd, req_frame.payload, req_frame.len,
                                                           &ctx, s_usb_rsp_payload, sizeof(s_usb_rsp_payload));

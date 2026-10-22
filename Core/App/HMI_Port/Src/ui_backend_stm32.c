@@ -38,6 +38,21 @@ extern RTC_HandleTypeDef hrtc;
 static SystemRuntime_t * s_rt;
 static SystemConfig_t * s_cfg;
 
+/* Caixa de correio USB -> uiTask (SET_OPERATOR). Um produtor
+ * (usbProtoTask) e um consumidor (uiTask): o produtor grava os IDs
+ * empacotados numa palavra de 32 bits (escrita alinhada = atomica no M7)
+ * e SO' DEPOIS incrementa a sequencia; o consumidor compara com a ultima
+ * sequencia vista. Se um pedido novo chegar entre as duas leituras do
+ * consumidor, ele le o valor mais novo e o reaplica na proxima volta —
+ * inofensivo (mesmo valor). */
+static volatile uint32_t s_remote_session_ids; /* operador << 16 | participante */
+static volatile uint32_t s_remote_session_seq;
+static uint32_t s_remote_session_seen;
+
+/* Mesmo esquema (sequencia, produtor unico) para o aviso de inicio remoto. */
+static volatile uint32_t s_remote_start_seq;
+static uint32_t s_remote_start_seen;
+
 static uint8_t s_last_finalized;
 static bool s_metrics_valid;
 static CycleRecord_Metrics_t s_last_metrics;
@@ -190,6 +205,45 @@ bool UiBackend_ConsumeUserButton(void)
     return true;
 }
 
+void UiBackendStm32_PostRemoteSession(uint16_t operator_id, uint16_t participant_id)
+{
+    s_remote_session_ids = ((uint32_t)operator_id << 16) | (uint32_t)participant_id;
+    __DMB(); /* IDs visiveis antes da sequencia nova */
+    s_remote_session_seq = s_remote_session_seq + 1u;
+}
+
+bool UiBackend_PollRemoteSession(uint16_t * operator_id, uint16_t * participant_id)
+{
+    uint32_t seq = s_remote_session_seq;
+    uint32_t ids;
+
+    if ((operator_id == NULL) || (participant_id == NULL) || (seq == s_remote_session_seen)) {
+        return false;
+    }
+    __DMB(); /* le os IDs depois da sequencia */
+    ids = s_remote_session_ids;
+    s_remote_session_seen = seq;
+    *operator_id = (uint16_t)(ids >> 16);         /* metade alta */
+    *participant_id = (uint16_t)(ids & 0xFFFFu);  /* metade baixa */
+    return true;
+}
+
+void UiBackendStm32_PostRemoteStart(void)
+{
+    s_remote_start_seq = s_remote_start_seq + 1u;
+}
+
+bool UiBackend_PollRemoteStart(void)
+{
+    uint32_t seq = s_remote_start_seq;
+
+    if (seq == s_remote_start_seen) {
+        return false;
+    }
+    s_remote_start_seen = seq; /* varios inicios entre duas leituras = 1 aviso so' */
+    return true;
+}
+
 bool UiBackend_PollCycleResult(UiCycleResult_t * out)
 {
     const ControlCore_CycleStats_t * stats = ControlLoop_GetCycleStats();
@@ -292,31 +346,21 @@ void UiBackend_SetUnit(UiUnit_t unit)
 
 bool UiBackend_SetDateTime(const UiDateTime_t * dt)
 {
-    RTC_TimeTypeDef t;
-    RTC_DateTypeDef d;
+    RtcValidity_DateTime_t rd;
 
     if ((dt == NULL) || !ui_date_is_valid(dt)) {
         return false;
     }
 
-    memset(&t, 0, sizeof(t));
-    memset(&d, 0, sizeof(d));
-    d.Date = dt->day;
-    d.Month = dt->month;
-    d.Year = (uint8_t)(dt->year - 2000u);
-    d.WeekDay = RTC_WEEKDAY_MONDAY; /* nao usado pelo firmware */
-    t.Hours = dt->hour;
-    t.Minutes = dt->minute;
-    t.Seconds = dt->second;
-
-    if ((HAL_RTC_SetDate(&hrtc, &d, RTC_FORMAT_BIN) != HAL_OK) ||
-        (HAL_RTC_SetTime(&hrtc, &t, RTC_FORMAT_BIN) != HAL_OK)) {
-        return false;
-    }
-    /* Sem isto o status do boot (ex.: NEVER_SET) continuava valendo e a
-     * IHM seguia mostrando "calendario nao inicializado" ate' o reset. */
-    (void)RtcService_ReevaluateAfterSet(&hrtc);
-    return true;
+    rd.year_2d = (uint8_t)(dt->year - 2000u);
+    rd.month = dt->month;
+    rd.day = dt->day;
+    rd.hour = dt->hour;
+    rd.minute = dt->minute;
+    rd.second = dt->second;
+    /* Grava e reavalia o status (sem isso NEVER_SET do boot continuava
+     * valendo e a IHM mostrava "calendario nao inicializado" ate' o reset). */
+    return (RtcService_SetDateTime(&hrtc, &rd) != 0u);
 }
 
 void UiBackend_BuzzerBeep(uint16_t freq_hz, uint16_t duration_ms)
