@@ -18,7 +18,12 @@ MAX_TARGET_MMHG = 170.0
 OVER_MARGIN_MMHG = 20.0
 BAND_MMHG = 2.0
 SETTLE_S = 1.5
-GO_TIMEOUT_S = 60.0
+SLOPE_WINDOW_S = 2.0
+STABLE_SLOPE_MMHG_S = 0.5  # o ar passa do tubo para o manguito por varios segundos
+STEADY_SLOPE_RATIO = 0.8  # assentar desacelera; vazamento segue reto e nao e' assentamento
+BURST_MAX_S = 1.0
+BURST_MARGIN_MMHG = 8.0
+GO_TIMEOUT_S = 90.0
 POLL_S = 0.02
 PULSE_S = 0.06
 
@@ -107,17 +112,30 @@ def go_to_pressure(ctx: Context, target: float, keep_valves: int = 0) -> float:
     while True:
         ctx.tell("Estabilizando")
         ctx.wait(SETTLE_S)
+        first = ctx.check()
+        ctx.wait(SLOPE_WINDOW_S)
+        middle = ctx.check()
+        ctx.wait(SLOPE_WINDOW_S)
         pressure = ctx.check()
+        early = (first - middle) / SLOPE_WINDOW_S
+        slope = (middle - pressure) / SLOPE_WINDOW_S
         error = target - pressure
-        if abs(error) <= BAND_MMHG:
+        # estar na faixa nao basta: caindo cada vez mais devagar, ainda esta' assentando.
+        # A faixa vale no inicio da janela: um vazamento constante sai dela durante a
+        # propria medida, e reabastecer impediria de medi-lo.
+        settled = abs(slope) <= STABLE_SLOPE_MMHG_S or slope >= early * STEADY_SLOPE_RATIO
+        if abs(target - first) <= BAND_MMHG and settled:
             return pressure
         if time.monotonic() > deadline:
             raise Unstable(target, pressure)
-        if error > 0:
-            ctx.link.set(60, keep_valves)  # rajada curta: a bomba so' parte a partir de 45%
-            ctx.wait(max(0.1, min(0.4, error * 0.03)))
+        if error > BAND_MMHG:  # na faixa e assentando: rajada so' reiniciaria o assentamento
+            # rajada proporcional: a bomba so' parte a partir de 45%
+            ctx.link.set(60, keep_valves)
+            end = time.monotonic() + max(0.1, min(BURST_MAX_S, max(error, 1.0) * 0.03))
+            while time.monotonic() < end and ctx.check() < target + BURST_MARGIN_MMHG:
+                time.sleep(POLL_S)
             ctx.link.set(0, keep_valves)
-        else:
+        elif error < -BAND_MMHG:
             ctx.link.set(0, keep_valves | V2)
             ctx.wait(PULSE_S)
             ctx.link.set(0, keep_valves)

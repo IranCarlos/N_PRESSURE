@@ -1751,3 +1751,9 @@ TODO(BANCADA): manual, vazamento e calibracao pelo app, nao atuados no equipamen
 depende do manometro. Medir se a rotina acerta o alvo no manguito pequeno (inercia/redistribuicao).
 TODO(BUG): teste de vazamento da IHM segue com o falso APROVADO; o do app substitui.
 TODO(DECISAO): histerese da calibracao nao e' avaliada no firmware, so' linearidade.
+
+Rotina de pressao no equipamento real (2026-10-31): manual ok; 60 mmHg com 10 s deu REPROVADO falso
+(58,8 -> 46,9), porque a pressao ainda assentava: apos a rajada a leitura cai de 50 a 28 mmHg em 1,5 s e
+a queda seguinte desacelera de 2,8 a 0,3 mmHg/s. Com exigencia de assentamento: APROVADO, 58,4 -> 52,7
+(0,57 mmHg/s, coerente com o ~0,6 ja' medido), em cerca de 55 s. Depois disso, ainda sem novo ensaio
+real: sem rajada dentro da faixa, e faixa avaliada no inicio da janela, para medir vazamento constante.

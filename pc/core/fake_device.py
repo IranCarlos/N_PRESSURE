@@ -127,6 +127,8 @@ class FakeDevice:
         self.pump = 0
         self.valves = 0
         self.leak_rate = 0.3  # mmHg/s com tudo fechado
+        self.settle_gain = 0.0  # queda apos bombear: ar passando do tubo ao manguito
+        self._settle = 0.0
         self._manual_seen = 0.0
         self.cal_points: list[tuple[float, float]] = []
         self.cal_active = False
@@ -392,6 +394,8 @@ class FakeDevice:
                 self._leave_manual()
                 return
             self.pressure += (self.pump * 0.3 - self.leak_rate) * dt
+            self._settle += (self.settle_gain * self.pump - self._settle) * min(1.0, dt / 0.5) if self.pump else                 -self._settle * min(1.0, dt / 2.0)
+            self.pressure -= self._settle * dt
             if self.valves & 2:
                 self.pressure -= 40.0 * dt
             if self.valves & 1:

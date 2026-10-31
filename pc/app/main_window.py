@@ -54,11 +54,14 @@ class _Job(QRunnable):
 
     def run(self) -> None:
         try:
-            result = self.fn()
-        except Exception as exc:  # o erro volta para a interface decidir
-            self.signals.failed.emit(exc)
-        else:
-            self.signals.done.emit(result)
+            try:
+                result = self.fn()
+            except Exception as exc:  # o erro volta para a interface decidir
+                self.signals.failed.emit(exc)
+            else:
+                self.signals.done.emit(result)
+        except RuntimeError:
+            pass  # janela fechada no meio: ninguem mais espera o resultado
 
 
 class Bridge(QObject):

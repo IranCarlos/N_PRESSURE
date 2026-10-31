@@ -209,7 +209,7 @@ def test_leak_tab_gives_verdict(qapp, dev_window, monkeypatch):
     panel.leak_target.setValue(40.0)
     panel.leak_hold.setValue(5)
     panel.leak_start.click()
-    assert pump(qapp, lambda: panel.leak_result.text() == 'APROVADO', 15.0), panel.leak_detail.text()
+    assert pump(qapp, lambda: panel.leak_result.text() == 'APROVADO', 45.0), panel.leak_detail.text()
     assert pump(qapp, lambda: w.fake.state == p.ST_IDLE)
 
 

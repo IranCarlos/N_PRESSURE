@@ -150,6 +150,29 @@ def test_go_to_pressure_settles_in_band(link, session):
         assert fake.pump == 0
 
 
+def test_still_settling_is_not_stable(link, session):
+    dev, fake = link
+    sess, _ = session
+    wait_sample(dev)
+    fake.settle_gain = 0.03
+    with ManualLink(sess) as m:
+        reached = proc.go_to_pressure(proc.Context(dev, m, threading.Event()), 60.0)
+        start = fake.pressure
+        time.sleep(2.0)
+    assert 60.0 - reached <= proc.BAND_MMHG + 6.0  # fim da janela, ja' com a queda natural
+    assert start - fake.pressure < 4.0  # sem a regra de inclinacao caia bem mais
+
+
+def test_steady_leak_counts_as_settled(link, session):
+    dev, fake = link
+    sess, _ = session
+    wait_sample(dev)
+    fake.leak_rate = 0.5  # 1 mmHg/s constante: maior que o limite de inclinacao
+    with ManualLink(sess) as m:
+        ctx = proc.Context(dev, m, threading.Event(), go_timeout_s=30.0)
+        assert 60.0 - proc.go_to_pressure(ctx, 60.0) <= proc.BAND_MMHG + 6.0  # caiu durante a medida
+
+
 def test_target_above_limit_never_starts_pump(link, session):
     dev, fake = link
     sess, _ = session
