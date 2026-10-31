@@ -947,8 +947,81 @@ static void test_cal_commands(void)
     CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_OK);
 }
 
+/* ---- Fase 7.9 ------------------------------------------------------------ */
+
+static uint8_t s_reboot_calls;
+
+static void d_get(UsbProtoDiag_t *out)
+{
+    out->uptime_ms = 0x01020304U;
+    out->flags = 3U;
+    out->fault_pc = 0x08001234U;
+    out->stack_free_words[7] = 0xABCDU;
+}
+
+static uint8_t d_selftest(uint8_t *fail_mask, float *pressure_mmhg)
+{
+    *fail_mask = USB_PROTO_SELFTEST_SD | USB_PROTO_SELFTEST_ZERO;
+    *pressure_mmhg = 2.0f;
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static uint8_t d_reboot(void)
+{
+    s_reboot_calls++;
+    return (uint8_t)USB_PROTO_RSP_ESTADO_INVALIDO;
+}
+
+static const UsbProtoDiagOps_t FAKE_DIAG = { d_get, d_selftest, d_reboot };
+
+static void test_diag_commands(void)
+{
+    static const uint8_t key[32] = { 1U };
+    UsbProtoAuthSession_t session;
+    UsbProtoDispatchCtx_t ctx;
+    uint8_t rsp[128];
+    uint8_t x = 0U;
+
+    memset(&ctx, 0, sizeof(ctx));
+    UsbProtoAuth_Init(&session, key, 1U);
+    ctx.auth = &session;
+    ctx.diag = &FAKE_DIAG;
+
+    /* USER nao ve diagnostico nem reinicia */
+    CHECK(call_full(USB_PROTO_CMD_GET_DIAG, NULL, 0U, &ctx, rsp, sizeof(rsp)) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_SEM_PERMISSAO);
+    (void)call_full(USB_PROTO_CMD_REBOOT, NULL, 0U, &ctx, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_SEM_PERMISSAO);
+    CHECK(s_reboot_calls == 0U);
+
+    session.role = USB_PROTO_ROLE_DEV;
+    CHECK(call_full(USB_PROTO_CMD_GET_DIAG, NULL, 0U, &ctx, rsp, sizeof(rsp)) == USB_PROTO_DIAG_RSP_LEN);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_OK);
+    CHECK((rsp[1] == 0x04U) && (rsp[4] == 0x01U));
+    CHECK(rsp[25] == 3U);
+    CHECK((rsp[26] == 0x34U) && (rsp[29] == 0x08U));
+    CHECK(rsp[42] == USB_PROTO_DIAG_TASKS);
+    CHECK((rsp[57] == 0xCDU) && (rsp[58] == 0xABU));
+
+    CHECK(call_full(USB_PROTO_CMD_SELFTEST, NULL, 0U, &ctx, rsp, sizeof(rsp)) == 6U);
+    CHECK(rsp[1] == (USB_PROTO_SELFTEST_SD | USB_PROTO_SELFTEST_ZERO));
+
+    /* status do reboot vem da acao; payload invalido nem chega a ela */
+    CHECK(call_full(USB_PROTO_CMD_REBOOT, &x, 1U, &ctx, rsp, sizeof(rsp)) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO);
+    CHECK(s_reboot_calls == 0U);
+    (void)call_full(USB_PROTO_CMD_REBOOT, NULL, 0U, &ctx, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_ESTADO_INVALIDO);
+    CHECK(s_reboot_calls == 1U);
+
+    ctx.diag = NULL;
+    (void)call_full(USB_PROTO_CMD_GET_DIAG, NULL, 0U, &ctx, rsp, sizeof(rsp));
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_OCUPADO);
+}
+
 int main(void)
 {
+    test_diag_commands();
     test_cal_commands();
     test_manual_commands();
     test_param_requires_dev();

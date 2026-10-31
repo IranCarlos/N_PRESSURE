@@ -2329,6 +2329,7 @@ void StartUsbProtoTask(void *argument)
               ctx.params = UsbActionsStm32_GetParamOps(); /* Fase 7.6 - so' DEV */
               ctx.manual = UsbActionsStm32_GetManualOps(); /* Fase 7.7 - so' DEV */
               ctx.cal = UsbActionsStm32_GetCalOps();       /* Fase 7.8 - so' DEV */
+              ctx.diag = UsbActionsStm32_GetDiagOps();     /* Fase 7.9 - so' DEV */
 #else
               ctx.actions = NULL;   /* sem Control_Loop: comandos de controle -> OCUPADO */
               ctx.telemetry = NULL; /* sem controlTask produzindo amostras -> OCUPADO */
@@ -2390,6 +2391,7 @@ void StartUsbProtoTask(void *argument)
     // fechada/cabo puxado encerram na hora).
     UsbActionsStm32_EnforceManualSession(
         (UsbProtoAuth_GetRole(&g_usb_auth_session) == USB_PROTO_ROLE_DEV) ? 1U : 0U);
+    UsbActionsStm32_PollReboot(HAL_GetTick()); /* Fase 7.9 */
 #endif
 
     // Fase 7.4: o que o equipamento manda sozinho - so' para um PC que ja'

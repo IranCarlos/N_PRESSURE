@@ -88,6 +88,14 @@ void UsbActionsStm32_EnforceManualSession(uint8_t dev_session_active);
 /* Fase 7.8: calibracao completa do sensor (CAL_*, so' DEV). */
 const UsbProtoCalOps_t * UsbActionsStm32_GetCalOps(void);
 
+/* --- Fase 7.9 ----------------------------------------------------------- */
+
+const UsbProtoDiagOps_t * UsbActionsStm32_GetDiagOps(void);
+
+/* Chamar periodicamente na usbProtoTask: executa o REBOOT pedido, depois de a
+ * resposta sair e o log ser gravado, se o equipamento continuar em STANDBY. */
+void UsbActionsStm32_PollReboot(uint32_t now_ms);
+
 #ifdef __cplusplus
 }
 #endif

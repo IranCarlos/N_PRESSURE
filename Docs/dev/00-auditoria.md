@@ -1587,3 +1587,14 @@ apos a troca; estavel em 4,2-7,9 s; pico lido +2,3 a +3,6 mmHg; pressao assentad
 (-6,4 no 1o ciclo apos a troca); nenhum pulso de alivio. A assentada passa um pouco da banda de 3 mmHg antes da
 rajada de reposicao. Supera os TODO(BANCADA) de firmware final no grande e de troca sem reset; continua sem
 validacao em bancada o E013 com vazamento provocado (usuario adiou em 2026-10-31).
+
+## Fase 7.9 (parcial): GET_DIAG, SELFTEST e REBOOT (2026-10-31)
+
+Comandos so' DEV. SELFTEST confere SD, RTC, EEPROM (chave DEV), sensor e zero, sem acionar bomba nem valvulas.
+REBOOT e SELFTEST so' em STANDBY; o reset ocorre 500 ms depois da resposta e registra no log de auditoria.
+`tools/bench_diag.py` le e valida. Bancada: tudo OK; sem DEV = SEM_PERMISSAO; durante ensaio = ESTADO_INVALIDO.
+
+Valores lidos, a acompanhar: jitter maximo ~650-714 us no laco de 1 ms (nao subiu em 2 ciclos completos, origem
+ainda nao isolada; pode ser o boot); pilha livre minima control=87, safety=85, audio=97 palavras; FreeRTOS heap 15144 B.
+
+**Pendente da 7.9:** IDENT_TLAG (0x0130), que aciona a bomba.

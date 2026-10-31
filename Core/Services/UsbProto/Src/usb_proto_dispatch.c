@@ -966,6 +966,62 @@ static size_t handle_cal(const UsbProtoDispatchCtx_t *ctx, uint16_t cmd,
     return 1U;
 }
 
+/* ---- Fase 7.9: GET_DIAG/SELFTEST/REBOOT (so' DEV) ------------------------- */
+
+static size_t handle_diag(const UsbProtoDispatchCtx_t *ctx, uint16_t cmd, uint16_t req_len,
+                          uint8_t *rsp_payload, size_t rsp_cap)
+{
+    if (ctx_role(ctx) != USB_PROTO_ROLE_DEV) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_SEM_PERMISSAO);
+    }
+    if ((ctx == NULL) || (ctx->diag == NULL) || (rsp_cap < USB_PROTO_DIAG_RSP_LEN)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_OCUPADO);
+    }
+    if (req_len != 0U) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_PARAM_INVALIDO);
+    }
+    if (cmd == USB_PROTO_CMD_REBOOT) {
+        rsp_payload[0] = ctx->diag->reboot();
+        return 1U;
+    }
+    if (cmd == USB_PROTO_CMD_SELFTEST) {
+        uint8_t fail = 0U;
+        float pressure = 0.0f;
+
+        rsp_payload[0] = ctx->diag->selftest(&fail, &pressure);
+        if (rsp_payload[0] != (uint8_t)USB_PROTO_RSP_OK) {
+            return 1U;
+        }
+        rsp_payload[1] = fail;
+        write_f32_le(&rsp_payload[2], pressure);
+        return 6U;
+    }
+    {
+        UsbProtoDiag_t d;
+        size_t i;
+
+        memset(&d, 0, sizeof(d));
+        ctx->diag->get(&d);
+        rsp_payload[0] = (uint8_t)USB_PROTO_RSP_OK;
+        write_u32_le(&rsp_payload[1], d.uptime_ms);
+        write_u32_le(&rsp_payload[5], d.jitter_max_us);
+        write_u32_le(&rsp_payload[9], d.boot_rsr);
+        write_u32_le(&rsp_payload[13], d.telemetry_dropped);
+        write_u32_le(&rsp_payload[17], d.heap_free);
+        write_u32_le(&rsp_payload[21], d.heap_min_free);
+        rsp_payload[25] = d.flags;
+        write_u32_le(&rsp_payload[26], d.fault_pc);
+        write_u32_le(&rsp_payload[30], d.fault_lr);
+        write_u32_le(&rsp_payload[34], d.fault_cfsr);
+        write_u32_le(&rsp_payload[38], d.fault_hfsr);
+        rsp_payload[42] = (uint8_t)USB_PROTO_DIAG_TASKS;
+        for (i = 0U; i < USB_PROTO_DIAG_TASKS; i++) {
+            write_u16_le(&rsp_payload[43U + (2U * i)], d.stack_free_words[i]);
+        }
+        return USB_PROTO_DIAG_RSP_LEN;
+    }
+}
+
 size_t UsbProtoDispatch_Handle(uint16_t cmd,
                                 const uint8_t *req_payload, uint16_t req_len,
                                 const UsbProtoDispatchCtx_t *ctx,
@@ -1030,6 +1086,10 @@ size_t UsbProtoDispatch_Handle(uint16_t cmd,
         case USB_PROTO_CMD_CAL_APPLY:
         case USB_PROTO_CMD_CAL_ABORT:
             return handle_cal(ctx, cmd, req_payload, req_len, rsp_payload, rsp_cap);
+        case USB_PROTO_CMD_SELFTEST:
+        case USB_PROTO_CMD_GET_DIAG:
+        case USB_PROTO_CMD_REBOOT:
+            return handle_diag(ctx, cmd, req_len, rsp_payload, rsp_cap);
         default:
             rsp_payload[0] = (uint8_t)USB_PROTO_RSP_CMD_DESCONHECIDO;
             return 1U;

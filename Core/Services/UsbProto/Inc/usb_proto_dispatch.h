@@ -311,6 +311,49 @@ typedef struct {
     uint8_t (*abort)(void);
 } UsbProtoCalOps_t;
 
+/* ---- Fase 7.9: diagnostico (so' DEV) -------------------------------------
+ *
+ * GET_DIAG  req: -  rsp: status, uptime_ms u32, jitter_max_us u32, boot_rsr u32
+ *                   (RCC->RSR), telemetria_descartada u32, heap_livre u32,
+ *                   heap_minimo u32, flags u8 (bit0=hard fault no boot anterior,
+ *                   bit1=reset por IWDG), fault_pc u32, fault_lr u32, cfsr u32,
+ *                   hfsr u32, n u8, n x pilha_livre_palavras u16 (ordem: control,
+ *                   safety, input, app, usbProto, storage, ui, audio)
+ * SELFTEST  req: -  rsp: status (ESTADO_INVALIDO fora de STANDBY), falhas u8
+ *                   (mascara USB_PROTO_SELFTEST_*; 0 = aprovado), pressao_mmhg f32
+ *                   Nao aciona bomba nem valvulas.
+ * REBOOT    req: -  rsp: status (ESTADO_INVALIDO fora de STANDBY); o reset vem
+ *                   depois da resposta e do registro no log.
+ */
+#define USB_PROTO_DIAG_TASKS        (8U)
+#define USB_PROTO_DIAG_RSP_LEN      (59U)
+#define USB_PROTO_SELFTEST_SD       (1U << 0)
+#define USB_PROTO_SELFTEST_RTC      (1U << 1)
+#define USB_PROTO_SELFTEST_EEPROM   (1U << 2)
+#define USB_PROTO_SELFTEST_SENSOR   (1U << 3)
+#define USB_PROTO_SELFTEST_ZERO     (1U << 4) /* sensor fora de zero com o manguito aberto */
+
+typedef struct {
+    uint32_t uptime_ms;
+    uint32_t jitter_max_us;
+    uint32_t boot_rsr;
+    uint32_t telemetry_dropped;
+    uint32_t heap_free;
+    uint32_t heap_min_free;
+    uint8_t  flags;
+    uint32_t fault_pc;
+    uint32_t fault_lr;
+    uint32_t fault_cfsr;
+    uint32_t fault_hfsr;
+    uint16_t stack_free_words[USB_PROTO_DIAG_TASKS];
+} UsbProtoDiag_t;
+
+typedef struct {
+    void    (*get)(UsbProtoDiag_t *out);
+    uint8_t (*selftest)(uint8_t *fail_mask, float *pressure_mmhg);
+    uint8_t (*reboot)(void);
+} UsbProtoDiagOps_t;
+
 #define USB_PROTO_PARAM_LIST_MAX (16U)
 #define USB_PROTO_PARAM_NAME_MAX (23U)
 #define USB_PROTO_PARAM_UNIT_MAX (7U)
@@ -359,6 +402,7 @@ typedef struct {
     const UsbProtoParamOps_t *params; /* Fase 7.6 - PARAM_* (NULL -> OCUPADO) */
     const UsbProtoManualOps_t *manual; /* Fase 7.7 - MANUAL_* (NULL -> OCUPADO) */
     const UsbProtoCalOps_t *cal;       /* Fase 7.8 - CAL_* (NULL -> OCUPADO) */
+    const UsbProtoDiagOps_t *diag;     /* Fase 7.9 - GET_DIAG/SELFTEST/REBOOT (NULL -> OCUPADO) */
 } UsbProtoDispatchCtx_t;
 
 /**

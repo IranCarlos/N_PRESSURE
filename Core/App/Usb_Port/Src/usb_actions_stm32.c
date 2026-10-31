@@ -17,6 +17,11 @@
 #include "valve.h"
 #include "pwm_motor.h"
 #include "cycle_record.h"
+#include "adc_acq.h"
+#include "fault_manager.h"
+#include "FreeRTOS.h"
+#include "task.h"
+#include "cmsis_os2.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -716,4 +721,101 @@ static const UsbProtoCalOps_t s_cal_ops = { cal_start, cal_point, cal_apply, cal
 const UsbProtoCalOps_t * UsbActionsStm32_GetCalOps(void)
 {
     return &s_cal_ops;
+}
+
+/* --- Fase 7.9: diagnostico e auto-teste (DEV) --------------------------- */
+
+#define USB_ACTIONS_REBOOT_DELAY_MS (500u)   /* resposta + log antes do reset */
+#define USB_ACTIONS_ZERO_MAX_MMHG   (5.0f)   /* P_SEGURA: manguito aberto em repouso */
+
+/* Definidos em main.c (gerados pelo CubeMX ou de diagnostico). */
+extern osThreadId_t controlTaskHandle, safetyTaskHandle, inputTaskHandle, appTaskHandle,
+    usbProtoTaskHandle, storageTaskHandle, uiTaskHandle, audioTaskHandle;
+extern UsbTelemetry_t g_usb_telemetry;
+extern volatile uint32_t g_boot_rsr;
+extern uint8_t g_dev_key_valid;
+
+static uint8_t s_reboot_pending;
+static uint32_t s_reboot_at_ms;
+
+static void diag_get(UsbProtoDiag_t * out)
+{
+    const osThreadId_t tasks[USB_PROTO_DIAG_TASKS] = {
+        controlTaskHandle, safetyTaskHandle, inputTaskHandle, appTaskHandle,
+        usbProtoTaskHandle, storageTaskHandle, uiTaskHandle, audioTaskHandle
+    };
+
+    out->uptime_ms = HAL_GetTick();
+    out->jitter_max_us = ControlLoop_GetMaxJitterCycles() / (SystemCoreClock / 1000000u);
+    out->boot_rsr = g_boot_rsr;
+    out->telemetry_dropped = g_usb_telemetry.dropped;
+    out->heap_free = (uint32_t)xPortGetFreeHeapSize();
+    out->heap_min_free = (uint32_t)xPortGetMinimumEverFreeHeapSize();
+    out->flags = (FaultManager_WasIwdgReset() != 0u) ? 0x02u : 0x00u;
+    if (FaultManager_HasPendingFault() != 0u) {
+        FaultManager_Record_t rec;
+
+        FaultManager_GetLastFault(&rec);
+        out->flags |= 0x01u;
+        out->fault_pc = rec.pc;
+        out->fault_lr = rec.lr;
+        out->fault_cfsr = rec.cfsr;
+        out->fault_hfsr = rec.hfsr;
+    }
+    for (uint32_t i = 0u; i < USB_PROTO_DIAG_TASKS; i++) {
+        if (tasks[i] != NULL) {
+            out->stack_free_words[i] = (uint16_t)uxTaskGetStackHighWaterMark((TaskHandle_t)tasks[i]);
+        }
+    }
+}
+
+static uint8_t diag_selftest(uint8_t * fail_mask, float * pressure_mmhg)
+{
+    uint8_t fail = 0u;
+    float p;
+
+    if ((s_rt == NULL) || (UsbProtoPolicy_IdleOnly(s_rt->state) != USB_PROTO_RSP_OK)) {
+        return (uint8_t)USB_PROTO_RSP_ESTADO_INVALIDO;
+    }
+    p = UsbActionsStm32_PressureMmHg();
+    if (StorageTask_GetStats().sd_mounted == 0u) { fail |= USB_PROTO_SELFTEST_SD; }
+    if (RtcService_GetFlags() != 0u)             { fail |= USB_PROTO_SELFTEST_RTC; }
+    if (g_dev_key_valid == 0u)                   { fail |= USB_PROTO_SELFTEST_EEPROM; }
+    if (ADC_Acq_GetDiagnostics()->flags != 0u)   { fail |= USB_PROTO_SELFTEST_SENSOR; }
+    if ((p > USB_ACTIONS_ZERO_MAX_MMHG) || (p < -USB_ACTIONS_ZERO_MAX_MMHG)) {
+        fail |= USB_PROTO_SELFTEST_ZERO;
+    }
+    *fail_mask = fail;
+    *pressure_mmhg = p;
+    log_usb_command(STORAGE_LOG_LEVEL_AUDIT, (fail == 0u) ? "USB: auto-teste aprovado"
+                                                          : "USB: auto-teste reprovado");
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static uint8_t diag_reboot(void)
+{
+    if ((s_rt == NULL) || (UsbProtoPolicy_IdleOnly(s_rt->state) != USB_PROTO_RSP_OK)) {
+        return (uint8_t)USB_PROTO_RSP_ESTADO_INVALIDO;
+    }
+    log_usb_command(STORAGE_LOG_LEVEL_AUDIT, "USB: reinicio pedido (DEV)");
+    s_reboot_at_ms = HAL_GetTick() + USB_ACTIONS_REBOOT_DELAY_MS;
+    s_reboot_pending = 1u;
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static const UsbProtoDiagOps_t s_diag_ops = { diag_get, diag_selftest, diag_reboot };
+
+const UsbProtoDiagOps_t * UsbActionsStm32_GetDiagOps(void)
+{
+    return &s_diag_ops;
+}
+
+void UsbActionsStm32_PollReboot(uint32_t now_ms)
+{
+    if ((s_reboot_pending != 0u) && ((int32_t)(now_ms - s_reboot_at_ms) >= 0)) {
+        s_reboot_pending = 0u;
+        if ((s_rt != NULL) && (s_rt->state == SYSTEM_STATE_IDLE)) {
+            NVIC_SystemReset();
+        }
+    }
 }
