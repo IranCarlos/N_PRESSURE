@@ -1777,3 +1777,12 @@ mmHg/s); V3 aberta 99,2 -> 95,5 (0,54 mmHg/s). Ambos APROVADO, cerca de 37 s por
 confirmar no ponteiro que a V3 abre e fecha como comandado.
 TODO(DECISAO): `handle_deflating` e o estado seguro abrem a V3; com a polaridade certa isso liga o
 manometro na descida. Ensaios automaticos e NC00 anteriores rodaram com a V3 invertida: refazer.
+
+V3 em desenvolvimento (decisao do usuario, 2026-10-31): aberta em todo o ensaio, na descida e por 10 s
+depois, e 10 s apos sair do manual, para o ponteiro nao travar. Ponteiro confirmado pelo usuario.
+TODO(RELEASE): remover `CONTROL_CORE_V3_FOLLOWS_TEST`; no release a V3 abre so' no manual e na calibracao.
+Decisao tambem de manter a V3 aberta na descida vale so' ate' esse release.
+Manometro: resolucao 2 mmHg, escala 300 mmHg; classe de exatidao nao informada.
+Ciclo 80 mmHg: V3 ok (10,00 s apos a descida), mas NC05 (2,38 s) e plato instavel: 80 -> 73,6 em 3,2 s,
+reentrada em INFLATING e pulsos de V2 de 30 ms tirando ~7 mmHg. Um ciclo so', montagem nova: repetir antes
+de concluir. TODO(BANCADA).

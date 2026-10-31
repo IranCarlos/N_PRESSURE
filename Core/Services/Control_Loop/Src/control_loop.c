@@ -134,6 +134,7 @@ static struct {
     // consecutivas de ControlLoop_Update(); o alvo e' CONTROL_LOOP_PERIOD_MS.
     uint32_t last_update_cycles;
     uint32_t max_jitter_cycles; /**< maior |delta - periodo esperado| ja' visto */
+    uint32_t v3_linger_ms;      /**< ver ControlCore_V3Follow() */
     uint32_t max_jitter_tick;   /**< HAL_GetTick() do pior caso */
     uint32_t max_jitter_state;  /**< SystemState_t no pior caso */
     uint32_t max_exec_cycles;   /**< maior duracao de ControlLoop_Update() */
@@ -275,6 +276,7 @@ static void leave_remote_manual(ControlLoop_RemoteExit_t reason) {
     s_control.manual_test_enabled = 0U;
     set_pump_power(0.0f);
     set_valves(1, 1, 1); // estado seguro: tudo aberto; o IDLE assume no proximo passo
+    s_control.v3_linger_ms = CONTROL_CORE_V3_LINGER_MS; // esvazia a linha do manometro
     s_control.runtime_data->state = SYSTEM_STATE_IDLE;
     s_control.remote_exit_reason = (uint8_t)reason;
 }
@@ -524,6 +526,11 @@ static void control_loop_step(void) {
         ControlCore_Step(&s_control.cc, &in, &out);
 
         set_pump_power(out.pump_power);
+#if CONTROL_CORE_V3_FOLLOWS_TEST
+        if (ControlCore_V3Follow(s_control.runtime_data->state, in.dt_ms, &s_control.v3_linger_ms) != 0u) {
+            out.valve3_open = 1u;
+        }
+#endif
         set_valves(out.valve1_open, out.valve2_open, out.valve3_open);
     }
 }

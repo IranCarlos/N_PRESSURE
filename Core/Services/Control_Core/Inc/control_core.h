@@ -282,6 +282,28 @@ void ControlCore_Step(ControlCore_t *cc, const ControlCore_Inputs_t *in,
  * ControlLoop_StartInflation). Sem efeito em outros estados. */
 void ControlCore_StartInflation(ControlCore_t *cc);
 
+/* TODO(RELEASE): remover no primeiro release (decisao do usuario, 2026-10-31). Em
+ * desenvolvimento a V3 acompanha o ensaio para comparar a leitura com o manometro.
+ * No release ela abre so' no modo manual e na calibracao. */
+#define CONTROL_CORE_V3_FOLLOWS_TEST   (1u)
+#define CONTROL_CORE_V3_LINGER_MS      (10000u) /* apos a descida, para esvaziar a linha do manometro */
+
+/* Devolve 1 se a V3 deve ficar aberta neste passo. `linger_ms` e' o tempo restante
+ * apos a descida; arma ele durante o ensaio e o consome fora dele. */
+static inline uint8_t ControlCore_V3Follow(SystemState_t state, uint32_t dt_ms, uint32_t *linger_ms)
+{
+    if ((state == SYSTEM_STATE_INFLATING) || (state == SYSTEM_STATE_STABILIZING) ||
+        (state == SYSTEM_STATE_STABILIZED) || (state == SYSTEM_STATE_DEFLATING_FAST)) {
+        *linger_ms = CONTROL_CORE_V3_LINGER_MS;
+        return 1u;
+    }
+    if (*linger_ms > 0u) {
+        *linger_ms = (*linger_ms > dt_ms) ? (*linger_ms - dt_ms) : 0u;
+        return 1u;
+    }
+    return 0u;
+}
+
 /* Marca o proximo inicio de desinflar como cancelamento do operador (NC07) em
  * qualquer fase, inclusive no plato. Quem desinfla continua sendo abort_request. */
 void ControlCore_RequestCancel(ControlCore_t *cc);

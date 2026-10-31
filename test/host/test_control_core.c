@@ -481,6 +481,21 @@ static void test_plateau_time_limit_deflates(void)
     CHECK(stats->technical_fault == 0u);
 }
 
+static void test_v3_follows_test_then_lingers(void)
+{
+    uint32_t linger = 0u;
+
+    CHECK(ControlCore_V3Follow(SYSTEM_STATE_IDLE, 1u, &linger) == 0u);
+    CHECK(ControlCore_V3Follow(SYSTEM_STATE_INFLATING, 1u, &linger) == 1u);
+    CHECK(ControlCore_V3Follow(SYSTEM_STATE_STABILIZED, 1u, &linger) == 1u);
+    CHECK(ControlCore_V3Follow(SYSTEM_STATE_DEFLATING_FAST, 1u, &linger) == 1u);
+    CHECK(linger == CONTROL_CORE_V3_LINGER_MS);
+    CHECK(ControlCore_V3Follow(SYSTEM_STATE_IDLE, CONTROL_CORE_V3_LINGER_MS - 1u, &linger) == 1u);
+    CHECK(linger == 1u);
+    CHECK(ControlCore_V3Follow(SYSTEM_STATE_IDLE, 5u, &linger) == 1u); /* ultimo passo */
+    CHECK(ControlCore_V3Follow(SYSTEM_STATE_IDLE, 1u, &linger) == 0u);
+}
+
 /* Pedal no plato e' o fim normal; cancelar pelo app vira NC07 no plato tambem. */
 static void run_stop_in_plateau(uint8_t cancel, uint8_t expected_aborted)
 {
@@ -790,6 +805,7 @@ int main(void)
     test_arterial_pulse_does_not_widen_plateau_band();
     test_plateau_time_limit_deflates();
     test_cancel_in_plateau_is_nc07();
+    test_v3_follows_test_then_lingers();
     test_abort_during_inflation_sets_nc07_flag();
     test_relief_valve_hysteresis_with_ripple();
     test_fast_approach_full_power_far_from_setpoint();
