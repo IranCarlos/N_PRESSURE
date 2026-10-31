@@ -22,6 +22,8 @@ SLOPE_WINDOW_S = 2.0
 STABLE_SLOPE_MMHG_S = 0.5  # o ar passa do tubo para o manguito por varios segundos
 STEADY_SLOPE_RATIO = 0.8  # assentar desacelera; vazamento segue reto e nao e' assentamento
 BURST_MAX_S = 1.0
+BURST_GAIN_START = 33.0  # mmHg/s
+BURST_GAIN_MIN = 5.0
 BURST_MARGIN_MMHG = 8.0
 GO_TIMEOUT_S = 90.0
 POLL_S = 0.02
@@ -90,6 +92,7 @@ def go_to_pressure(ctx: Context, target: float, keep_valves: int = 0) -> float:
         raise ProcedureError(f"alvo {target:.0f} mmHg fora de 10 a {MAX_TARGET_MMHG:.0f}")
     ctx.limit = target + OVER_MARGIN_MMHG
     deadline = time.monotonic() + ctx.go_timeout_s
+    burst_gain = BURST_GAIN_START
     ctx.tell(f"Subindo até {target:.0f} mmHg")
     if ctx.check() < target - BAND_MMHG:
         ctx.link.set(100, keep_valves)
@@ -129,12 +132,17 @@ def go_to_pressure(ctx: Context, target: float, keep_valves: int = 0) -> float:
         if time.monotonic() > deadline:
             raise Unstable(target, pressure)
         if error > BAND_MMHG:  # na faixa e assentando: rajada so' reiniciaria o assentamento
-            # rajada proporcional: a bomba so' parte a partir de 45%
-            ctx.link.set(60, keep_valves)
-            end = time.monotonic() + max(0.1, min(BURST_MAX_S, max(error, 1.0) * 0.03))
+            # A duracao vem do ganho medido na rajada anterior: com ganho fixo a
+            # reposicao empatava com a perda e a pressao nao chegava a' faixa.
+            ctx.link.set(60, keep_valves)  # a bomba so' parte a partir de 45%
+            started = time.monotonic()
+            end = started + max(0.1, min(BURST_MAX_S, (target + BAND_MMHG - pressure) / burst_gain))
             while time.monotonic() < end and ctx.check() < target + BURST_MARGIN_MMHG:
                 time.sleep(POLL_S)
             ctx.link.set(0, keep_valves)
+            risen = ctx.check() - pressure
+            if risen > 0.5:
+                burst_gain = max(BURST_GAIN_MIN, risen / max(0.1, time.monotonic() - started))
         elif error < -BAND_MMHG:
             ctx.link.set(0, keep_valves | V2)
             ctx.wait(PULSE_S)

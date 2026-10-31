@@ -1757,3 +1757,12 @@ Rotina de pressao no equipamento real (2026-10-31): manual ok; 60 mmHg com 10 s 
 a queda seguinte desacelera de 2,8 a 0,3 mmHg/s. Com exigencia de assentamento: APROVADO, 58,4 -> 52,7
 (0,57 mmHg/s, coerente com o ~0,6 ja' medido), em cerca de 55 s. Depois disso, ainda sem novo ensaio
 real: sem rajada dentro da faixa, e faixa avaliada no inicio da janela, para medir vazamento constante.
+
+Vazamento na V3 (2026-10-31, achado pelo usuario): com o rele da V3 (manometro) ligado, queda de
+1,1-1,3 mmHg/s; depois de o usuario desligar o rele, 0,16-0,38 mmHg/s a 60 e 100 mmHg. Correcao de
+interpretacao: a reta de 1,3 mmHg/s era vazamento real, nao assentamento. Os APROVADOS a 60 e 100 mmHg
+valem so' sem a V3. A rajada com ganho medido entrou no mesmo periodo do rele desligado: sua
+contribuicao nao foi separada. V1-V3 sao NA (rele ligado = fechada): ramo da V3 a isolar.
+TODO(BANCADA): separar sede da V3, saida da valvula e conexoes do manometro. O ~0,6 mmHg/s antes tido
+como queda natural pode ser em parte este mesmo vazamento.
+Padrao do teste de vazamento pelo app: 100 mmHg, 10 s, 8 mmHg (decisao do usuario).
