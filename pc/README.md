@@ -1,15 +1,35 @@
-# pc/ — Aplicações de PC (Fases 8-9)
+# pc/ — Aplicativo de PC
 
-Monorepo das duas aplicações de PC descritas na Parte B, seção 2.7 do prompt de projeto
-(`Docs/PROMPT_PROJETO_STM32H723_MANGUITO.md`):
+Um único programa com dois níveis de acesso (decisão do projeto). O nível de usuário é a Fase 8;
+o nível DEV (parâmetros, modo manual, calibração, osciloscópio) entra na Fase 9.
 
-- `core/` — biblioteca compartilhada: transporte serial, COBS/CRC, codecs do protocolo (Apêndice
-  A), modelos de dados, parsing dos arquivos do SD, autenticação. Testes com `pytest` e um
-  dispositivo virtual que fala o protocolo (para desenvolver sem hardware).
-- `app_user/` — aplicação do usuário: status ao vivo, gráfico em tempo real, histórico de
-  ensaios, exportação (CSV/PDF/XLSX), verificação de integridade da cadeia de hash.
-- `app_dev/` — aplicação do desenvolvedor: tudo do usuário + login DEV, editor de parâmetros,
-  modo manual, osciloscópio, assistente de calibração, identificação de `T_lag`.
+- `core/`: protocolo USB, cliente do equipamento, leitura dos arquivos do SD, verificação de
+  integridade, relatórios e dispositivo virtual. Não depende de Qt.
+- `app/`: interface em PySide6.
+- `tests/`: `pytest`, com a janela real contra o dispositivo virtual.
 
-Ainda não implementado — depende do protocolo USB (Fase 7) existir primeiro. Ver
-`Docs/dev/00-auditoria.md` para o estado atual do projeto.
+## Rodar
+
+O ambiente fica fora do OneDrive porque os caminhos do Qt passam do limite do Windows dentro da
+pasta do projeto:
+
+```bash
+python -m venv %LOCALAPPDATA%\np-venv
+%LOCALAPPDATA%\np-venv\Scripts\python -m pip install -r requirements.txt
+cd pc
+%LOCALAPPDATA%\np-venv\Scripts\python -m app             # equipamento pela USB
+%LOCALAPPDATA%\np-venv\Scripts\python -m app --virtual   # sem hardware
+%LOCALAPPDATA%\np-venv\Scripts\python -m pytest
+```
+
+A cópia local dos registros fica em `%APPDATA%\nPressure\<número de série>`.
+
+## Integridade
+
+- **ÍNTEGRO**: todas as linhas e ensaios conferem com a corrente de hash.
+- **ADULTERADO**: hash errado ou linha removida.
+- **NÃO VERIFICÁVEL**: registros de firmware antigo, com linha cortada ou corrente reiniciada. Não
+  provam nem negam adulteração.
+
+A corrente usa SHA-256 sem chave: detecta alteração acidental ou parcial, mas quem conhece o formato
+pode recalcular um arquivo inteiro.
