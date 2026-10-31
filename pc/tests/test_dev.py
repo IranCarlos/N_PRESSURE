@@ -58,6 +58,11 @@ def test_parse_key_from_hex_and_header():
     assert parse_key(KEY.hex()) == KEY
     header = "static const uint8_t DEV_KEY_PROVISION[32] = {" + ",".join(f"0x{b:02x}" for b in KEY) + "};"
     assert parse_key(header) == KEY
+    listing = ", ".join(f"0x{b:02X}" for b in KEY)
+    assert parse_key(listing) == KEY
+    assert parse_key("{ " + listing + " }") == KEY
+    assert parse_key(KEY.hex(" ")) == KEY
+    assert parse_key("  " + KEY.hex().upper() + chr(10)) == KEY
     for bad in ("abc", "zz" * 32, "00" * 31):
         with pytest.raises(ValueError):
             parse_key(bad)

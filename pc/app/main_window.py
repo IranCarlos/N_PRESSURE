@@ -13,10 +13,10 @@ from pathlib import Path
 import pyqtgraph as pg
 from PySide6.QtCore import QDate, QObject, QRunnable, QStandardPaths, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QColor
-from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDateEdit, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
-                               QLineEdit, QMainWindow, QMessageBox, QProgressBar, QPushButton, QSpinBox, QSplitter,
-                               QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDateEdit, QDialog, QDialogButtonBox, QDoubleSpinBox,
+                               QFileDialog, QFormLayout, QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
+                               QLabel, QLineEdit, QMainWindow, QMessageBox, QProgressBar, QPushButton, QSpinBox,
+                               QSplitter, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
 from core import protocol as p
 from core import reports, sdfiles as sd
@@ -84,6 +84,47 @@ def big_button(text: str, color: str) -> QPushButton:
     button.setMinimumHeight(44)
     paint_button(button, color)
     return button
+
+
+class KeyDialog(QDialog):
+    """Pede a chave DEV. O texto fica so' em memoria e so' durante o login."""
+
+    def __init__(self, parent: QWidget) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Acesso desenvolvedor")
+        self.setMinimumWidth(460)
+        self.key_text = ""
+        layout = QVBoxLayout(self)
+        hint = QLabel("Escolha o arquivo dev_key_secret.h ou cole a chave. Vale a lista 0x12, 0x34, ... "
+                      "ou os 64 caracteres seguidos.")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+        self.key_field = QLineEdit()
+        self.key_field.setEchoMode(QLineEdit.EchoMode.Password)
+        self.key_field.setPlaceholderText("Cole a chave aqui")
+        layout.addWidget(self.key_field)
+        pick = QPushButton("Escolher arquivo...")
+        pick.clicked.connect(self._pick_file)
+        layout.addWidget(pick)
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        buttons.accepted.connect(self._accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _pick_file(self) -> None:
+        name, _ = QFileDialog.getOpenFileName(self, "Arquivo da chave", "", "Chave (dev_key_secret.h *.h *.txt);;Todos (*)")
+        if not name:
+            return
+        try:
+            self.key_text = Path(name).read_text("utf-8")
+        except (OSError, UnicodeDecodeError) as exc:
+            QMessageBox.warning(self, "Chave", f"Não foi possível ler o arquivo: {exc}")
+            return
+        self.accept()
+
+    def _accept(self) -> None:
+        self.key_text = self.key_field.text()
+        self.accept()
 
 
 class MainWindow(QMainWindow):
@@ -212,19 +253,9 @@ class MainWindow(QMainWindow):
             self._close_dev()
             self.run(session.logout, failed=lambda _: None)
             return
-        name, _ = QFileDialog.getOpenFileName(self, "Arquivo da chave de desenvolvedor (Cancelar para digitar)")
-        if name:
-            try:
-                text = Path(name).read_text("utf-8")
-            except (OSError, UnicodeDecodeError) as exc:
-                QMessageBox.warning(self, "Chave", f"Não foi possível ler o arquivo: {exc}")
-                return
-        else:
-            text, accepted = QInputDialog.getText(self, "Acesso desenvolvedor", "Chave (64 hexadecimais):",
-                                                  QLineEdit.EchoMode.Password)
-            if not accepted or not text:
-                return
-        self._login(text)
+        dialog = KeyDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted and dialog.key_text:
+            self._login(dialog.key_text)
 
     def _login(self, key_text: str) -> None:
         from app.dev_panel import DevPanel

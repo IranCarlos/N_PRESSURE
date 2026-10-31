@@ -39,15 +39,16 @@ GROUP_NAMES = {0: "PID", 1: "Estabilização", 2: "Válvula de alívio", 3: "Apr
 
 
 def parse_key(text: str) -> bytes:
-    """Aceita 64 hex ou o conteudo de dev_key_secret.h."""
-    body = text[text.index("DEV_KEY_PROVISION"):] if "DEV_KEY_PROVISION" in text else None
-    if body is not None:
-        key = bytes(int(x, 16) for x in re.findall(r"0x([0-9a-fA-F]{2})", body))
+    """Aceita o arquivo dev_key_secret.h, a lista "0x12, 0x34, ..." ou 64 hexadecimais."""
+    body = text[text.index("DEV_KEY_PROVISION"):] if "DEV_KEY_PROVISION" in text else text
+    pairs = re.findall(r"0[xX]([0-9a-fA-F]{2})\b", body)
+    if pairs:
+        key = bytes(int(x, 16) for x in pairs)
     else:
-        cleaned = re.sub(r"\s", "", text)
-        key = bytes.fromhex(cleaned) if re.fullmatch(r"[0-9a-fA-F]*", cleaned) else b""
+        cleaned = re.sub(r"[\s,;:{}]", "", text)
+        key = bytes.fromhex(cleaned) if re.fullmatch(r"(?:[0-9a-fA-F]{2})*", cleaned) else b""
     if len(key) != KEY_LEN:
-        raise ValueError("chave inválida: são esperados 32 bytes")
+        raise ValueError(f"a chave deve ter 32 bytes; foram encontrados {len(key)}")
     return key
 
 
