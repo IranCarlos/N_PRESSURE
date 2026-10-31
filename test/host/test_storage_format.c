@@ -1,5 +1,6 @@
 /* Fase 5.3 — caminhos e conteudo dos arquivos do SD (Apendice C). */
 #include "storage_format.h"
+#include "fmt_fixed.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -161,6 +162,30 @@ static void test_curve_line(void)
     CHECK(strcmp(line, "239.90,-0.3") == 0);
 }
 
+static void test_fmt_fixed(void)
+{
+    char t[FMT_FIXED_LEN];
+
+    Fmt_Fixed(t, sizeof(t), 1.00123f, 5u, 0u);
+    CHECK(strcmp(t, "1.00123") == 0);
+    Fmt_Fixed(t, sizeof(t), -2.5f, 2u, 0u);
+    CHECK(strcmp(t, "-2.50") == 0);
+    Fmt_Fixed(t, sizeof(t), 0.05f, 2u, 0u);
+    CHECK(strcmp(t, "0.05") == 0);
+    Fmt_Fixed(t, sizeof(t), 1000.0f, 4u, 1u);
+    CHECK(strcmp(t, "1000") == 0);
+    Fmt_Fixed(t, sizeof(t), 0.45f, 4u, 1u);
+    CHECK(strcmp(t, "0.45") == 0);
+    Fmt_Fixed(t, sizeof(t), 0.0f, 4u, 1u);
+    CHECK(strcmp(t, "0") == 0);
+    Fmt_Fixed(t, sizeof(t), -0.001f, 1u, 0u);
+    CHECK(strcmp(t, "0.0") == 0);
+    Fmt_Fixed(t, sizeof(t), 1.0e6f, 4u, 1u); /* perde casas, nao o numero */
+    CHECK(strcmp(t, "1000000") == 0);
+    Fmt_Fixed(t, sizeof(t), 9.99999f, 1u, 0u);
+    CHECK(strcmp(t, "10.0") == 0);
+}
+
 static void test_rec_line_nc05(void)
 {
     char line[STORAGE_FORMAT_LINE_MAX];
@@ -276,6 +301,7 @@ int main(void)
     test_index_scan_any_block_size();
     test_find_last_hash();
     test_curve_line();
+    test_fmt_fixed();
     test_rec_line_nc05();
     test_rec_line_technical_fault();
     test_index_line();

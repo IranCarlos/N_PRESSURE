@@ -14,6 +14,7 @@
 #include "params.h"
 #include "eeprom_storage_io.h"
 #include "cal_manager.h"
+#include "fmt_fixed.h"
 #include "valve.h"
 #include "pwm_motor.h"
 #include "cycle_record.h"
@@ -473,6 +474,8 @@ static uint8_t prm_set(uint16_t id, float value, float * now_value)
     float before;
     Params_Result_t r;
     char msg[64];
+    char old_txt[FMT_FIXED_LEN];
+    char new_txt[FMT_FIXED_LEN];
 
     if (idx < 0) {
         return (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO;
@@ -497,8 +500,10 @@ static uint8_t prm_set(uint16_t id, float value, float * now_value)
     }
     /* Auditoria (Parte B 2.6: "toda escrita de parametro no log"), com o
      * valor de antes e o de depois. */
-    (void)snprintf(msg, sizeof(msg), "PARAM %s: %.4g -> %.4g (nao salvo)",
-                   Params_DescAt((uint16_t)idx)->name, (double)before, (double)*now_value);
+    Fmt_Fixed(old_txt, sizeof(old_txt), before, 4u, 1u);
+    Fmt_Fixed(new_txt, sizeof(new_txt), *now_value, 4u, 1u);
+    (void)snprintf(msg, sizeof(msg), "PARAM %s: %s -> %s (nao salvo)",
+                   Params_DescAt((uint16_t)idx)->name, old_txt, new_txt);
     log_usb_command(STORAGE_LOG_LEVEL_AUDIT, msg);
     return (uint8_t)USB_PROTO_RSP_OK;
 }
@@ -683,6 +688,7 @@ static uint8_t cal_apply(UsbProtoCalApply_t * out)
     Cal_Fit_t fit;
     Cal_FitResult_t r;
     char msg[64];
+    char res_txt[FMT_FIXED_LEN];
 
     if ((s_cal_active == 0u) || (cal_state_ok() == 0u) || (s_cfg == NULL)) {
         return (uint8_t)USB_PROTO_RSP_ESTADO_INVALIDO;
@@ -696,8 +702,8 @@ static uint8_t cal_apply(UsbProtoCalApply_t * out)
     out->span_mmhg = fit.span_mmhg;
     if (r != CAL_FIT_OK) {
         /* Reprovada: os pontos ficam, o PC pode acrescentar mais ou abortar. */
-        (void)snprintf(msg, sizeof(msg), "CAL PC: reprovada (motivo %u, res %.2f mmHg)",
-                       (unsigned)r, (double)fit.max_residual_mmhg);
+        Fmt_Fixed(res_txt, sizeof(res_txt), fit.max_residual_mmhg, 2u, 0u);
+        (void)snprintf(msg, sizeof(msg), "CAL PC: reprovada (motivo %u, res %s mmHg)", (unsigned)r, res_txt);
         log_usb_command(STORAGE_LOG_LEVEL_AUDIT, msg);
         return (uint8_t)USB_PROTO_RSP_CONFLITO;
     }

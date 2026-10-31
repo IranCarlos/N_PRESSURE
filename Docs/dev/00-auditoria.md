@@ -1733,3 +1733,21 @@ que cresce e rebaixa se divergir. Nao foi usado ENABLE_SCRATCH_BUFFER: no codigo
 de escrita espera READ_CPLT_MSG, e as gravacoes da trilha cairiam nele.
 Abortar confirmado em ciclo real: T00000002 registrou NC07 com "USB: ensaio cancelado".
 TODO(DECISAO): NC00 com plato de 1,1 s: "ate' 10 s" nao tem minimo.
+
+## Fase 9: nivel DEV no app (2026-10-31)
+
+Decisao do usuario: plato sem tempo minimo.
+Telas so' apos login (chave em memoria): parametros com JSON e diff, manual com sinal de vida a 10 Hz,
+osciloscopio ate' 1 kHz, calibracao e vazamento nos fluxos pedidos (o sistema vai a' pressao e
+estabiliza), diagnostico, log de auditoria e atraso da bomba. Rotinas em modo manual, com limite
+proprio alem da supervisao do firmware. Falha ou cancelamento nunca vira APROVADO; nao manter a pressao
+e' REPROVADO.
+Confirmado no equipamento, sem atuar: login, chave errada recusada, 51 parametros, telemetria a 1000
+amostras/s sem descarte, diagnostico, autoteste e log de auditoria.
+Corrigido: `%f` sai vazio no firmware (nano.specs), entao o log de auditoria perdia antes/depois de
+parametro e calibracao, e a mensagem da verificacao na IHM saia sem o erro. `fmt_fixed.h` resolve sem
+_printf_float (que traria malloc em tarefas concorrentes).
+TODO(BANCADA): manual, vazamento e calibracao pelo app, nao atuados no equipamento real; calibracao
+depende do manometro. Medir se a rotina acerta o alvo no manguito pequeno (inercia/redistribuicao).
+TODO(BUG): teste de vazamento da IHM segue com o falso APROVADO; o do app substitui.
+TODO(DECISAO): histerese da calibracao nao e' avaliada no firmware, so' linearidade.

@@ -18,6 +18,7 @@
 #include "ui_backend_stm32.h"
 
 #include "control_loop.h"
+#include "fmt_fixed.h"
 #include "adc_acq.h"
 #include "pressure_core.h"
 #include "eeprom_storage_io.h"
@@ -492,6 +493,8 @@ UiCalVerify_t UiBackend_CalVerify(char * msg, size_t msg_len)
         }
         return UI_CAL_INCOMPLETE;
     }
+    char err_txt[FMT_FIXED_LEN];
+
     p1.ref_kpa = s_cal_ref1_kpa;
     p1.d_kpa = s_cal_d1_kpa;
     p2.ref_kpa = s_cal_ref2_kpa;
@@ -499,18 +502,18 @@ UiCalVerify_t UiBackend_CalVerify(char * msg, size_t msg_len)
     r = Cal_Verify(&CalManager_Get()->coeffs, &p1, &p2,
                    s_cfg->cal_verify_ok_mmhg, s_cfg->cal_verify_fix_max_mmhg, &v);
 
+    Fmt_Fixed(err_txt, sizeof(err_txt), v.max_abs_err_mmhg, 1u, 0u);
     switch (r) {
         case CAL_VERIFY_OK:
-            (void)snprintf(msg, msg_len, "OK: erro %.1f mmHg.", (double)v.max_abs_err_mmhg);
-            (void)snprintf(log_msg, sizeof(log_msg), "CAL IHM: verificacao OK (erro max %.1f mmHg)",
-                           (double)v.max_abs_err_mmhg);
+            (void)snprintf(msg, msg_len, "OK: erro %s mmHg.", err_txt);
+            (void)snprintf(log_msg, sizeof(log_msg), "CAL IHM: verificacao OK (erro max %s mmHg)", err_txt);
             CalManager_Log(0u, "", log_msg);
             out = UI_CAL_OK;
             break;
         case CAL_VERIFY_CORRECTED:
             if (CalManager_Commit(&v.new_coeffs, CAL_SOURCE_HMI_FIX, 2u, v.max_abs_err_mmhg,
                                   "CAL IHM") != 0u) {
-                (void)snprintf(msg, msg_len, "Erro %.1f mmHg: corrigido.", (double)v.max_abs_err_mmhg);
+                (void)snprintf(msg, msg_len, "Erro %s mmHg: corrigido.", err_txt);
                 out = UI_CAL_CORRECTED;
             } else {
                 (void)snprintf(msg, msg_len, "Falha ao gravar.");
@@ -522,9 +525,8 @@ UiCalVerify_t UiBackend_CalVerify(char * msg, size_t msg_len)
         default:
             /* Nao corrige: um erro desse tamanho e' defeito (sensor,
              * vazamento, manometro), nao deriva - assistencia tecnica. */
-            (void)snprintf(msg, msg_len, "ERRO %.1f mmHg! Assist. tecnica.", (double)v.max_abs_err_mmhg);
-            (void)snprintf(log_msg, sizeof(log_msg), "Verificacao: erro %.1f mmHg acima do limite",
-                           (double)v.max_abs_err_mmhg);
+            (void)snprintf(msg, msg_len, "ERRO %s mmHg! Assist. tecnica.", err_txt);
+            (void)snprintf(log_msg, sizeof(log_msg), "Verificacao: erro %s mmHg acima do limite", err_txt);
             CalManager_Log(1u, "W_CAL", log_msg);
             out = UI_CAL_ALERT;
             break;

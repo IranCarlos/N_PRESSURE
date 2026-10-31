@@ -6,6 +6,7 @@
  */
 
 #include "cal_manager.h"
+#include "fmt_fixed.h"
 #include "adc_acq.h"
 #include "eeprom_storage_io.h"
 #include "rtc_service.h"
@@ -91,7 +92,10 @@ uint8_t CalManager_Commit(const Cal_Coeffs_t * coeffs, Cal_Source_t source, uint
     Cal_Record_t rec;
     Cal_Coeffs_t before = s_current.coeffs;
     RtcValidity_DateTime_t now;
-    char msg[64];
+    char msg[96];
+    char old_txt[FMT_FIXED_LEN];
+    char new_txt[FMT_FIXED_LEN];
+    char res_txt[FMT_FIXED_LEN];
 
     rec = s_current;
     rec.coeffs = *coeffs;
@@ -115,13 +119,15 @@ uint8_t CalManager_Commit(const Cal_Coeffs_t * coeffs, Cal_Source_t source, uint
     apply_to_target(&rec.coeffs);
 
     /* Antes -> depois, em duas linhas (cada linha do log tem ate' 63 caracteres). */
-    (void)snprintf(msg, sizeof(msg), "%s: escala %.5f -> %.5f", audit_prefix,
-                   (double)before.scale, (double)rec.coeffs.scale);
+    Fmt_Fixed(old_txt, sizeof(old_txt), before.scale, 5u, 0u);
+    Fmt_Fixed(new_txt, sizeof(new_txt), rec.coeffs.scale, 5u, 0u);
+    (void)snprintf(msg, sizeof(msg), "%s: escala %s -> %s", audit_prefix, old_txt, new_txt);
     CalManager_Log(0u, "", msg);
-    (void)snprintf(msg, sizeof(msg), "%s: offset %.2f -> %.2f mmHg (%u pt, res %.2f)", audit_prefix,
-                   (double)(before.offset_kpa * CAL_MMHG_PER_KPA),
-                   (double)(rec.coeffs.offset_kpa * CAL_MMHG_PER_KPA),
-                   (unsigned)n_points, (double)max_residual_mmhg);
+    Fmt_Fixed(old_txt, sizeof(old_txt), before.offset_kpa * CAL_MMHG_PER_KPA, 2u, 0u);
+    Fmt_Fixed(new_txt, sizeof(new_txt), rec.coeffs.offset_kpa * CAL_MMHG_PER_KPA, 2u, 0u);
+    Fmt_Fixed(res_txt, sizeof(res_txt), max_residual_mmhg, 2u, 0u);
+    (void)snprintf(msg, sizeof(msg), "%s: offset %s -> %s mmHg (%u pt, res %s)", audit_prefix,
+                   old_txt, new_txt, (unsigned)n_points, res_txt);
     CalManager_Log(0u, "", msg);
     return 1u;
 }
