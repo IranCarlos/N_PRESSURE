@@ -262,3 +262,14 @@ def test_wiped_card_clears_local_copy(tmp_path):
     assert not archive.local("/tests/2026/10/T00000001.rec").exists()
     assert [e.setpoint for e in archive.index()] == [80.0]
     assert archive.verify().verdict == sd.INTACT
+
+
+def test_sync_replaces_a_bad_local_copy(tmp_path):
+    fake = FakeDevice(card_with_tests())
+    dev = Device(fake)
+    archive = Archive(tmp_path)
+    archive.sync(dev)
+    tamper(archive.local("/logs/events/2026-10.log"), b"lvl=EVT", b"lvl=EVX")
+    archive.sync(dev)
+    dev.close()
+    assert archive.verify().verdict == sd.INTACT

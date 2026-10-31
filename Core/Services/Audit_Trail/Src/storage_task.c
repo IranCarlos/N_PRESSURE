@@ -371,7 +371,9 @@ static uint8_t read_tail_hash(const char *path, char *out_hex)
         return 0u;
     }
     size = f_size(&s_read_file);
-    if ((size <= STORAGE_SCAN_BLOCK) || (f_lseek(&s_read_file, size - STORAGE_SCAN_BLOCK) == FR_OK)) {
+    /* Posicao multipla de 4: ver fs_job_read(). */
+    if ((size <= STORAGE_SCAN_BLOCK) ||
+        (f_lseek(&s_read_file, (size - STORAGE_SCAN_BLOCK) & ~(FSIZE_t)3u) == FR_OK)) {
         if (f_read(&s_read_file, s_scan_buf, STORAGE_SCAN_BLOCK, &n) == FR_OK) {
             found = StorageFormat_FindLastHash((const char *)s_scan_buf, (size_t)n, out_hex);
         }
@@ -671,7 +673,7 @@ static volatile uint8_t s_fs_in_flight;
  * manda o DMA direto no buffer do chamador (sd_diskio.c sem
  * ENABLE_SCRATCH_BUFFER), por isso nao se le direto no destino do cliente
  * (pilha/DTCM): le aqui e copia. Alinhado a 32 B (linha de cache). */
-static uint8_t s_fs_data[STORAGE_FS_READ_MAX] DMA_BUFFER __attribute__((aligned(32)));
+static uint8_t s_fs_data[STORAGE_FS_READ_MAX + 4u] DMA_BUFFER __attribute__((aligned(32)));
 
 /* FILINFO com nome longo (_USE_LFN=2) tem ~270 B: estatico, fora da pilha. */
 static FILINFO s_fs_info;
@@ -755,6 +757,7 @@ static void fs_job_read(FsJob_t *j)
 {
     FRESULT fr = f_open(&s_read_file, j->path, FA_READ);
     UINT br = 0u;
+    UINT skip;
 
     j->n_read = 0u;
     if (fr != FR_OK) {
@@ -762,9 +765,20 @@ static void fs_job_read(FsJob_t *j)
         return;
     }
     if (j->offset < (uint32_t)f_size(&s_read_file)) {
-        fr = f_lseek(&s_read_file, j->offset);
+        /* f_read() manda setores inteiros direto para o destino, e a IDMA do
+         * SDMMC so' escreve em endereco multiplo de 4: partir de offset impar
+         * devolvia bytes trocados, sem erro nenhum (achado 2026-10-31). Por
+         * isso le de um offset alinhado e descarta a sobra do inicio. */
+        skip = j->offset & 3u;
+        fr = f_lseek(&s_read_file, j->offset - skip);
         if (fr == FR_OK) {
-            fr = f_read(&s_read_file, s_fs_data, j->len, &br);
+            fr = f_read(&s_read_file, s_fs_data, (UINT)j->len + skip, &br);
+        }
+        if ((fr == FR_OK) && (br > skip)) {
+            memmove(s_fs_data, &s_fs_data[skip], br - skip);
+            br -= skip;
+        } else {
+            br = 0u;
         }
     } /* offset >= tamanho: fim do arquivo, n_read = 0 */
     (void)f_close(&s_read_file); /* so' leitura: nada para sincronizar */

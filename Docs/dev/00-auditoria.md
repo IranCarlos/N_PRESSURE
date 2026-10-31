@@ -1724,3 +1724,12 @@ normal no plato. Testado no host e no virtual, falta um ciclo real.
 Por pedido do usuario, /tests e os logs de eventos e erros foram apagados do cartao com firmware
 temporario de uma gravacao (nao ha' comando USB para apagar); o log de auditoria ficou. Copia em
 `build/sd_backup_2026-10-31`.
+
+Falso ADULTERADO no app (2026-10-31): FS_READ a partir de offset nao multiplo de 4 devolvia bytes
+trocados, sem erro, porque f_read() manda setores direto ao destino e a IDMA do SDMMC so' escreve em
+endereco multiplo de 4. O cartao estava certo; a copia local incremental e' que saia errada. A leitura
+agora parte de offset alinhado e a retomada da corrente tambem. O app confere o SHA-256 de cada arquivo
+que cresce e rebaixa se divergir. Nao foi usado ENABLE_SCRATCH_BUFFER: no codigo gerado, o caminho lento
+de escrita espera READ_CPLT_MSG, e as gravacoes da trilha cairiam nele.
+Abortar confirmado em ciclo real: T00000002 registrou NC07 com "USB: ensaio cancelado".
+TODO(DECISAO): NC00 com plato de 1,1 s: "ate' 10 s" nao tem minimo.

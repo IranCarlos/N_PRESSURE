@@ -6,6 +6,7 @@ que pararam, para sincronizar 1000 ensaios sem reler tudo.
 """
 from __future__ import annotations
 
+import hashlib
 import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -43,6 +44,9 @@ class Archive:
             target.parent.mkdir(parents=True, exist_ok=True)
             with open(target, "ab") as f:
                 f.write(device.fs_read(path, offset=have))
+        # a copia tem que ser igual ao cartao: e' ele que a verificacao avalia
+        if hashlib.sha256(target.read_bytes()).digest() != device.fs_hash(path).sha256:
+            target.write_bytes(device.fs_read_verified(path))
 
     def _fetch_once(self, device: Device, path: str) -> None:
         target = self.local(path)
