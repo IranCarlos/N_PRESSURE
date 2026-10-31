@@ -229,6 +229,7 @@ typedef struct {
     uint8_t  hold_low_exits;          /* saidas por baixo neste ciclo */
     uint32_t hold_recover_ms;         /* tempo tentando voltar ao plato */
     uint32_t reg_pump_off_ms;         /* tempo com a bomba parada na regulacao */
+    volatile uint8_t cancel_pending;  /* ver ControlCore_RequestCancel() */
     float    hold_mean_mmhg;          /* media lenta do plato, sem o pulso arterial */
     float    plateau_bin_sum;         /* media movel do plato: ver plateau_track_band() */
     uint32_t plateau_bin_ms;
@@ -280,6 +281,10 @@ void ControlCore_Step(ControlCore_t *cc, const ControlCore_Inputs_t *in,
 /* Inicia um ciclo de insuflacao a partir de IDLE (equivalente a
  * ControlLoop_StartInflation). Sem efeito em outros estados. */
 void ControlCore_StartInflation(ControlCore_t *cc);
+
+/* Marca o proximo inicio de desinflar como cancelamento do operador (NC07) em
+ * qualquer fase, inclusive no plato. Quem desinfla continua sendo abort_request. */
+void ControlCore_RequestCancel(ControlCore_t *cc);
 
 /* Forca o estado seguro imediatamente (equivalente a
  * ControlLoop_EnterFaultState) — usar para falhas detectadas fora desta

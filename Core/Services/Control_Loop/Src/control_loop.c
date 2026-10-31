@@ -420,6 +420,41 @@ static void update_jitter_measurement(void) {
     s_control.jitter_has_sample = 1u;
 }
 
+#define CONTROL_LOOP_CURVE_PERIOD_MS (100u)
+#define CONTROL_LOOP_CURVE_MAX       (2400u)
+
+static int16_t  s_curve[CONTROL_LOOP_CURVE_MAX];
+static uint16_t s_curve_count;
+static uint32_t s_curve_elapsed_ms;
+static uint8_t  s_curve_active;
+
+/* Acumula a curva do ensaio. Fora de um ensaio nao faz nada. */
+static void update_curve(void) {
+    SystemState_t state = s_control.runtime_data->state;
+
+    if ((state != SYSTEM_STATE_INFLATING) && (state != SYSTEM_STATE_STABILIZING) &&
+        (state != SYSTEM_STATE_STABILIZED) && (state != SYSTEM_STATE_DEFLATING_FAST)) {
+        s_curve_active = 0u;
+        return;
+    }
+    if (s_curve_active == 0u) {
+        s_curve_active = 1u;
+        s_curve_count = 0u;
+        s_curve_elapsed_ms = 0u;
+    }
+    if (((s_curve_elapsed_ms % CONTROL_LOOP_CURVE_PERIOD_MS) == 0u) &&
+        (s_curve_count < CONTROL_LOOP_CURVE_MAX)) {
+        s_curve[s_curve_count] = (int16_t)lroundf(s_control.runtime_data->pressure_display * 10.0f);
+        s_curve_count++;
+    }
+    s_curve_elapsed_ms += CONTROL_LOOP_PERIOD_MS;
+}
+
+const int16_t *ControlLoop_GetCurve(uint16_t *count) {
+    *count = s_curve_count;
+    return s_curve;
+}
+
 static void control_loop_step(void);
 
 void ControlLoop_Update(void) {
@@ -429,6 +464,7 @@ void ControlLoop_Update(void) {
     update_jitter_measurement();
     start_cycles = PortDWT_GetCycles();
     control_loop_step();
+    update_curve();
     exec_cycles = PortDWT_GetCycles() - start_cycles;
     if (exec_cycles > s_control.max_exec_cycles) {
         s_control.max_exec_cycles = exec_cycles;
@@ -540,6 +576,10 @@ void ControlLoop_SetSetpointMmHg(float setpoint_mmhg) {
     s_control.sys_cfg->current_setpoint_mmhg = s_control.runtime_data->setpoint_mmhg;
 
     // Alterar setpoint nao inicia inflacao automaticamente.
+}
+
+void ControlLoop_RequestCancel(void) {
+    ControlCore_RequestCancel(&s_control.cc);
 }
 
 void ControlLoop_StartInflation(void) {

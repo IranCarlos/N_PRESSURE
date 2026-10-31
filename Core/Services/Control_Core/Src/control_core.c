@@ -252,6 +252,7 @@ void ControlCore_StartInflation(ControlCore_t *cc)
         cc->hold_low_exits = 0u;
         cc->hold_recover_ms = 0u;
         cc->reg_pump_off_ms = 0u;
+        cc->cancel_pending = 0u;
 
         cc->plateau_bin_sum = 0.0f;
         cc->plateau_bin_ms = 0u;
@@ -299,6 +300,11 @@ static void plateau_track_band(ControlCore_t *cc, float pressure_mmhg, uint32_t 
             cc->cycle.plateau_max_mmhg = mean_mmhg;
         }
     }
+}
+
+void ControlCore_RequestCancel(ControlCore_t *cc)
+{
+    cc->cancel_pending = 1u;
 }
 
 const ControlCore_CycleStats_t *ControlCore_GetCycleStats(const ControlCore_t *cc)
@@ -1163,10 +1169,12 @@ void ControlCore_Step(ControlCore_t *cc, const ControlCore_Inputs_t *in,
                  * STABILIZED ("pronto p/ desinflar") o pedal e' o fim
                  * NORMAL do ensaio, nao uma interrupcao (achado de bancada
                  * 2026-10-17: todo ensaio saia NC07). Plato curto demais e'
-                 * avaliado a parte pelo NC do tempo de plato. */
-                if ((in->abort_request != 0u) &&
-                    ((state_before == SYSTEM_STATE_INFLATING) ||
-                     (state_before == SYSTEM_STATE_STABILIZING))) {
+                 * avaliado a parte pelo NC do tempo de plato. Cancelar pelo
+                 * app e' interrupcao mesmo no plato. */
+                if (((in->abort_request != 0u) &&
+                     ((state_before == SYSTEM_STATE_INFLATING) ||
+                      (state_before == SYSTEM_STATE_STABILIZING))) ||
+                    (cc->cancel_pending != 0u)) {
                     cc->cycle.aborted_by_operator = 1u;
                 }
             }

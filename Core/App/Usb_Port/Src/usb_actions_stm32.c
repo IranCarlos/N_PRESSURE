@@ -39,7 +39,7 @@ static uint32_t s_log_seq; /* placeholder local, mesmo criterio do log de AUTH e
 static UsbProtoRspStatus_t act_set_setpoint(float setpoint_mmhg, uint8_t * warn);
 static UsbProtoRspStatus_t act_set_datetime(const UsbProtoDateTime_t * dt);
 static UsbProtoRspStatus_t act_start_test(void);
-static UsbProtoRspStatus_t act_abort_test(void);
+static UsbProtoRspStatus_t act_abort_test(uint8_t cancel);
 static UsbProtoRspStatus_t act_set_operator(uint16_t operator_id, uint16_t participant_id);
 
 static const UsbProtoActions_t s_actions = {
@@ -184,7 +184,7 @@ static UsbProtoRspStatus_t act_start_test(void)
     return USB_PROTO_RSP_OK;
 }
 
-static UsbProtoRspStatus_t act_abort_test(void)
+static UsbProtoRspStatus_t act_abort_test(uint8_t cancel)
 {
     UsbProtoRspStatus_t st;
     uint8_t raise_abort = 0u;
@@ -200,8 +200,11 @@ static UsbProtoRspStatus_t act_abort_test(void)
         /* Mesmo flag do pedal/bt_user (system_types.h): o Control_Loop o
          * consome no proximo tick de 1 ms e vai a DEFLATING_FAST. Escrita de
          * 1 byte = atomica; o controle so' le e zera. */
+        if (cancel != 0u) {
+            ControlLoop_RequestCancel();
+        }
         s_rt->bt_user_pressed = 1u;
-        log_usb_command(STORAGE_LOG_LEVEL_EVT, "USB: ensaio abortado (desinflar)");
+        log_usb_command(STORAGE_LOG_LEVEL_EVT, (cancel != 0u) ? "USB: ensaio cancelado" : "USB: desinflar");
     }
     return st;
 }

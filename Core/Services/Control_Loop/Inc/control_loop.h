@@ -84,6 +84,10 @@ void ControlLoop_Update(void);
  */
 uint32_t ControlLoop_GetMaxJitterCycles(void);
 
+/** @brief Curva do ultimo ensaio (decimos de mmHg, um ponto a cada 100 ms). Vale
+ *         ate' o proximo ensaio comecar. */
+const int16_t *ControlLoop_GetCurve(uint16_t *count);
+
 /** @brief Quando (HAL_GetTick) e em que SystemState_t ocorreu o maior jitter. */
 uint32_t ControlLoop_GetMaxJitterTick(void);
 uint32_t ControlLoop_GetMaxJitterState(void);
@@ -142,6 +146,10 @@ ControlCore_TuningConfig_t* ControlLoop_GetTuningConfig(void);
  * Muda o estado do sistema para SYSTEM_STATE_INFLATING.
  */
 void ControlLoop_StartInflation(void);
+
+/** @brief Registra o ensaio em curso como cancelado (NC07). Nao desinfla sozinho:
+ *         chamar antes de levantar bt_user_pressed. */
+void ControlLoop_RequestCancel(void);
 
 /**
  * @brief Coloca o sistema em modo de configuração.

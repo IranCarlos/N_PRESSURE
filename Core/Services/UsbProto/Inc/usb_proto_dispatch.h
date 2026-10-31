@@ -126,7 +126,7 @@ typedef struct {
     UsbProtoRspStatus_t (*set_setpoint)(float setpoint_mmhg, uint8_t *warn);
     UsbProtoRspStatus_t (*set_datetime)(const UsbProtoDateTime_t *dt);
     UsbProtoRspStatus_t (*start_test)(void);
-    UsbProtoRspStatus_t (*abort_test)(void);
+    UsbProtoRspStatus_t (*abort_test)(uint8_t cancel);
     UsbProtoRspStatus_t (*set_operator)(uint16_t operator_id, uint16_t participant_id);
 } UsbProtoActions_t;
 
@@ -134,7 +134,8 @@ typedef struct {
  *   SET_SETPOINT : float32 setpoint_mmhg                      (4 B)
  *   SET_DATETIME : u16 ano, u8 mes, dia, hora, min, seg        (7 B)
  *   START_TEST   : vazio                                       (0 B)
- *   ABORT_TEST   : vazio                                       (0 B)
+ *   ABORT_TEST   : vazio = desinflar (fim normal no plato); u8 1 = cancelar
+ *                  (NC07 em qualquer fase). Qualquer payload desinfla.
  *   SET_OPERATOR : u16 operator_id, u16 participant_id         (4 B; 1..9999 cada)
  * Resposta das cinco: so' o byte de status. */
 #define USB_PROTO_SET_SETPOINT_LEN  (4U)

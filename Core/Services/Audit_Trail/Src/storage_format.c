@@ -75,8 +75,14 @@ CycleRecord_NcCode_t StorageFormat_BuildRecLine(const StorageFormat_RecInfo_t *i
     fmt_1dp(info->metrics.setpoint_mmhg, setpoint, sizeof(setpoint));
     fmt_1dp(info->metrics.peak_mmhg, peak, sizeof(peak));
     fmt_1dp(info->metrics.plateau_mean_mmhg, plat_mean, sizeof(plat_mean));
-    fmt_1dp(info->metrics.plateau_min_mmhg, plat_min, sizeof(plat_min));
-    fmt_1dp(info->metrics.plateau_max_mmhg, plat_max, sizeof(plat_max));
+    /* Ciclo sem plato: min/max ficam com a sentinela de Control_Core. */
+    if (info->metrics.plateau_min_mmhg > info->metrics.plateau_max_mmhg) {
+        fmt_1dp(0.0f, plat_min, sizeof(plat_min));
+        fmt_1dp(0.0f, plat_max, sizeof(plat_max));
+    } else {
+        fmt_1dp(info->metrics.plateau_min_mmhg, plat_min, sizeof(plat_min));
+        fmt_1dp(info->metrics.plateau_max_mmhg, plat_max, sizeof(plat_max));
+    }
     fmt_1dp(info->metrics.inflate_time_s, t_inf, sizeof(t_inf));
     fmt_1dp(info->metrics.plateau_time_s, t_plat, sizeof(t_plat));
     fmt_1dp(info->metrics.deflate_time_s, t_defl, sizeof(t_defl));
@@ -120,6 +126,79 @@ void StorageFormat_BuildIndexLine(const StorageFormat_RecInfo_t *info,
              (unsigned)info->datetime.day, (unsigned)info->datetime.month, (unsigned)info->datetime.year,
              (unsigned)info->datetime.hour, (unsigned)info->datetime.minute, (unsigned)info->datetime.second,
              info->operator_id, setpoint, peak, nc_str, hash_hex);
+}
+
+void StorageFormat_BuildCurveLine(uint32_t index, int16_t pressure_tenths,
+                                  char *out, size_t out_size)
+{
+    uint32_t centis = (index * STORAGE_FORMAT_CURVE_PERIOD_MS) / 10u;
+    int32_t p = (int32_t)pressure_tenths;
+    uint32_t mag = (uint32_t)((p < 0) ? -p : p);
+
+    snprintf(out, out_size, "%lu.%02lu,%s%lu.%lu",
+             (unsigned long)(centis / 100u), (unsigned long)(centis % 100u),
+             (p < 0) ? "-" : "", (unsigned long)(mag / 10u), (unsigned long)(mag % 10u));
+}
+
+void StorageFormat_IndexScanFeed(StorageFormat_IndexScan_t *scan, const uint8_t *data, size_t len)
+{
+    size_t i;
+
+    for (i = 0u; i < len; i++) {
+        uint8_t c = data[i];
+
+        if (c == (uint8_t)'\n') {
+            scan->digits = 0u;
+            scan->current = 0u;
+            scan->skip_line = 0u;
+        } else if (scan->skip_line != 0u) {
+            /* resto da linha */
+        } else if (scan->digits == 0u) {
+            scan->digits = 1u;
+            scan->skip_line = (uint8_t)((c == (uint8_t)'T') ? 0u : 1u);
+        } else if ((scan->digits <= 8u) && (c >= (uint8_t)'0') && (c <= (uint8_t)'9')) {
+            scan->current = (scan->current * 10u) + ((uint32_t)c - (uint32_t)'0');
+            scan->digits++;
+        } else {
+            if ((scan->digits == 9u) && (c == (uint8_t)';') && (scan->current > scan->max_id)) {
+                scan->max_id = scan->current;
+            }
+            scan->skip_line = 1u;
+        }
+    }
+}
+
+static uint8_t is_hex_lower(char c)
+{
+    return (((c >= '0') && (c <= '9')) || ((c >= 'a') && (c <= 'f'))) ? 1u : 0u;
+}
+
+uint8_t StorageFormat_FindLastHash(const char *text, size_t len,
+                                   char out_hex[AUDIT_CHAIN_HASH_HEX_LEN + 1u])
+{
+    static const char tag[] = ";hash=";
+    const size_t tag_len = sizeof(tag) - 1u;
+    const size_t need = tag_len + AUDIT_CHAIN_HASH_HEX_LEN;
+    size_t pos = len;
+
+    while (pos >= need) {
+        size_t start = pos - need;
+
+        pos--;
+        if (memcmp(&text[start], tag, tag_len) == 0) {
+            size_t i;
+
+            for (i = 0u; i < AUDIT_CHAIN_HASH_HEX_LEN; i++) {
+                if (is_hex_lower(text[start + tag_len + i]) == 0u) {
+                    return 0u;
+                }
+            }
+            memcpy(out_hex, &text[start + tag_len], AUDIT_CHAIN_HASH_HEX_LEN);
+            out_hex[AUDIT_CHAIN_HASH_HEX_LEN] = '\0';
+            return 1u;
+        }
+    }
+    return 0u;
 }
 
 void StorageFormat_BuildLogLine(const StorageFormat_LogEntry_t *entry,

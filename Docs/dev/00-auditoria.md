@@ -1700,3 +1700,27 @@ Num ciclo de 80 mmHg a pressao caiu de 81 a 72 em <1 s com bomba e valvulas para
 movimento da perna; reentrou em INFLATING e voltou ao plato em ~3 s, sem erro.
 Descompressao a 100 mmHg no mesmo manguito variou de 1,48 a 2,79 s entre ciclos, causa nao medida.
 TODO(DECISAO): `t_inflar_max_ms` segue em 180 s, placeholder do PID antigo.
+
+### Fase 8: trilha no SD e aplicativo de PC (2026-10-31)
+
+Achados lendo o cartao real: linhas de log e .rec cortadas em 255 bytes (nenhum hash completo),
+ID de ensaio repetido apos cada boot (30 de 32 IDs, ate' 56 vezes), corrente reiniciada a cada
+boot, curva .csv nunca gravada e sentinela 1e9 no .rec de ciclo sem plato.
+Correcoes no firmware: linha de 512 bytes; maior ID relido do index.csv ao montar o cartao; corrente
+retomada do ultimo hash gravado; curva a 10 Hz (`T*.csv`); evento `REC` na corrente com SHA-256 do
+.rec e do .csv. Confirmado no cartao real: linhas inteiras e elo correto apos reboot. .rec, .csv e
+ID novo so' com um ciclo real.
+Aplicativo em `pc/` (nivel de usuario). 41 testes com dispositivo virtual, sincronizacao real de 355
+ensaios em 25 s (depois 4,6 s) e veredito NAO VERIFICAVEL nos dados antigos.
+TODO(BANCADA): um ciclo real pelo aplicativo fecha a aceitacao da Fase 8.
+TODO(DECISAO): SHA-256 sem chave detecta alteracao parcial, mas nao quem recalcula o arquivo todo.
+Exigir assinatura com chave do equipamento e' decisao regulatoria.
+TODO(DECISAO): `seq` do log ainda recomeca no boot; o que garante a ordem e' a corrente.
+
+Ciclos reais pelo app (T00000033-37): .rec completo, curva, IDs em sequencia apos reboot e veredito
+INTEGRO; primeiros NC00 reais (insuflacao 3,8 s, descompressao 1,0-1,1 s, residual 3,7-3,9 mmHg).
+ABORT_TEST agora tem cancelamento: payload 1 registra NC07 em qualquer fase; vazio segue como fim
+normal no plato. Testado no host e no virtual, falta um ciclo real.
+Por pedido do usuario, /tests e os logs de eventos e erros foram apagados do cartao com firmware
+temporario de uma gravacao (nao ha' comando USB para apagar); o log de auditoria ficou. Copia em
+`build/sd_backup_2026-10-31`.

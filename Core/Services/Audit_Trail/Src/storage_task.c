@@ -14,6 +14,7 @@
 #include "system_types.h"
 #include "sha256.h"
 #include "usb_crc32.h"
+#include <stdio.h>
 #include <string.h>
 
 /* Fila estatica (DTCM ja' esta' ~85% usada — ver 00-auditoria.md; manter a
@@ -24,6 +25,8 @@
 #define STORAGE_QUEUE_DEPTH    (8u)
 #define STORAGE_TASK_POLL_MS   (200u)
 #define STORAGE_REMOUNT_PERIOD_MS (2000u)
+#define STORAGE_SCAN_BLOCK     (1024u)
+#define STORAGE_LOG_CHAINS     (3u)
 
 typedef enum {
     STORAGE_MSG_LOG_EVENT = 0,
@@ -79,13 +82,29 @@ static StorageTask_Stats_t       s_stats;
  * de cada vez (serial, sincrono), entao reaproveitar uma unica instancia
  * entre chamadas e' seguro. */
 static FIL s_append_file DMA_BUFFER;
+static FIL s_read_file DMA_BUFFER;
+static uint8_t s_scan_buf[STORAGE_SCAN_BLOCK] DMA_BUFFER __attribute__((aligned(32)));
+
+/* So' a storageTask usa: linhas de 512 B nao cabem com folga na pilha dela. */
+static char s_line[STORAGE_FORMAT_LINE_MAX];
+static char s_line_aux[STORAGE_FORMAT_LINE_MAX];
+
+/* Maior ID ja' usado, relido de /tests/index.csv a cada montagem: o ID do
+ * ensaio nunca se repete, mesmo apos reset (formato-logs.md, regra 5). */
+static uint32_t s_last_test_id;
+static uint8_t  s_test_id_ready;
+
+/* Copia da curva do ensaio ate' a storageTask gravar o .csv. */
+static int16_t  s_curve[STORAGE_CURVE_MAX] DMA_BUFFER;
+static uint16_t s_curve_count;
+static volatile uint8_t s_curve_pending;
 
 /* Uma corrente de hash POR ARQUIVO de log do mes (events/errors/audit) —
  * cada arquivo e' encadeado independentemente (Apendice C: "o 1o registro
- * do mes referencia o ultimo hash do mes anterior", por arquivo). Carregar
- * o ultimo hash gravado ao trocar de mes/no boot ainda nao esta'
- * implementado (hoje sempre reinicia do genesis) — ver nota no fim do
- * arquivo. */
+ * do mes referencia o ultimo hash do mes anterior", por arquivo). A primeira
+ * linha apos montar o cartao retoma do ultimo hash gravado no arquivo (ver
+ * recover_chain); na virada do mes a corrente simplesmente continua. */
+static uint8_t      s_chain_recovered[STORAGE_LOG_CHAINS];
 static AuditChain_t s_chain_events;
 static AuditChain_t s_chain_errors;
 static AuditChain_t s_chain_audit;
@@ -231,7 +250,20 @@ int StorageTask_SubmitTestRecord(const StorageFormat_RecInfo_t *info)
     copy_str(msg.firmware_version, sizeof(msg.firmware_version), info->firmware_version);
     msg.last_calibration = info->last_calibration;
 
-    return enqueue(&msg);
+    if ((info->curve != NULL) && (info->curve_count > 0u) && (s_curve_pending == 0u)) {
+        uint16_t n = (info->curve_count > STORAGE_CURVE_MAX) ? (uint16_t)STORAGE_CURVE_MAX
+                                                             : info->curve_count;
+
+        memcpy(s_curve, info->curve, (size_t)n * sizeof(s_curve[0]));
+        s_curve_count = n;
+        s_curve_pending = 1u;
+    }
+
+    if (enqueue(&msg) != 0) {
+        s_curve_pending = 0u;
+        return -1;
+    }
+    return 0;
 }
 
 StorageTask_Stats_t StorageTask_GetStats(void)
@@ -328,12 +360,59 @@ static int append_line(const char *path, const char *line)
     return 0;
 }
 
+/* Devolve 1 se o trecho final de `path` tem um hash completo. */
+static uint8_t read_tail_hash(const char *path, char *out_hex)
+{
+    FSIZE_t size;
+    UINT n = 0u;
+    uint8_t found = 0u;
+
+    if (f_open(&s_read_file, path, FA_READ) != FR_OK) {
+        return 0u;
+    }
+    size = f_size(&s_read_file);
+    if ((size <= STORAGE_SCAN_BLOCK) || (f_lseek(&s_read_file, size - STORAGE_SCAN_BLOCK) == FR_OK)) {
+        if (f_read(&s_read_file, s_scan_buf, STORAGE_SCAN_BLOCK, &n) == FR_OK) {
+            found = StorageFormat_FindLastHash((const char *)s_scan_buf, (size_t)n, out_hex);
+        }
+    }
+    (void)f_close(&s_read_file);
+    return found;
+}
+
+/* Retoma a corrente do arquivo do mes da linha ou, se ele nao existir, do mes
+ * anterior. Sem hash valido a corrente recomeca do genesis (cartao novo ou
+ * linhas cortadas por firmware antigo). */
+static void recover_chain(AuditChain_t *chain, const char *subdir,
+                          const StorageFormat_DateTime_t *dt)
+{
+    char hash_hex[AUDIT_CHAIN_HASH_HEX_LEN + 1u];
+    char path[STORAGE_FORMAT_PATH_MAX];
+    uint16_t year = dt->year;
+    uint8_t month = dt->month;
+
+    StorageFormat_BuildLogPath(subdir, year, month, path, sizeof(path));
+    if (read_tail_hash(path, hash_hex) == 0u) {
+        if (month > 1u) {
+            month--;
+        } else {
+            month = 12u;
+            year--;
+        }
+        StorageFormat_BuildLogPath(subdir, year, month, path, sizeof(path));
+        if (read_tail_hash(path, hash_hex) == 0u) {
+            return;
+        }
+    }
+    AuditChain_Init(chain, hash_hex);
+}
+
 static int process_log_message(const StorageTask_QueueMsg_t *msg)
 {
     StorageFormat_LogEntry_t entry;
     AuditChain_t *chain;
     const char *subdir;
-    char line[STORAGE_FORMAT_LINE_MAX];
+    uint32_t chain_idx;
     char path[STORAGE_FORMAT_PATH_MAX];
 
     memset(&entry, 0, sizeof(entry));
@@ -347,16 +426,126 @@ static int process_log_message(const StorageTask_QueueMsg_t *msg)
     entry.message = msg->message;
 
     switch (msg->type) {
-        case STORAGE_MSG_LOG_EVENT: entry.level = STORAGE_LOG_LEVEL_EVT; chain = &s_chain_events; subdir = "events"; break;
-        case STORAGE_MSG_LOG_ERROR: entry.level = STORAGE_LOG_LEVEL_ERR; chain = &s_chain_errors; subdir = "errors"; break;
-        case STORAGE_MSG_LOG_AUDIT: entry.level = STORAGE_LOG_LEVEL_AUDIT; chain = &s_chain_audit; subdir = "audit"; break;
+        case STORAGE_MSG_LOG_EVENT: entry.level = STORAGE_LOG_LEVEL_EVT; chain = &s_chain_events; subdir = "events"; chain_idx = 0u; break;
+        case STORAGE_MSG_LOG_ERROR: entry.level = STORAGE_LOG_LEVEL_ERR; chain = &s_chain_errors; subdir = "errors"; chain_idx = 1u; break;
+        case STORAGE_MSG_LOG_AUDIT: entry.level = STORAGE_LOG_LEVEL_AUDIT; chain = &s_chain_audit; subdir = "audit"; chain_idx = 2u; break;
         default: return -1;
     }
 
-    StorageFormat_BuildLogLine(&entry, chain, line, sizeof(line));
+    if (s_chain_recovered[chain_idx] == 0u) {
+        recover_chain(chain, subdir, &msg->datetime);
+        s_chain_recovered[chain_idx] = 1u;
+    }
+
+    StorageFormat_BuildLogLine(&entry, chain, s_line, sizeof(s_line));
     StorageFormat_BuildLogPath(subdir, msg->datetime.year, msg->datetime.month, path, sizeof(path));
 
-    return append_line(path, line);
+    return append_line(path, s_line);
+}
+
+/* Le o index.csv inteiro; devolve 0 se o maior ID ficou conhecido (arquivo
+ * ausente = cartao novo, comeca do 1). */
+static int scan_test_index(void)
+{
+    StorageFormat_IndexScan_t scan;
+    char path[STORAGE_FORMAT_PATH_MAX];
+    FRESULT fr;
+    UINT n;
+
+    memset(&scan, 0, sizeof(scan));
+    StorageFormat_BuildIndexPath(path, sizeof(path));
+    fr = f_open(&s_read_file, path, FA_READ);
+    if ((fr == FR_NO_FILE) || (fr == FR_NO_PATH)) {
+        s_last_test_id = 0u;
+        s_test_id_ready = 1u;
+        return 0;
+    }
+    if (fr != FR_OK) {
+        return -1;
+    }
+    do {
+        fr = f_read(&s_read_file, s_scan_buf, STORAGE_SCAN_BLOCK, &n);
+        if (fr == FR_OK) {
+            StorageFormat_IndexScanFeed(&scan, s_scan_buf, (size_t)n);
+        }
+    } while ((fr == FR_OK) && (n == STORAGE_SCAN_BLOCK));
+    (void)f_close(&s_read_file);
+    if (fr != FR_OK) {
+        return -1;
+    }
+    s_last_test_id = scan.max_id;
+    s_test_id_ready = 1u;
+    return 0;
+}
+
+/* Grava a curva do ensaio (.csv) e devolve o SHA-256 do que foi escrito. */
+static int write_curve(const char *path, char *sha_hex, size_t sha_hex_size)
+{
+    FIL *file = &s_append_file;
+    Sha256_Ctx_t sha;
+    uint8_t digest[SHA256_DIGEST_SIZE];
+    uint32_t i;
+    UINT written;
+    size_t len;
+    FRESULT fr;
+
+    ensure_dir_path(path);
+    fr = f_open(file, path, FA_WRITE | FA_CREATE_ALWAYS);
+    if (fr != FR_OK) {
+        s_stats.last_write_step = 1u;
+        s_stats.last_write_fresult = (uint8_t)fr;
+        return -1;
+    }
+    Sha256_Init(&sha);
+    len = (size_t)snprintf(s_line_aux, sizeof(s_line_aux), "%s\n", STORAGE_FORMAT_CURVE_HEADER);
+    for (i = 0u; (i <= (uint32_t)s_curve_count) && (fr == FR_OK); i++) {
+        if (i > 0u) {
+            StorageFormat_BuildCurveLine(i - 1u, s_curve[i - 1u], s_line_aux, sizeof(s_line_aux));
+            len = strlen(s_line_aux);
+            s_line_aux[len] = '\n';
+            len++;
+        }
+        Sha256_Update(&sha, (const uint8_t *)s_line_aux, len);
+        fr = f_write(file, s_line_aux, (UINT)len, &written);
+        if ((fr == FR_OK) && (written != (UINT)len)) {
+            fr = FR_DENIED;
+        }
+    }
+    if (fr != FR_OK) {
+        s_stats.last_write_step = 2u;
+        s_stats.last_write_fresult = (uint8_t)fr;
+        (void)f_close(file);
+        return -1;
+    }
+    fr = f_close(file);
+    if (fr != FR_OK) {
+        s_stats.last_write_step = 5u;
+        s_stats.last_write_fresult = (uint8_t)fr;
+        return -1;
+    }
+    Sha256_Final(&sha, digest);
+    Sha256_ToHex(digest, sha_hex, sha_hex_size);
+    return 0;
+}
+
+/* Registra na corrente de eventos os hashes do .rec e do .csv: e' o que torna
+ * a alteracao de um ensaio detectavel pela verificacao da corrente. */
+static void log_test_hashes(uint32_t test_id, const StorageFormat_DateTime_t *dt,
+                            const char *rec_sha_hex, const char *csv_sha_hex)
+{
+    StorageFormat_LogEntry_t entry;
+    char text[64];
+
+    (void)snprintf(text, sizeof(text), "rec=%.24s csv=%.24s", rec_sha_hex, csv_sha_hex);
+    memset(&entry, 0, sizeof(entry));
+    entry.datetime = *dt;
+    entry.tz_offset_hours = STORAGE_TZ_OFFSET_HOURS;
+    entry.level = STORAGE_LOG_LEVEL_EVT;
+    entry.code = "REC";
+    entry.test_id = test_id;
+    entry.state_name = "STANDBY";
+    entry.message = text;
+    (void)submit_log(STORAGE_MSG_LOG_EVENT, &entry);
 }
 
 static int process_test_rec_message(const StorageTask_QueueMsg_t *msg)
@@ -367,14 +556,21 @@ static int process_test_rec_message(const StorageTask_QueueMsg_t *msg)
                                * encadeamento de hash no proprio Apendice C
                                * (so' os logs de /logs/ sao encadeados) —
                                * usado aqui apenas como string vazia. */
-    char rec_line[STORAGE_FORMAT_LINE_MAX];
-    char index_line[STORAGE_FORMAT_LINE_MAX];
+    Sha256_Ctx_t sha;
+    uint8_t digest[SHA256_DIGEST_SIZE];
+    char rec_sha_hex[AUDIT_CHAIN_HASH_HEX_LEN + 1u];
+    char csv_sha_hex[AUDIT_CHAIN_HASH_HEX_LEN + 1u] = "-";
     char rec_path[STORAGE_FORMAT_PATH_MAX];
     char index_path[STORAGE_FORMAT_PATH_MAX];
+    char csv_path[STORAGE_FORMAT_PATH_MAX];
     int rc;
 
+    if ((s_test_id_ready == 0u) && (scan_test_index() != 0)) {
+        return -1;
+    }
+
     memset(&info, 0, sizeof(info));
-    info.test_id = msg->test_id;
+    info.test_id = s_last_test_id + 1u;
     info.participant_id = msg->participant_id;
     info.operator_id = msg->operator_id;
     info.cycle_number = msg->cycle_number;
@@ -384,10 +580,14 @@ static int process_test_rec_message(const StorageTask_QueueMsg_t *msg)
     info.firmware_version = msg->firmware_version;
     info.last_calibration = msg->last_calibration;
 
-    nc = StorageFormat_BuildRecLine(&info, rec_line, sizeof(rec_line));
-    StorageFormat_BuildTestRecPath(msg->test_id, msg->datetime.year, msg->datetime.month,
+    nc = StorageFormat_BuildRecLine(&info, s_line, sizeof(s_line));
+    StorageFormat_BuildTestRecPath(info.test_id, msg->datetime.year, msg->datetime.month,
                                    rec_path, sizeof(rec_path));
-    rc = append_line(rec_path, rec_line);
+    Sha256_Init(&sha);
+    Sha256_Update(&sha, (const uint8_t *)s_line, strlen(s_line));
+    Sha256_Final(&sha, digest);
+    Sha256_ToHex(digest, rec_sha_hex, sizeof(rec_sha_hex));
+    rc = append_line(rec_path, s_line);
     if (rc != 0) { return rc; }
 
     /* index.csv: hash so' por integridade do PROPRIO arquivo index (nao
@@ -395,15 +595,27 @@ static int process_test_rec_message(const StorageTask_QueueMsg_t *msg)
      * de uso unico sobre esta linha, sem corrente). */
     AuditChain_Init(&index_chain, NULL);
     {
-        char line_no_hash[STORAGE_FORMAT_LINE_MAX];
         char hash_hex[AUDIT_CHAIN_HASH_HEX_LEN + 1u];
 
-        StorageFormat_BuildIndexLine(&info, nc, "", line_no_hash, sizeof(line_no_hash));
-        AuditChain_AppendLine(&index_chain, line_no_hash, hash_hex, sizeof(hash_hex));
-        StorageFormat_BuildIndexLine(&info, nc, hash_hex, index_line, sizeof(index_line));
+        StorageFormat_BuildIndexLine(&info, nc, "", s_line_aux, sizeof(s_line_aux));
+        AuditChain_AppendLine(&index_chain, s_line_aux, hash_hex, sizeof(hash_hex));
+        StorageFormat_BuildIndexLine(&info, nc, hash_hex, s_line, sizeof(s_line));
     }
     StorageFormat_BuildIndexPath(index_path, sizeof(index_path));
-    return append_line(index_path, index_line);
+    rc = append_line(index_path, s_line);
+    if (rc != 0) { return rc; }
+    s_last_test_id = info.test_id;
+
+    if (s_curve_pending != 0u) {
+        StorageFormat_BuildTestCsvPath(info.test_id, msg->datetime.year, msg->datetime.month,
+                                       csv_path, sizeof(csv_path));
+        rc = write_curve(csv_path, csv_sha_hex, sizeof(csv_sha_hex));
+        s_curve_pending = 0u;
+        if (rc != 0) { return rc; }
+    }
+
+    log_test_hashes(info.test_id, &msg->datetime, rec_sha_hex, csv_sha_hex);
+    return 0;
 }
 
 static int process_message(const StorageTask_QueueMsg_t *msg)
@@ -459,7 +671,6 @@ static volatile uint8_t s_fs_in_flight;
  * manda o DMA direto no buffer do chamador (sd_diskio.c sem
  * ENABLE_SCRATCH_BUFFER), por isso nao se le direto no destino do cliente
  * (pilha/DTCM): le aqui e copia. Alinhado a 32 B (linha de cache). */
-static FIL s_read_file DMA_BUFFER;
 static uint8_t s_fs_data[STORAGE_FS_READ_MAX] DMA_BUFFER __attribute__((aligned(32)));
 
 /* FILINFO com nome longo (_USE_LFN=2) tem ~270 B: estatico, fora da pilha. */
@@ -751,6 +962,9 @@ void StorageTask_Run(void)
                 s_stats.last_mount_fresult = (uint8_t)fr;
                 if (fr == FR_OK) {
                     s_stats.sd_mounted = 1u;
+                    memset(s_chain_recovered, 0, sizeof(s_chain_recovered));
+                    s_test_id_ready = 0u;
+                    (void)scan_test_index(); /* falhando, tenta de novo no 1o ensaio */
                 } else {
                     s_stats.remount_attempts++;
                 }
@@ -787,12 +1001,6 @@ void StorageTask_Run(void)
 /*
  * Pendente (fora do escopo desta primeira versao, nunca testada em
  * hardware):
- *  - Carregar o ultimo hash de cada log ao trocar de mes/no boot (hoje
- *    sempre reinicia do genesis — quebra o encadeamento intermensal que o
- *    Apendice C pede, "1o registro do mes referencia o ultimo hash do mes
- *    anterior").
- *  - Buffer de ENSAIO em RAM + f_sync periodico (curva de pressao
- *    amostrada, .csv) — este arquivo ainda nem tem gerador de conteudo.
  *  - f_sync a cada N linhas/segundos em vez de so' no f_close (reduz risco
  *    de perda do ULTIMO registro num corte de energia, ao custo de mais
  *    desgaste do cartao).

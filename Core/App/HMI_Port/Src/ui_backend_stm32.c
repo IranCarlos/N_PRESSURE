@@ -398,7 +398,7 @@ void UiBackend_SubmitCycleRecord(uint16_t operator_id, uint16_t participant_id,
     (void)snprintf(operator_str, sizeof(operator_str), "OP%02u", (unsigned int)operator_id);
 
     memset(&info, 0, sizeof(info));
-    info.test_id = cycle_number; /* placeholder: numeracao persistente ainda nao existe */
+    info.curve = ControlLoop_GetCurve(&info.curve_count);
     info.participant_id = participant_str;
     info.operator_id = operator_str;
     info.cycle_number = cycle_number;

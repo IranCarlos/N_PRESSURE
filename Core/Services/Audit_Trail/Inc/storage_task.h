@@ -38,6 +38,8 @@ void StorageTask_InitQueue(void);
 int StorageTask_LogEvent(const StorageFormat_LogEntry_t *entry);
 int StorageTask_LogError(const StorageFormat_LogEntry_t *entry);
 int StorageTask_LogAudit(const StorageFormat_LogEntry_t *entry);
+/* `info->test_id` e' ignorado: a storageTask atribui o proximo ID livre. A
+ * curva e' copiada aqui mesmo; `info->curve` nao precisa sobreviver a' chamada. */
 int StorageTask_SubmitTestRecord(const StorageFormat_RecInfo_t *info);
 
 /* Fase 7.4: o campo `seq` de StorageFormat_LogEntry_t passado acima e'
@@ -50,6 +52,8 @@ int StorageTask_SubmitTestRecord(const StorageFormat_RecInfo_t *info);
  * (de qualquer nivel), guardadas NA SUBMISSAO - funciona mesmo sem cartao
  * SD e mesmo se a fila encheu. Usada por GET_LOG_TAIL (USB). */
 #define STORAGE_LOG_TAIL_LEN (24u)
+#define STORAGE_CURVE_MAX    (2400u) /* 240 s a 10 Hz: limite de inflar + plato + desinflar */
+#define STORAGE_TZ_OFFSET_HOURS (-3)
 
 typedef struct {
     StorageFormat_DateTime_t datetime;

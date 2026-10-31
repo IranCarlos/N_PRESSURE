@@ -75,6 +75,92 @@ static void test_rec_line_conforme(void)
     CHECK_CONTAINS(line, "0.9");   /* descompressao 0.94s arredondado p/ 1 casa */
 }
 
+/* Linha completa no cartao: com 256 B o fim do .rec e o hash do log se perdiam. */
+static void test_lines_fit_buffer(void)
+{
+    char line[STORAGE_FORMAT_LINE_MAX];
+    StorageFormat_RecInfo_t info = base_rec_info();
+    StorageFormat_LogEntry_t entry;
+    AuditChain_t chain;
+    char hash[AUDIT_CHAIN_HASH_HEX_LEN + 1u];
+    static const char msg[] = "rec=0123456789abcdef01234567 csv=0123456789abcdef01234567 xxxxxx";
+
+    info.metrics.setpoint_mmhg = 170.0f;
+    (void)StorageFormat_BuildRecLine(&info, line, sizeof(line));
+    CHECK(strlen(line) < (STORAGE_FORMAT_LINE_MAX - 2u));
+    CHECK_CONTAINS(line, "ultima calibracao");
+
+    memset(&entry, 0, sizeof(entry));
+    entry.code = "E013";
+    entry.test_id = 99999999u;
+    entry.state_name = "ESTABILIZANDO";
+    entry.message = msg;
+    AuditChain_Init(&chain, NULL);
+    StorageFormat_BuildLogLine(&entry, &chain, line, sizeof(line));
+    CHECK(strlen(line) < (STORAGE_FORMAT_LINE_MAX - 2u));
+    CHECK(StorageFormat_FindLastHash(line, strlen(line), hash) == 1u);
+    CHECK(strcmp(hash, chain.prev_hash_hex) == 0);
+}
+
+static void test_rec_line_without_plateau(void)
+{
+    char line[STORAGE_FORMAT_LINE_MAX];
+    StorageFormat_RecInfo_t info = base_rec_info();
+
+    info.metrics.plateau_min_mmhg = 1.0e9f;
+    info.metrics.plateau_max_mmhg = -1.0e9f;
+    (void)StorageFormat_BuildRecLine(&info, line, sizeof(line));
+    CHECK_CONTAINS(line, "Faixa 0.0-0.0");
+}
+
+static void test_index_scan_any_block_size(void)
+{
+    static const char text[] = "T00000031;x;y\nlixo;T00000099;\nT00000123;a;b\nT00000007;z;w\nT0000;n\n";
+    size_t step;
+
+    for (step = 1u; step <= 7u; step++) {
+        StorageFormat_IndexScan_t scan;
+        size_t pos;
+
+        memset(&scan, 0, sizeof(scan));
+        for (pos = 0u; pos < (sizeof(text) - 1u); pos += step) {
+            size_t n = ((pos + step) > (sizeof(text) - 1u)) ? ((sizeof(text) - 1u) - pos) : step;
+
+            StorageFormat_IndexScanFeed(&scan, (const uint8_t *)&text[pos], n);
+        }
+        CHECK(scan.max_id == 123u);
+    }
+}
+
+static void test_find_last_hash(void)
+{
+    char hash[AUDIT_CHAIN_HASH_HEX_LEN + 1u];
+    char text[300];
+    const char *a = "1111111111111111111111111111111111111111111111111111111111111111";
+    const char *b = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+
+    (void)snprintf(text, sizeof(text), "x;hash=%s\ny;hash=%s\n", a, b);
+    CHECK(StorageFormat_FindLastHash(text, strlen(text), hash) == 1u);
+    CHECK(strcmp(hash, b) == 0);
+
+    /* firmware antigo: a ultima linha perdeu o fim do hash */
+    (void)snprintf(text, sizeof(text), "y;hash=%.57s\n", b);
+    CHECK(StorageFormat_FindLastHash(text, strlen(text), hash) == 0u);
+    CHECK(StorageFormat_FindLastHash("", 0u, hash) == 0u);
+}
+
+static void test_curve_line(void)
+{
+    char line[32];
+
+    StorageFormat_BuildCurveLine(0u, 0, line, sizeof(line));
+    CHECK(strcmp(line, "0.00,0.0") == 0);
+    StorageFormat_BuildCurveLine(32u, 1004, line, sizeof(line));
+    CHECK(strcmp(line, "3.20,100.4") == 0);
+    StorageFormat_BuildCurveLine(2399u, -3, line, sizeof(line));
+    CHECK(strcmp(line, "239.90,-0.3") == 0);
+}
+
 static void test_rec_line_nc05(void)
 {
     char line[STORAGE_FORMAT_LINE_MAX];
@@ -185,6 +271,11 @@ int main(void)
 {
     test_paths();
     test_rec_line_conforme();
+    test_lines_fit_buffer();
+    test_rec_line_without_plateau();
+    test_index_scan_any_block_size();
+    test_find_last_hash();
+    test_curve_line();
     test_rec_line_nc05();
     test_rec_line_technical_fault();
     test_index_line();

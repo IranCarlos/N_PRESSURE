@@ -40,7 +40,11 @@ extern "C" {
 #endif
 
 #define STORAGE_FORMAT_PATH_MAX   (48u)
-#define STORAGE_FORMAT_LINE_MAX   (256u)
+/* 512 (antes 256): a linha de log com prev+hash e o .rec passavam de 255 e saiam
+ * cortadas no cartao, sem hash completo (achado na Fase 8, 2026-10-31). */
+#define STORAGE_FORMAT_LINE_MAX   (512u)
+#define STORAGE_FORMAT_CURVE_HEADER "Tempo_s,Pressao_mmHg"
+#define STORAGE_FORMAT_CURVE_PERIOD_MS (100u)
 
 typedef struct {
     uint16_t year;   /* ex.: 2026 */
@@ -77,6 +81,8 @@ typedef struct {
     const char *device_id;        /* ex.: "myPRESSURE NP001" (fw_version.h) */
     const char *firmware_version; /* ex.: "FW 1.0.3" */
     StorageFormat_DateTime_t last_calibration;
+    const int16_t *curve;         /* pressao em decimos de mmHg, 1 ponto por periodo */
+    uint16_t       curve_count;   /* 0 = sem curva */
 } StorageFormat_RecInfo_t;
 
 /* Monta a linha do .rec (resumo do ensaio — campos do documento-fonte +
@@ -93,6 +99,26 @@ CycleRecord_NcCode_t StorageFormat_BuildRecLine(const StorageFormat_RecInfo_t *i
 void StorageFormat_BuildIndexLine(const StorageFormat_RecInfo_t *info,
                                   CycleRecord_NcCode_t nc_code, const char *hash_hex,
                                   char *out, size_t out_size);
+
+/* "0.30,100.4" (sem '\n'): ponto `index` da curva do .csv. */
+void StorageFormat_BuildCurveLine(uint32_t index, int16_t pressure_tenths,
+                                  char *out, size_t out_size);
+
+/* Maior ID de /tests/index.csv lido em blocos de qualquer tamanho. Zerar a
+ * struct antes do primeiro bloco; linhas sem "T<8 digitos>;" sao ignoradas. */
+typedef struct {
+    uint32_t max_id;
+    uint32_t current;
+    uint8_t  digits;
+    uint8_t  skip_line; /* 1 = esperando o proximo '\n' */
+} StorageFormat_IndexScan_t;
+
+void StorageFormat_IndexScanFeed(StorageFormat_IndexScan_t *scan, const uint8_t *data, size_t len);
+
+/* Procura em `text` o ultimo ";hash=<64 hex>" completo. Devolve 1 e copia em
+ * out_hex; 0 se nao houver (linha cortada por firmware antigo). */
+uint8_t StorageFormat_FindLastHash(const char *text, size_t len,
+                                   char out_hex[AUDIT_CHAIN_HASH_HEX_LEN + 1u]);
 
 typedef enum {
     STORAGE_LOG_LEVEL_EVT = 0, /* evento normal */

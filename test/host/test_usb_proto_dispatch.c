@@ -248,7 +248,8 @@ static UsbProtoRspStatus_t s_fake_result;
 static UsbProtoRspStatus_t fake_set_setpoint(float sp, uint8_t *warn) { s_calls++; s_last_sp = sp; *warn = (sp > 170.0f) ? 1U : 0U; return s_fake_result; }
 static UsbProtoRspStatus_t fake_set_datetime(const UsbProtoDateTime_t *dt) { s_calls++; s_last_dt = *dt; return s_fake_result; }
 static UsbProtoRspStatus_t fake_start(void) { s_calls++; return s_fake_result; }
-static UsbProtoRspStatus_t fake_abort(void) { s_calls++; return s_fake_result; }
+static uint8_t s_last_cancel;
+static UsbProtoRspStatus_t fake_abort(uint8_t cancel) { s_calls++; s_last_cancel = cancel; return s_fake_result; }
 static UsbProtoRspStatus_t fake_set_operator(uint16_t op, uint16_t part)
 {
     s_calls++;
@@ -355,6 +356,15 @@ static void test_start_and_abort(void)
     /* ABORT ignora payload de proposito - desinflar sempre passa */
     CHECK(call(USB_PROTO_CMD_ABORT_TEST, junk, 3U, &FAKE_ACTIONS) == USB_PROTO_RSP_OK);
     CHECK(s_calls == 2);
+    CHECK(s_last_cancel == 0U);
+    {
+        static const uint8_t one = 1U;
+
+        CHECK(call(USB_PROTO_CMD_ABORT_TEST, &one, 1U, &FAKE_ACTIONS) == USB_PROTO_RSP_OK);
+        CHECK(s_calls == 3);
+        CHECK(s_last_cancel == 1U);
+        s_calls = 2;
+    }
 
     reset_fakes(USB_PROTO_RSP_ESTADO_INVALIDO);
     CHECK(call(USB_PROTO_CMD_START_TEST, NULL, 0U, &FAKE_ACTIONS) == USB_PROTO_RSP_ESTADO_INVALIDO);

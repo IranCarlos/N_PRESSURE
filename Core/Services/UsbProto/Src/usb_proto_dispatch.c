@@ -320,12 +320,15 @@ static size_t handle_start_test(const UsbProtoDispatchCtx_t *ctx, uint16_t req_l
 
 /* ABORT ignora o payload de proposito: um PC com bug que mande lixo no
  * payload ainda consegue desinflar ("desinflar sempre tem prioridade"). */
-static size_t handle_abort_test(const UsbProtoDispatchCtx_t *ctx, uint8_t *rsp_payload)
+static size_t handle_abort_test(const UsbProtoDispatchCtx_t *ctx, const uint8_t *req_payload,
+                                size_t req_len, uint8_t *rsp_payload)
 {
+    uint8_t cancel = ((req_len == 1U) && (req_payload != NULL) && (req_payload[0] == 1U)) ? 1U : 0U;
+
     if ((ctx == NULL) || (ctx->actions == NULL) || (ctx->actions->abort_test == NULL)) {
         return rsp_status(rsp_payload, USB_PROTO_RSP_OCUPADO);
     }
-    return rsp_status(rsp_payload, ctx->actions->abort_test());
+    return rsp_status(rsp_payload, ctx->actions->abort_test(cancel));
 }
 
 static size_t handle_set_operator(const UsbProtoDispatchCtx_t *ctx,
@@ -1052,7 +1055,7 @@ size_t UsbProtoDispatch_Handle(uint16_t cmd,
         case USB_PROTO_CMD_START_TEST:
             return handle_start_test(ctx, req_len, rsp_payload);
         case USB_PROTO_CMD_ABORT_TEST:
-            return handle_abort_test(ctx, rsp_payload);
+            return handle_abort_test(ctx, req_payload, req_len, rsp_payload);
         case USB_PROTO_CMD_SET_OPERATOR:
             return handle_set_operator(ctx, req_payload, req_len, rsp_payload);
         case USB_PROTO_CMD_STREAM_START:
