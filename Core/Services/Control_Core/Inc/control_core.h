@@ -222,6 +222,7 @@ typedef struct {
     uint32_t hold_bursts;             /* rajadas na janela de vazamento */
     float    hold_drop_mmhg;          /* queda somada entre rajadas, na janela */
     uint8_t  hold_low_exits;          /* saidas por baixo neste ciclo */
+    uint32_t hold_recover_ms;         /* tempo tentando voltar ao plato */
 
     ControlCore_Error_t last_error;   /* ultimo erro latched; Init/novo ensaio zera */
 

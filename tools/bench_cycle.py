@@ -32,6 +32,7 @@ class Link:
         self.seq = 200
         self.buf = bytearray()
         self.rows = []
+        self.verdict = ""
         self.last_rx = time.perf_counter()
 
     def poll(self):
@@ -50,6 +51,8 @@ class Link:
                 frame = b.parse_response(b.cobs_decode(raw))
             except ValueError:
                 continue
+            if frame["type"] == b.TYPE_EVT and frame["cmd"] == 0x0302:
+                self.verdict = b.fmt_event(frame)
             if frame["type"] == b.TYPE_STREAM:
                 self.rows.extend(b.parse_stream(frame["payload"])[1])
                 self.last_rx = time.perf_counter()
@@ -130,6 +133,7 @@ def main():
                     raise SystemExit("setpoint acima de 170 recusado neste script")
                 link.wait(0.5)
                 link.rows.clear()
+                link.verdict = ""
                 link.send(b.CMD_SET_SETPOINT, struct.pack("<f", sp))
                 link.wait(0.2)
                 link.send(b.CMD_START_TEST)
@@ -157,6 +161,7 @@ def main():
                 link.wait(1.0)
                 rows = list(link.rows)
                 print(analyze(rows, sp, args.band), flush=True)
+                print("   equipamento: " + link.verdict.split("ENSAIO_CONCLUIDO:")[-1].strip(), flush=True)
                 path = out / f"{args.name}_{stamp}_sp{sp:.0f}_{rep}.csv"
                 with open(path, "w", newline="") as f:
                     w = csv.writer(f)

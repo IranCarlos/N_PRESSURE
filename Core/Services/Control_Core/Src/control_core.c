@@ -125,7 +125,19 @@
  * deixa assentar: rajadas demais na janela tambem sao E013. */
 #define CONTROL_CORE_HOLD_REF_DELAY_MS      (1000u)
 #define CONTROL_CORE_HOLD_MAX_BURSTS        (7u)
-#define CONTROL_CORE_HOLD_MAX_LOW_EXITS     (3u)
+#define CONTROL_CORE_HOLD_MAX_LOW_EXITS     (4u)
+/* A leitura salta com o fluxo da bomba; a banda de conformidade e' +-2% do alvo.
+ * A reposicao usa so' a forca que a pressao pede: bomba.minimo vale em
+ * HOLD_POWER_REF e cai ate' HOLD_POWER_MIN nos alvos baixos. */
+#define CONTROL_CORE_HOLD_POWER_REF_MMHG    (150.0f)
+#define CONTROL_CORE_HOLD_POWER_MIN         (0.20f)
+/* Banda de controle: 1,5% do alvo (margem dentro dos +-2% de conformidade),
+ * limitada por estab.banda. */
+#define CONTROL_CORE_BAND_RATIO             (0.015f)
+/* Conformidade do plato (decisao do usuario, 2026-10-31): o limite vale para a
+ * pressao no manguito. A estatistica ignora este tempo apos cada rajada, em que
+ * o sensor ve o salto da tubulacao. A confirmar com manometro no manguito. */
+#define CONTROL_CORE_PLATEAU_SETTLE_MS      (350u)
 
 static void safe_actuators(ControlCore_Actuators_t *out, float pump,
                            uint8_t v1, uint8_t v2, uint8_t v3)
@@ -234,6 +246,7 @@ void ControlCore_StartInflation(ControlCore_t *cc)
         cc->burst_on_ms = 0u;
         cc->stabilized_out_of_band_ms = 0u;
         cc->hold_low_exits = 0u;
+        cc->hold_recover_ms = 0u;
 
         memset(&cc->cycle, 0, sizeof(cc->cycle));
         cc->cycle.plateau_min_mmhg = 1.0e9f;   /* sentinela: nenhuma amostra ainda */
@@ -249,6 +262,18 @@ const ControlCore_CycleStats_t *ControlCore_GetCycleStats(const ControlCore_t *c
 const ControlCore_PidDiag_t *ControlCore_GetPidDiag(const ControlCore_t *cc)
 {
     return &cc->pid_diag;
+}
+
+static float control_band(const ControlCore_t *cc)
+{
+    float band = cc->cfg->stabilization.band_mmhg;
+
+    if (cc->tuning.rate_ctrl_enable != 0u) {
+        float scaled = cc->runtime->setpoint_mmhg * CONTROL_CORE_BAND_RATIO;
+
+        if (scaled < band) { band = scaled; }
+    }
+    return band;
 }
 
 /* Partida do aprendizado para o manguito medido neste ciclo. */
@@ -311,7 +336,7 @@ static void relief_learn(ControlCore_t *cc)
  *         Devolve 1 se a valvula deve ficar aberta neste passo. */
 static uint8_t update_relief_valve(ControlCore_t *cc, float over_mmhg, uint32_t dt_ms)
 {
-    float on_threshold = cc->tuning.relief_on_fraction * cc->cfg->stabilization.band_mmhg;
+    float on_threshold = cc->tuning.relief_on_fraction * control_band(cc);
 
     relief_sync_learned(cc);
 
@@ -508,7 +533,7 @@ static void run_rate_regulation(ControlCore_t *cc, const ControlCore_Inputs_t *i
     float dt_s = (float)in->dt_ms / 1000.0f;
     float setpoint = cc->runtime->setpoint_mmhg;
     float error_mmhg = setpoint - cc->p_filt_mmhg;
-    float deadband = t->rate_deadband_fraction * cc->cfg->stabilization.band_mmhg;
+    float deadband = t->rate_deadband_fraction * control_band(cc);
     float authority = (cc->pump_authority_mmhg_s > 1.0f)
         ? cc->pump_authority_mmhg_s : CONTROL_CORE_AUTHORITY_DEFAULT_MMHG_S;
     float rate_ref = (t->rate_time_s > 0.0f) ? (error_mmhg / t->rate_time_s) : 0.0f;
@@ -552,15 +577,25 @@ static void run_rate_regulation(ControlCore_t *cc, const ControlCore_Inputs_t *i
     }
 }
 
+static float hold_power(const ControlCore_t *cc)
+{
+    float power = cc->tuning.pump_min_effective *
+                  (cc->runtime->setpoint_mmhg / CONTROL_CORE_HOLD_POWER_REF_MMHG);
+
+    if (power < CONTROL_CORE_HOLD_POWER_MIN) { power = CONTROL_CORE_HOLD_POWER_MIN; }
+    if (power > cc->tuning.pump_min_effective) { power = cc->tuning.pump_min_effective; }
+    return power;
+}
+
 /* Rajada minima de reposicao na manutencao, quando a pressao assentada cai
  * abaixo da zona morta. Devolve a potencia do passo. */
 static float run_hold_topup(ControlCore_t *cc, float error_mmhg, uint32_t dt_ms)
 {
-    float deadband = cc->tuning.rate_deadband_fraction * cc->cfg->stabilization.band_mmhg;
+    float deadband = cc->tuning.rate_deadband_fraction * control_band(cc);
 
     if (cc->burst_on_ms > 0u) {
         cc->hold_since_burst_ms = 0u;
-        return burst_tick(cc, cc->tuning.pump_min_effective, dt_ms);
+        return burst_tick(cc, hold_power(cc), dt_ms);
     }
     cc->hold_since_burst_ms += dt_ms;
     if ((cc->hold_ref_valid == 0u) && (cc->hold_since_burst_ms >= CONTROL_CORE_HOLD_REF_DELAY_MS)) {
@@ -578,7 +613,7 @@ static float run_hold_topup(ControlCore_t *cc, float error_mmhg, uint32_t dt_ms)
         cc->hold_gain_pending = 0u;
         if (gain < CONTROL_CORE_BURST_GAIN_MIN_MMHG) {
             cc->burst_learned_ms *= CONTROL_CORE_BURST_GROW;
-        } else if (gain > cc->cfg->stabilization.band_mmhg) {
+        } else if (gain > control_band(cc)) {
             float shrink = CONTROL_CORE_BURST_GAIN_TARGET_MMHG / gain;
 
             if (shrink < CONTROL_CORE_BURST_SHRINK_MIN) { shrink = CONTROL_CORE_BURST_SHRINK_MIN; }
@@ -740,7 +775,7 @@ static void handle_inflating(ControlCore_t *cc, const ControlCore_Inputs_t *in,
     }
 
     error_mmhg = rt->setpoint_mmhg - rt->pressure_display;
-    if (fabsf(error_mmhg) <= cc->cfg->stabilization.band_mmhg) {
+    if (fabsf(error_mmhg) <= control_band(cc)) {
         rt->state = SYSTEM_STATE_STABILIZING;
         cc->stabilizing_out_of_band_ms = 0u;
     }
@@ -775,7 +810,7 @@ static void handle_stabilizing(ControlCore_t *cc, const ControlCore_Inputs_t *in
     if (relief_window_active(cc) != 0u) {
         /* transitorio do pulso de alivio: leitura nao representa o manguito */
         cc->stabilizing_out_of_band_ms = 0u;
-    } else if (fabsf(error_mmhg) > (2.0f * cc->cfg->stabilization.band_mmhg)) {
+    } else if (fabsf(error_mmhg) > (2.0f * control_band(cc))) {
         cc->stabilizing_out_of_band_ms += in->dt_ms;
         if (cc->stabilizing_out_of_band_ms >= cc->tuning.stabilizing_exit_ms) {
             cc->stabilizing_out_of_band_ms = 0u;
@@ -791,7 +826,7 @@ static void handle_stabilizing(ControlCore_t *cc, const ControlCore_Inputs_t *in
      * esta condicao pulsos seguidos deixavam o tempo correr e o estado
      * virava STABILIZED muito acima do alvo. */
     if ((cc->state_elapsed_ms >= cc->cfg->stabilization.time_ms) &&
-        (fabsf(error_mmhg) <= cc->cfg->stabilization.band_mmhg) &&
+        (fabsf(error_mmhg) <= control_band(cc)) &&
         (relief_window_active(cc) == 0u)) {
         rt->state = SYSTEM_STATE_STABILIZED;
     }
@@ -835,13 +870,12 @@ static void handle_stabilized(ControlCore_t *cc, const ControlCore_Inputs_t *in,
      * Sair exige uma banda MAIOR (2x) que a usada para entrar. */
     update_rate_filter(cc, in->dt_ms);
     error_mmhg = rt->setpoint_mmhg - cc->p_filt_mmhg;
-    if (fabsf(error_mmhg) > (2.0f * cc->cfg->stabilization.band_mmhg)) {
+    if (fabsf(error_mmhg) > (2.0f * control_band(cc))) {
         cc->stabilized_out_of_band_ms += in->dt_ms;
         if (cc->stabilized_out_of_band_ms >= cc->tuning.stabilizing_exit_ms) {
             cc->stabilized_out_of_band_ms = 0u;
-            if ((cc->tuning.rate_ctrl_enable != 0u) && (error_mmhg > 0.0f) &&
-                (burst_length_ms(cc) >= cc->tuning.burst_max_on_ms)) {
-                cc->hold_low_exits++; /* com rajada menor ainda esta' aprendendo */
+            if ((cc->tuning.rate_ctrl_enable != 0u) && (error_mmhg > 0.0f)) {
+                cc->hold_low_exits++;
             }
             if (cc->hold_low_exits >= CONTROL_CORE_HOLD_MAX_LOW_EXITS) {
                 cc->last_error = CONTROL_ERR_E013_LEAK;
@@ -985,17 +1019,37 @@ void ControlCore_Step(ControlCore_t *cc, const ControlCore_Inputs_t *in,
             break;
     }
 
+    /* Saiu do plato por baixo e nao voltou em uma janela de vazamento: a
+     * regulacao esta' repondo sozinha um vazamento real. */
+    if (rt->state == SYSTEM_STATE_STABILIZED) {
+        cc->hold_recover_ms = 0u;
+    } else if ((cc->hold_low_exits > 0u) &&
+               ((rt->state == SYSTEM_STATE_INFLATING) || (rt->state == SYSTEM_STATE_STABILIZING))) {
+        cc->hold_recover_ms += in->dt_ms;
+        if (cc->hold_recover_ms >= cc->safety.t_janela_ms) {
+            cc->last_error = CONTROL_ERR_E013_LEAK;
+            rt->state = SYSTEM_STATE_DEFLATING_FAST;
+            safe_actuators(out, 0.0f, 1u, 1u, 1u);
+        }
+    } else {
+        /* fora do ensaio: nada a vigiar */
+    }
+
     if ((rt->state != state_before) && (rt->state == SYSTEM_STATE_STABILIZED)) {
         /* janela de vazamento sempre comeca do zero numa nova entrada em
          * STABILIZED — evita comparar com um baseline de uma visita antiga
          * (ex.: INFLATING<->STABILIZED oscilando perto da banda). */
-        cc->leak_window_elapsed_ms = 0u;
-        cc->hold_drop_mmhg = 0.0f;
+        if ((cc->tuning.rate_ctrl_enable == 0u) || (cc->cycle.plateau_time_ms == 0u)) {
+            /* Reentrada no mesmo ciclo nao zera: sair e voltar a cada 2 s faria a
+             * janela nunca fechar e esconderia um vazamento continuo. */
+            cc->leak_window_elapsed_ms = 0u;
+            cc->hold_drop_mmhg = 0.0f;
+        }
         cc->hold_ref_valid = 0u;
         cc->hold_since_burst_ms = 0u;
         cc->hold_bursts = 0u;
         cc->hold_gain_pending = 0u;
-        cc->hold_wait_ms = cc->tuning.hold_settle_ms;
+        cc->hold_wait_ms = 0u; /* a leitura cai logo apos a bomba parar: repoe ja' */
         cc->burst_on_ms = 0u;
         cc->stabilized_out_of_band_ms = 0u;
     }
@@ -1031,13 +1085,17 @@ void ControlCore_Step(ControlCore_t *cc, const ControlCore_Inputs_t *in,
 
             if (rt->state == SYSTEM_STATE_STABILIZED) {
                 cc->cycle.plateau_time_ms += in->dt_ms;
-                cc->cycle.plateau_sum_mmhg += rt->pressure_display;
-                cc->cycle.plateau_sample_count++;
-                if (rt->pressure_display < cc->cycle.plateau_min_mmhg) {
-                    cc->cycle.plateau_min_mmhg = rt->pressure_display;
-                }
-                if (rt->pressure_display > cc->cycle.plateau_max_mmhg) {
-                    cc->cycle.plateau_max_mmhg = rt->pressure_display;
+                if ((cc->tuning.rate_ctrl_enable == 0u) ||
+                    ((cc->burst_on_ms == 0u) &&
+                     (cc->hold_since_burst_ms >= CONTROL_CORE_PLATEAU_SETTLE_MS))) {
+                    cc->cycle.plateau_sum_mmhg += rt->pressure_display;
+                    cc->cycle.plateau_sample_count++;
+                    if (rt->pressure_display < cc->cycle.plateau_min_mmhg) {
+                        cc->cycle.plateau_min_mmhg = rt->pressure_display;
+                    }
+                    if (rt->pressure_display > cc->cycle.plateau_max_mmhg) {
+                        cc->cycle.plateau_max_mmhg = rt->pressure_display;
+                    }
                 }
             }
 

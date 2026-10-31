@@ -1598,3 +1598,26 @@ Valores lidos, a acompanhar: jitter maximo ~650-714 us no laco de 1 ms (nao subi
 ainda nao isolada; pode ser o boot); pilha livre minima control=87, safety=85, audio=97 palavras; FreeRTOS heap 15144 B.
 
 **Pendente da 7.9:** IDENT_TLAG (0x0130), que aciona a bomba.
+
+## NC02 em todos os ensaios de bancada (2026-10-31)
+
+Apontado pelo usuario: os ciclos relatados como "sem erro" nao tinham E0xx, mas eram Nao conforme. O platô exige
++-2% do alvo em min/max bruto (`CycleRecord_Evaluate`), e parte deles tambem passou de 10 s (NC04, mascarado pelo NC02).
+`tools/bench_cycle.py` agora mostra o veredito do equipamento. Com `estab.banda=1.5` (RAM) e potencia de reposicao
+escalada pelo alvo, manguito grande, 8 s: 9 de 10 NC02 e 1 NC05 (desinflar 2,14 s em 150 mmHg); nenhum NC00.
+
+## Conformidade do plato: criterio na pressao do manguito (2026-10-31)
+
+Decisao do usuario: os +-2% valem para a pressao no manguito. A estatistica do plato (media, min, max) ignora
+350 ms apos cada rajada e o inicio da manutencao, pois nesse tempo o sensor ve o salto da tubulacao. O pico (<= 5%)
+continua bruto. TODO(BANCADA): confirmar com manometro no manguito que o salto nao existe la'.
+
+Banda de controle = 1,5% do alvo (limitada por estab.banda), reposicao sem espera na entrada da manutencao e potencia
+escalada pelo alvo. E013: 4 saidas por baixo ou uma janela sem voltar ao plato. Sem isso a regulacao repunha o
+vazamento em STABILIZING ate' o timeout de 180 s (pego no teste de host).
+
+NC05 em 150 mmHg no manguito grande: desinflar ~2,1 s, com V3 sem saida e limite de 2 s.
+
+Resultado do criterio acima (manguito grande, platô de 8 s, 3 repeticoes de 60/80/100/120/150, primeira passagem apos
+reset): 8 NC00, 6 NC02 (60 x2, 80 x3, 100 x1) e 1 NC05 (150 mmHg, 2,05 s). Manguito pequeno ainda nao repetido com
+esta versao. Tambem corrigido: reentrada em STABILIZED zerava a janela de vazamento e escondia vazamento continuo.
