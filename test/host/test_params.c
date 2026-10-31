@@ -119,7 +119,7 @@ static void test_consistency_rules(void)
 {
     bind();
     /* pulso_min > pulso_max (150) */
-    CHECK(Params_Set(idx_of(0x0303U), 200.0f) == PARAMS_ERR_CONSISTENCY);
+    CHECK(Params_Set(idx_of(0x0303U), 400.0f) == PARAMS_ERR_CONSISTENCY);
     CHECK(s_tuning.relief_pulse_min_ms == 20U); /* desfeito */
     /* setpoint maximo nao pode alcancar o limite absoluto (185) */
     CHECK(Params_Set(idx_of(0x0501U), 175.0f) == PARAMS_ERR_CONSISTENCY); /* abaixo do setpoint max 180 */

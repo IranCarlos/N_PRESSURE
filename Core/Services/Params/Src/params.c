@@ -54,6 +54,9 @@ static const Entry_t k_table[] = {
     { { 0x0303U, U32, PARAM_GROUP_VALVULA, "valv.pulso_min",   "ms",      0.0f,  2000.0f }, TUNING(relief_pulse_min_ms) },
     { { 0x0304U, U32, PARAM_GROUP_VALVULA, "valv.pulso_max",   "ms",      1.0f,  5000.0f }, TUNING(relief_pulse_max_ms) },
     { { 0x0305U, U32, PARAM_GROUP_VALVULA, "valv.acomodacao",  "ms",      0.0f, 10000.0f }, TUNING(relief_settle_ms) },
+    { { 0x0306U, F32, PARAM_GROUP_VALVULA, "valv.aprendizado", "",        0.0f,     1.0f }, TUNING(relief_learn_gain) },
+    { { 0x0307U, F32, PARAM_GROUP_VALVULA, "valv.grossa",      "mmHg",    0.0f,   100.0f }, TUNING(relief_coarse_mmhg) },
+    { { 0x0308U, U32, PARAM_GROUP_VALVULA, "valv.atraso",      "ms",      0.0f,   200.0f }, TUNING(relief_dead_ms) },
 
     /* Aproximacao rapida (bomba a 100% ate' a zona do PID) */
     { { 0x0401U, F32, PARAM_GROUP_APROXIMACAO, "aprox.antecipacao", "s",    0.0f,     5.0f }, TUNING(approach_lookahead_s) },
@@ -63,6 +66,14 @@ static const Entry_t k_table[] = {
     { { 0x0405U, F32, PARAM_GROUP_APROXIMACAO, "aprox.tau_pressao", "s",    0.001f,   2.0f }, TUNING(rate_p_tau_s) },
     { { 0x0406U, F32, PARAM_GROUP_APROXIMACAO, "aprox.tau_taxa",    "s",    0.001f,   2.0f }, TUNING(rate_tau_s) },
     { { 0x0407U, F32, PARAM_GROUP_APROXIMACAO, "bomba.minimo",      "",     0.0f,     1.0f }, TUNING(pump_min_effective) },
+    { { 0x0408U, U32, PARAM_GROUP_APROXIMACAO, "veloc.ativa",       "",     0.0f,     1.0f }, TUNING(rate_ctrl_enable) },
+    { { 0x0409U, F32, PARAM_GROUP_APROXIMACAO, "veloc.tempo",       "s",    0.1f,    10.0f }, TUNING(rate_time_s) },
+    { { 0x040AU, F32, PARAM_GROUP_APROXIMACAO, "veloc.max",         "mmHg/s", 0.5f, 100.0f }, TUNING(rate_max_mmhg_s) },
+    { { 0x040BU, F32, PARAM_GROUP_APROXIMACAO, "veloc.ti",          "s",    0.05f,   10.0f }, TUNING(rate_ti_s) },
+    { { 0x040CU, F32, PARAM_GROUP_APROXIMACAO, "veloc.zona_morta",  "",     0.0f,     1.0f }, TUNING(rate_deadband_fraction) },
+    { { 0x040DU, U32, PARAM_GROUP_APROXIMACAO, "bomba.rajada",      "ms",   5.0f,  1000.0f }, TUNING(burst_min_on_ms) },
+    { { 0x040EU, U32, PARAM_GROUP_APROXIMACAO, "bomba.reposicao_t", "ms",   0.0f,  5000.0f }, TUNING(hold_settle_ms) },
+    { { 0x040FU, U32, PARAM_GROUP_APROXIMACAO, "bomba.rajada_max",  "ms",   5.0f,  2000.0f }, TUNING(burst_max_on_ms) },
 
     /* Seguranca (Apendice D/E) */
     { { 0x0501U, F32, PARAM_GROUP_SEGURANCA, "seg.p_max_abs",       "mmHg",   10.0f, PARAMS_SENSOR_FULL_SCALE_MMHG }, SAFETY(p_max_abs_mmhg) },

@@ -1510,3 +1510,80 @@ a proxima fase e voltar a isto depois.** Checklist quando o manometro estiver di
 3. Verificacao pela IHM (2 pontos): as tres faixas (sem mudanca / corrige sozinho / alerta de
    assistencia), e que o alerta nao altera a calibracao.
 4. Log de auditoria no SD com valores antes/depois de cada aplicacao.
+
+## Teste de vazamento e calibracao: requisitos revistos pelo usuario (2026-10-31), ADIADOS
+
+Os dois ensaios dependem do controle estavel: ficam para quando a bancada estiver funcionando bem.
+Isto substitui o fluxo "modo manual + V3" do checklist da Fase 7.8 acima.
+
+**Teste de vazamento (requisito):** subir ate' uma pressao conhecida, estabilizar nela, desligar a
+bomba e observar. Aprova somente se (pressao estabilizada - pressao apos o tempo definido) nao
+passar do limite pre-estabelecido.
+
+**Calibracao (requisito):** o ensaio leva sozinho a uma pressao conhecida e estabiliza; o usuario
+acompanha no manometro, informa o valor aferido e o firmware ajusta para esse valor.
+
+**TODO(BUG) — falso APROVADO (achado por leitura de codigo, ainda nao reproduzido em bancada):**
+- O veredito so' existe na IHM (`ui_update_leak_panel()`): QUALQUER saida do estado LEAK_TEST calcula
+  APROVADO/REPROVADO pela queda. Falha nao e' distinguida de teste concluido: E001 (FAULT), timeout de
+  `reach_timeout_ms` e fim normal caem no mesmo caminho. Sem queda medida = APROVADO.
+- Alvo padrao 180 mmHg com P_MAX_ABS 185: margem de 5 mmHg, facil de estourar por inercia. Causa
+  provavel do sintoma "bomba a 100%, desliga logo e aprova" (confirmar `last_error` na bancada).
+- `handle_state_leak_test()` usa o `run_pid_iteration()` antigo de `control_loop.c`, nao o
+  Control_Core; passa para HOLD 10 mmHg ANTES do alvo e sem estabilizar; `max_drop_mmhg` nao e'
+  avaliado no firmware; nao ha' registro no log de auditoria.
+
+## Regulacao por velocidade: bancada do manguito grande (2026-10-31)
+
+Manguito grande dentro de um copo, sem pessoa. Curvas por `tools/bench_characterize.py` (modo manual)
+e ensaios por `tools/bench_cycle.py`; CSVs em `build/bench/` (nao versionado).
+
+**Medido:** subida a 100% em duas fases (~60 mmHg/s ate' ~70 mmHg, depois ~11 mmHg/s); leitura ~8 mmHg
+acima da pressao assentada com a bomba ligada (120 -> 112 mmHg em 1 s ao parar, depois ~0,6 mmHg/s);
+V1 tira ~8 mmHg ja' com 30 ms; V2 tira 0,2/1,6/3,6/7,2 mmHg com 30/60/120/250 ms; V3 nao alivia nada
+(saida tampada sem o manometro); bomba sobe desde 15% em regime; rajada de 120 ms as vezes nao rende.
+
+**Mudancas em Control_Core:** velocidade pedida = erro/tempo, potencia normalizada pela taxa ATUAL a 100%;
+rajadas abaixo do piso com duracao aprendida; alivio fino na V2 com pulso aprendido, V1 so' para excesso
+grande; reposicao por rajadas na manutencao; saida de STABILIZED pela pressao filtrada. E013 agora soma a
+queda com a bomba parada entre rajadas (as rajadas escondiam a queda) e 3 saidas por baixo da banda no
+ciclo tambem sao E013. `veloc.ativa=0` volta ao PID. Parametros novos 0x0306-0x0308, 0x0408-0x040F.
+
+**Pendente:**
+- TODO(BANCADA): manguito pequeno, objetivo da mudanca, ainda nao testado em hardware.
+- TODO(BANCADA): alivio pela V2 e aprendizado do pulso nao atuaram na bancada (nenhum overshoot,
+  mesmo forcado); so' validados no simulador.
+- TODO(BUG): EEPROM deste equipamento guarda `vaz.queda=1`, `valv.ms_por_mmhg=10`, `valv.pulso_max=150`,
+  que prevalecem sobre os novos padroes. Com queda natural de ~2 mmHg/janela, `vaz.queda=1` da' E013 falso.
+- Limites de E013 (`vaz.queda=8`) vieram de manguito em copo; revisar em membro real.
+
+## Regulacao por velocidade: bancada do manguito pequeno (2026-10-31)
+
+Manguito pequeno no copo, sem pessoa. 100% chega a 100 mmHg em 0,9 s, mas a pressao cai para ~66 mmHg em
+1 s ao parar (o ar se redistribui da tubulacao para o manguito) e tende a ~39 mmHg em 8 s.
+
+**Achados que mudaram o controle:** pulso da V2 calculado para o manguito grande (225 ms) derrubou 40 mmHg;
+partida do pulso agora escala pela subida medida (11 mmHg/s = `valv.ms_por_mmhg`). Rajada aprendida e' mantida
+entre setpoints e corrigida proporcionalmente ao ganho. Referencia da queda do E013 espera 1 s apos a rajada
+(medir antes contava a acomodacao como vazamento); 7 rajadas ou mais na janela tambem sao E013. Saida por
+baixo da banda so' conta como vazamento com a rajada ja' no maximo.
+
+**Resultado:** firmware final, `bomba.minimo=0.45`, `bomba.reposicao_t=400` em RAM, setpoints 60/80/100/120/150,
+3 repeticoes, 20 s de manutencao: 15/15 ciclos sem erro e sem reentrada; pico lido +2,9 a +5,1 mmHg; pressao
+assentada de -3,2 a +2,7 mmHg (-4,2 no 1o ciclo apos reset); 3 pulsos de alivio, todos na V2.
+
+**Pendente:**
+- TODO(BANCADA): repetir o firmware final no manguito grande (os parametros acima so' rodaram no pequeno).
+- TODO(BANCADA): trocar de manguito sem reiniciar o equipamento, e vazamento real provocado (E013 validado
+  so' no simulador).
+- TODO: `bomba.minimo` e `bomba.reposicao_t` da EEPROM (0,3 / 800) prevalecem sobre os novos padroes.
+- Picos lidos sao em boa parte da tubulacao durante a rajada; sem manometro nao ha' medida da pressao real.
+
+## Regulacao por velocidade: firmware final no manguito grande, troca sem reset (2026-10-31)
+
+`bomba.minimo=0.45` e `bomba.reposicao_t=400` gravados na EEPROM (seq 3). Manguito grande logo apos o pequeno,
+sem reiniciar. Setpoints 60/80/100/120/150, 3 repeticoes, 20 s: 15/15 ciclos sem erro; 1 reentrada, no 1o ciclo
+apos a troca; estavel em 4,2-7,9 s; pico lido +2,3 a +3,6 mmHg; pressao assentada -4,0 a +2,0 mmHg
+(-6,4 no 1o ciclo apos a troca); nenhum pulso de alivio. A assentada passa um pouco da banda de 3 mmHg antes da
+rajada de reposicao. Supera os TODO(BANCADA) de firmware final no grande e de troca sem reset; continua sem
+validacao em bancada o E013 com vazamento provocado (usuario adiou em 2026-10-31).

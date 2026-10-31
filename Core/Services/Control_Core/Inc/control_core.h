@@ -74,6 +74,18 @@ typedef struct {
     uint32_t relief_pulse_max_ms;
     uint32_t relief_settle_ms;     /* acomodacao apos o pulso (histerese de tempo) */
     uint32_t stabilizing_exit_ms;  /* fora de 2x banda por isto -> volta a INFLATING */
+    /* Regulacao por velocidade (2026-10-31) - ver CONTROL_CORE_RATE_* */
+    uint32_t rate_ctrl_enable;     /* 1 = malha de velocidade; 0 = PID antigo */
+    float    rate_time_s;          /* velocidade pedida = erro / este tempo */
+    float    rate_max_mmhg_s;      /* teto da velocidade na regulacao */
+    float    rate_ti_s;            /* tempo integral da malha de velocidade */
+    float    rate_deadband_fraction; /* bomba para com erro <= fracao * banda */
+    uint32_t burst_min_on_ms;      /* menor rajada da bomba abaixo do piso */
+    uint32_t burst_max_on_ms;      /* maior rajada aprendida */
+    float    relief_learn_gain;    /* 0..1: aprendizado do pulso; 0 = pulso fixo */
+    float    relief_coarse_mmhg;   /* excesso a partir do qual usa a V1 (grossa) */
+    uint32_t relief_dead_ms;       /* atraso de abertura somado ao pulso */
+    uint32_t hold_settle_ms;       /* espera apos cada rajada de reposicao */
 } ControlCore_TuningConfig_t;
 
 typedef struct {
@@ -146,6 +158,9 @@ typedef struct {
     uint8_t fast_approach;    /* 1 = aproximacao a potencia maxima (PID ainda nao assumiu) */
     float   rise_rate_mmhg_s; /* taxa de subida filtrada (usada na previsao de corte) */
     float   predicted_mmhg;   /* pressao + taxa * antecipacao — dispara a troca p/ o PID */
+    float   rate_ref_mmhg_s;  /* velocidade pedida pela regulacao */
+    float   pump_authority_mmhg_s; /* subida medida a 100%: mede o manguito */
+    float   relief_ms_per_mmhg;    /* pulso aprendido no manguito atual */
 } ControlCore_PidDiag_t;
 
 typedef struct {
@@ -164,7 +179,7 @@ typedef struct {
     uint32_t sensor_fault_elapsed_ms; /* tempo consecutivo com sensor_ok=0 (p/ E002) */
     uint32_t leak_window_elapsed_ms;
     float    leak_window_start_mmhg;
-    uint32_t stabilized_out_of_band_calls; /* chamadas CONSECUTIVAS fora da banda, em STABILIZED */
+    uint32_t stabilized_out_of_band_ms;    /* tempo CONSECUTIVO fora da banda larga, em STABILIZED */
     uint32_t stabilizing_out_of_band_ms;   /* tempo CONSECUTIVO fora da banda larga, em STABILIZING */
     uint32_t deflate_settle_elapsed_ms;    /* 0 = ainda acima de P_SEGURA */
 
@@ -176,12 +191,37 @@ typedef struct {
     float    rise_rate_mmhg_s;        /* taxa de subida filtrada */
     uint8_t  rate_valid;              /* 0 = filtro ainda nao inicializado */
 
+    /* Regulacao por velocidade - ver run_rate_regulation() em control_core.c. */
+    float    rate_integral;           /* parcela integral da potencia (0..1) */
+    float    pump_authority_mmhg_s;   /* mmHg/s a 100%; 0 = ainda nao medido neste ciclo */
+    float    burst_credit_ms;         /* tempo de bomba ligada acumulado (rajadas) */
+    uint32_t burst_on_ms;             /* tempo restante da rajada atual */
+
     /* Valvula de alivio com histerese + tempos minimos — ver
      * update_relief_valve() em control_core.c. */
     uint8_t  relief_open;
     uint32_t relief_on_ms;            /* ha' quanto tempo esta' aberta */
     uint32_t relief_off_ms;           /* ha' quanto tempo esta' fechada */
     uint32_t relief_pulse_ms;         /* duracao do pulso atual */
+    /* Mantidos entre ciclos: o manguito costuma ser o mesmo. */
+    float    relief_learned_ms_per_mmhg; /* 0 = ainda nao aprendido */
+    float    relief_learn_seed;       /* valor de tuning que originou o aprendido */
+    float    cuff_authority_mmhg_s;   /* autoridade do manguito do aprendizado atual */
+    float    relief_p_before_mmhg;    /* pressao ao abrir o pulso */
+    uint8_t  relief_measure_pending;  /* 1 = medir a queda ao fim da acomodacao */
+    uint8_t  relief_coarse;           /* 1 = pulso atual na V1 (grossa) */
+
+    /* Manutencao: reposicao por rajadas contra o vazamento natural. */
+    uint32_t hold_wait_ms;            /* espera ate' poder repor de novo */
+    float    burst_learned_ms;        /* rajada aprendida; mantida entre ciclos */
+    float    hold_p_before_mmhg;      /* pressao antes da rajada */
+    uint8_t  hold_gain_pending;       /* 1 = avaliar o ganho da rajada ao assentar */
+    float    hold_ref_mmhg;           /* pressao assentada de referencia */
+    uint8_t  hold_ref_valid;          /* 0 = esperando assentar */
+    uint32_t hold_since_burst_ms;     /* tempo desde a ultima rajada */
+    uint32_t hold_bursts;             /* rajadas na janela de vazamento */
+    float    hold_drop_mmhg;          /* queda somada entre rajadas, na janela */
+    uint8_t  hold_low_exits;          /* saidas por baixo neste ciclo */
 
     ControlCore_Error_t last_error;   /* ultimo erro latched; Init/novo ensaio zera */
 

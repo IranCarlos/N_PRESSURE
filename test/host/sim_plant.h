@@ -29,12 +29,24 @@ typedef struct {
     uint8_t leak_enabled;
     float sensor_noise_amplitude_kpa; /* ruido uniforme +-isto, so' na leitura */
     float sensor_offset_kpa;          /* erro de calibracao constante, so' na leitura */
+    float pump_deadzone;              /* abaixo desta potencia a bomba nao gira (0 = sem zona morta) */
+    float valve_kpa_s;                /* vazao fixa extra por valvula aberta, antes de dividir por C */
+    /* Duas camaras (curvas de bancada 2026-10-31): bomba, valvulas e sensor
+     * ficam na tubulacao; o manguito esta' atras de uma restricao. Com
+     * C_tubo = 0 o modelo continua de uma camara so'. */
+    float C_tubo;
+    float r_tubo;                     /* restricao tubulacao <-> manguito */
+    float valve2_kpa_s;               /* vazao da V2, se diferente da V1 */
+    uint32_t valve_dead_ms;           /* atraso de abertura das valvulas */
 } SimPlant_Config_t;
 
 typedef struct {
     SimPlant_Config_t cfg;
     float    true_pressure_kpa;   /* pressao fisica real (nao vista pelo controlador) */
     float    pump_power_filtered; /* potencia apos o atraso de 1a ordem */
+    float    tube_kpa;            /* pressao na tubulacao (o sensor ve esta) */
+    uint32_t v1_open_ms;
+    uint32_t v2_open_ms;
     uint32_t rng_state;
 } SimPlant_t;
 
@@ -46,6 +58,10 @@ void SimPlant_Init(SimPlant_t *p, const SimPlant_Config_t *cfg, uint32_t rng_see
  * so' para medir overshoot/erro no teste (o controlador nunca a ve). */
 void SimPlant_Step(SimPlant_t *p, float pump_power, uint8_t valves_open_count,
                    uint32_t dt_ms, float *measured_kpa);
+
+/* Duas camaras: V1 e V2 com vazoes proprias (V3 sem saida, como na bancada). */
+void SimPlant_Step2(SimPlant_t *p, float pump_power, uint8_t v1, uint8_t v2,
+                    uint32_t dt_ms, float *measured_kpa);
 
 #ifdef __cplusplus
 }

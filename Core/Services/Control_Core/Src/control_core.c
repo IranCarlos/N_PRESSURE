@@ -9,7 +9,9 @@
 #include <string.h>
 #include <math.h>
 
-#define CONTROL_CORE_PUMP_MIN_EFFECTIVE     (0.30f)
+/* Em regime a bomba ja' sobe a 15% (bancada 2026-10-31), mas as rajadas no
+ * piso rendem melhor a 45% (manguito pequeno, ate' 150 mmHg). */
+#define CONTROL_CORE_PUMP_MIN_EFFECTIVE     (0.45f)
 
 /*
  * Aproximacao rapida (2026-10, pedido do usuario na bancada): longe do
@@ -59,14 +61,71 @@
  * demorar a reequalizar, aumentar RELIEF_SETTLE_MS.
  */
 #define CONTROL_CORE_RELIEF_ON_FRACTION     (0.5f)
-#define CONTROL_CORE_RELIEF_MS_PER_MMHG     (10.0f)
+/* Curva de bancada 2026-10-31 (manguito grande): V2 tira ~0,03 mmHg/ms depois
+ * de ~25 ms de atraso; o menor pulso da V1 ja' tira ~8 mmHg, mais que a banda.
+ * Por isso a regulacao fina e' na V2 e a V1 fica para excesso grande. */
+#define CONTROL_CORE_RELIEF_MS_PER_MMHG     (30.0f)
+#define CONTROL_CORE_RELIEF_COARSE_MMHG     (10.0f)
+#define CONTROL_CORE_RELIEF_DEAD_MS         (25u)
 #define CONTROL_CORE_RELIEF_PULSE_MIN_MS    (20u)
-#define CONTROL_CORE_RELIEF_PULSE_MAX_MS    (150u)
+#define CONTROL_CORE_RELIEF_PULSE_MAX_MS    (300u)
 #define CONTROL_CORE_RELIEF_SETTLE_MS       (400u)
 
 /* STABILIZING so' volta para INFLATING se ficar fora de 2x a banda por
  * este tempo seguido (mesmo criterio de histerese de STABILIZED). */
 #define CONTROL_CORE_STABILIZING_EXIT_MS    (50u)
+
+/*
+ * Regulacao por velocidade (2026-10-31, manguito pequeno instavel na bancada).
+ * Em vez de calcular a potencia direto do erro de pressao:
+ *     velocidade pedida = erro / RATE_TIME (limitada a RATE_MAX), e a
+ *     potencia e' ajustada ate' a subida medida igualar a pedida.
+ * O ganho e' normalizado pela subida medida a 100% (pump_authority), que ja'
+ * embute o volume do manguito: nao ha' configuracao por manguito. Abaixo do
+ * piso da bomba a potencia vira rajadas no piso (BURST_MIN_ON_MS e' a menor
+ * rajada). Valores iniciais, a confirmar com as curvas reais da bancada.
+ */
+#define CONTROL_CORE_RATE_CTRL_ENABLE       (1u)
+#define CONTROL_CORE_RATE_TIME_S            (1.0f)
+#define CONTROL_CORE_RATE_MAX_MMHG_S        (20.0f)
+#define CONTROL_CORE_RATE_TI_S              (0.5f)
+#define CONTROL_CORE_RATE_DEADBAND_FRACTION (0.5f)
+/* Bomba de embolo: rajada curta pode nao completar o curso e nao render nada
+ * (bancada: 120 ms falha as vezes, 250 ms nao); no manguito pequeno 250 ms
+ * seria demais. A duracao aprende entre estes limites, pelo ganho medido. */
+#define CONTROL_CORE_BURST_MIN_ON_MS        (60u)
+#define CONTROL_CORE_BURST_MAX_ON_MS        (300u)
+#define CONTROL_CORE_BURST_GAIN_MIN_MMHG    (0.5f)
+#define CONTROL_CORE_BURST_GAIN_TARGET_MMHG (1.5f)
+#define CONTROL_CORE_BURST_GROW             (2.0f)
+#define CONTROL_CORE_BURST_SHRINK_MIN       (0.3f)
+/* Antes da 1a medida da subida a 100% (ex.: alvo logo acima da pressao). */
+#define CONTROL_CORE_AUTHORITY_DEFAULT_MMHG_S (50.0f)
+/* Aprendizado do pulso de alivio: cada pulso compara a queda real com a
+ * pedida. Limites contra uma medida ruim (ex.: vazamento na acomodacao). */
+#define CONTROL_CORE_RELIEF_LEARN_GAIN      (0.5f)
+#define CONTROL_CORE_RELIEF_LEARN_MIN_DROP_MMHG (0.5f)
+#define CONTROL_CORE_RELIEF_LEARN_MIN_FACTOR (0.1f)
+#define CONTROL_CORE_RELIEF_LEARN_MAX_FACTOR (5.0f)
+/* valv.ms_por_mmhg vale para o manguito grande (~11 mmHg/s a 100%). Num manguito
+ * rapido a mesma abertura tira muito mais: 225 ms na V2 derrubou 40 mmHg no
+ * pequeno (bancada 2026-10-31). A partida escala pela subida medida; errar para
+ * menos so' pede outro pulso. Autoridade fora de 1/3..3x da anterior = outro
+ * manguito (ou faixa da curva): recomeca o aprendizado. */
+#define CONTROL_CORE_RELIEF_REF_AUTHORITY_MMHG_S (11.0f)
+#define CONTROL_CORE_CUFF_CHANGE_RATIO      (3.0f)
+/* Manutencao: repoe o vazamento natural (bancada: ~0,6 mmHg/s) com rajadas,
+ * esperando a leitura assentar. As rajadas escondem a queda da pressao, entao
+ * o E013 soma so' o que cai com a bomba parada entre elas e compara com
+ * dp_vazamento na janela. HOLD_MAX_LOW_EXITS saidas por baixo da banda no
+ * mesmo ciclo tambem sao E013: a reposicao nao esta' dando conta. */
+#define CONTROL_CORE_HOLD_SETTLE_MS         (400u)
+/* A referencia da queda espera o ar se redistribuir apos a rajada (bancada:
+ * ~1 s); medir antes conta a acomodacao como vazamento. Vazamento forte nao
+ * deixa assentar: rajadas demais na janela tambem sao E013. */
+#define CONTROL_CORE_HOLD_REF_DELAY_MS      (1000u)
+#define CONTROL_CORE_HOLD_MAX_BURSTS        (7u)
+#define CONTROL_CORE_HOLD_MAX_LOW_EXITS     (3u)
 
 static void safe_actuators(ControlCore_Actuators_t *out, float pump,
                            uint8_t v1, uint8_t v2, uint8_t v3)
@@ -123,6 +182,17 @@ void ControlCore_DefaultTuning(ControlCore_TuningConfig_t *t)
     t->relief_pulse_max_ms = CONTROL_CORE_RELIEF_PULSE_MAX_MS;
     t->relief_settle_ms    = CONTROL_CORE_RELIEF_SETTLE_MS;
     t->stabilizing_exit_ms = CONTROL_CORE_STABILIZING_EXIT_MS;
+    t->rate_ctrl_enable    = CONTROL_CORE_RATE_CTRL_ENABLE;
+    t->rate_time_s         = CONTROL_CORE_RATE_TIME_S;
+    t->rate_max_mmhg_s     = CONTROL_CORE_RATE_MAX_MMHG_S;
+    t->rate_ti_s           = CONTROL_CORE_RATE_TI_S;
+    t->rate_deadband_fraction = CONTROL_CORE_RATE_DEADBAND_FRACTION;
+    t->burst_min_on_ms     = CONTROL_CORE_BURST_MIN_ON_MS;
+    t->burst_max_on_ms     = CONTROL_CORE_BURST_MAX_ON_MS;
+    t->relief_learn_gain   = CONTROL_CORE_RELIEF_LEARN_GAIN;
+    t->relief_coarse_mmhg  = CONTROL_CORE_RELIEF_COARSE_MMHG;
+    t->relief_dead_ms      = CONTROL_CORE_RELIEF_DEAD_MS;
+    t->hold_settle_ms      = CONTROL_CORE_HOLD_SETTLE_MS;
 }
 
 void ControlCore_Init(ControlCore_t *cc, SystemConfig_t *cfg, SystemRuntime_t *runtime,
@@ -156,6 +226,14 @@ void ControlCore_StartInflation(ControlCore_t *cc)
         cc->relief_on_ms = 0u;
         cc->relief_off_ms = cc->tuning.relief_settle_ms; /* 1a abertura liberada */
         cc->relief_pulse_ms = 0u;
+        cc->relief_measure_pending = 0u;
+
+        cc->rate_integral = 0.0f;
+        cc->pump_authority_mmhg_s = 0.0f;
+        cc->burst_credit_ms = 0.0f;
+        cc->burst_on_ms = 0u;
+        cc->stabilized_out_of_band_ms = 0u;
+        cc->hold_low_exits = 0u;
 
         memset(&cc->cycle, 0, sizeof(cc->cycle));
         cc->cycle.plateau_min_mmhg = 1.0e9f;   /* sentinela: nenhuma amostra ainda */
@@ -173,12 +251,69 @@ const ControlCore_PidDiag_t *ControlCore_GetPidDiag(const ControlCore_t *cc)
     return &cc->pid_diag;
 }
 
+/* Partida do aprendizado para o manguito medido neste ciclo. */
+static void relief_seed_for_cuff(ControlCore_t *cc)
+{
+    float seed = cc->tuning.relief_ms_per_mmhg;
+
+    if (cc->pump_authority_mmhg_s > CONTROL_CORE_RELIEF_REF_AUTHORITY_MMHG_S) {
+        seed *= CONTROL_CORE_RELIEF_REF_AUTHORITY_MMHG_S / cc->pump_authority_mmhg_s;
+    }
+    cc->relief_learned_ms_per_mmhg = seed;
+    cc->relief_learn_seed = cc->tuning.relief_ms_per_mmhg;
+    cc->cuff_authority_mmhg_s = cc->pump_authority_mmhg_s;
+}
+
+/* Na troca para a regulacao: o manguito mudou? */
+static void cuff_check_change(ControlCore_t *cc)
+{
+    float known = cc->cuff_authority_mmhg_s;
+    float now = cc->pump_authority_mmhg_s;
+
+    if ((now > 0.0f) && ((known <= 0.0f) ||
+                         (now > (known * CONTROL_CORE_CUFF_CHANGE_RATIO)) ||
+                         (known > (now * CONTROL_CORE_CUFF_CHANGE_RATIO)))) {
+        relief_seed_for_cuff(cc);
+    }
+}
+
+/* Volta a' partida na 1a vez ou se o parametro mudou pelo app DEV. */
+static void relief_sync_learned(ControlCore_t *cc)
+{
+    if ((cc->relief_learned_ms_per_mmhg <= 0.0f) ||
+        (cc->relief_learn_seed != cc->tuning.relief_ms_per_mmhg)) {
+        relief_seed_for_cuff(cc);
+    }
+    cc->pid_diag.relief_ms_per_mmhg = cc->relief_learned_ms_per_mmhg;
+}
+
+/* Ao fim da acomodacao: quantos ms de pulso custou cada mmHg neste manguito. */
+static void relief_learn(ControlCore_t *cc)
+{
+    float drop = cc->relief_p_before_mmhg - cc->p_filt_mmhg;
+
+    cc->relief_measure_pending = 0u;
+    if ((cc->relief_coarse == 0u) && (drop >= CONTROL_CORE_RELIEF_LEARN_MIN_DROP_MMHG) &&
+        (cc->relief_pulse_ms > cc->tuning.relief_dead_ms)) {
+        float seen = (float)(cc->relief_pulse_ms - cc->tuning.relief_dead_ms) / drop;
+        float low = cc->tuning.relief_ms_per_mmhg * CONTROL_CORE_RELIEF_LEARN_MIN_FACTOR;
+        float high = cc->tuning.relief_ms_per_mmhg * CONTROL_CORE_RELIEF_LEARN_MAX_FACTOR;
+
+        cc->relief_learned_ms_per_mmhg +=
+            (seen - cc->relief_learned_ms_per_mmhg) * cc->tuning.relief_learn_gain;
+        if (cc->relief_learned_ms_per_mmhg < low) { cc->relief_learned_ms_per_mmhg = low; }
+        if (cc->relief_learned_ms_per_mmhg > high) { cc->relief_learned_ms_per_mmhg = high; }
+    }
+}
+
 /** @brief Valvula de alivio por pulso + acomodacao (ver constantes
  *         CONTROL_CORE_RELIEF_*). `over_mmhg` = pressao filtrada - setpoint.
  *         Devolve 1 se a valvula deve ficar aberta neste passo. */
 static uint8_t update_relief_valve(ControlCore_t *cc, float over_mmhg, uint32_t dt_ms)
 {
     float on_threshold = cc->tuning.relief_on_fraction * cc->cfg->stabilization.band_mmhg;
+
+    relief_sync_learned(cc);
 
     if (cc->relief_open != 0u) {
         cc->relief_on_ms += dt_ms;
@@ -188,8 +323,11 @@ static uint8_t update_relief_valve(ControlCore_t *cc, float over_mmhg, uint32_t 
         }
     } else if (cc->relief_off_ms < cc->tuning.relief_settle_ms) {
         cc->relief_off_ms += dt_ms; /* acomodando: leitura nao confiavel */
+    } else if (cc->relief_measure_pending != 0u) {
+        relief_learn(cc); /* acomodou: reavalia no proximo passo com o novo valor */
     } else if (over_mmhg >= on_threshold) {
-        float pulse = over_mmhg * cc->tuning.relief_ms_per_mmhg;
+        float pulse = (float)cc->tuning.relief_dead_ms +
+                      (over_mmhg * cc->relief_learned_ms_per_mmhg);
 
         if (pulse < (float)cc->tuning.relief_pulse_min_ms) {
             pulse = (float)cc->tuning.relief_pulse_min_ms;
@@ -197,9 +335,15 @@ static uint8_t update_relief_valve(ControlCore_t *cc, float over_mmhg, uint32_t 
         if (pulse > (float)cc->tuning.relief_pulse_max_ms) {
             pulse = (float)cc->tuning.relief_pulse_max_ms;
         }
+        cc->relief_coarse = (over_mmhg >= cc->tuning.relief_coarse_mmhg) ? 1u : 0u;
+        if (cc->relief_coarse != 0u) {
+            pulse = (float)cc->tuning.relief_pulse_min_ms; /* V1: o minimo ja' tira muito */
+        }
         cc->relief_pulse_ms = (uint32_t)pulse;
         cc->relief_open = 1u;
         cc->relief_on_ms = 0u;
+        cc->relief_p_before_mmhg = cc->p_filt_mmhg;
+        cc->relief_measure_pending = 1u;
     } else {
         /* dentro da faixa: nada a fazer */
     }
@@ -224,15 +368,12 @@ static void close_relief_valve(ControlCore_t *cc)
     }
 }
 
-/** @brief Atualiza a taxa de subida filtrada e decide se a aproximacao a
- *         100% continua (ver CONTROL_CORE_APPROACH_*). Chamado a cada passo
- *         de INFLATING/STABILIZING. */
-static void update_fast_approach(ControlCore_t *cc, uint32_t dt_ms)
+/* Pressao filtrada e taxa de subida (tambem em STABILIZED, para a saida do
+ * estado nao reagir a' ondulacao do embolo). */
+static void update_rate_filter(ControlCore_t *cc, uint32_t dt_ms)
 {
     SystemRuntime_t *rt = cc->runtime;
     float dt_s = (float)dt_ms / 1000.0f;
-    float error_mmhg = rt->setpoint_mmhg - rt->pressure_display;
-    float predicted;
 
     if (cc->rate_valid == 0u) {
         cc->p_filt_mmhg = rt->pressure_display;
@@ -250,6 +391,25 @@ static void update_fast_approach(ControlCore_t *cc, uint32_t dt_ms)
     } else {
         /* dt = 0: nada a integrar */
     }
+}
+
+/** @brief Atualiza a taxa de subida filtrada e decide se a aproximacao a
+ *         100% continua (ver CONTROL_CORE_APPROACH_*). Chamado a cada passo
+ *         de INFLATING/STABILIZING. */
+static void update_fast_approach(ControlCore_t *cc, uint32_t dt_ms)
+{
+    SystemRuntime_t *rt = cc->runtime;
+    float error_mmhg = rt->setpoint_mmhg - rt->pressure_display;
+    float predicted;
+
+    update_rate_filter(cc, dt_ms);
+
+    /* A 100%, a taxa ATUAL e' a autoridade da bomba neste manguito. Nao o
+     * pico: na bancada a subida cai de ~60 para ~11 mmHg/s perto de 70 mmHg. */
+    if ((cc->fast_approach != 0u) && (cc->rise_rate_mmhg_s > 0.0f)) {
+        cc->pump_authority_mmhg_s = cc->rise_rate_mmhg_s;
+    }
+    cc->pid_diag.pump_authority_mmhg_s = cc->pump_authority_mmhg_s;
 
     predicted = rt->pressure_display;
     if (cc->rise_rate_mmhg_s > 0.0f) {
@@ -266,6 +426,10 @@ static void update_fast_approach(ControlCore_t *cc, uint32_t dt_ms)
             cc->rearm_elapsed_ms = 0u;
             cc->pid_integral = 0.0f;
             cc->pid_prev_error = error_mmhg / CONTROL_CORE_MMHG_PER_KPA;
+            cuff_check_change(cc);
+            cc->rate_integral = 1.0f; /* continua de onde a bomba estava */
+            cc->burst_credit_ms = 0.0f;
+            cc->burst_on_ms = 0u;
         }
     } else {
         if (error_mmhg > cc->tuning.approach_rearm_mmhg) {
@@ -290,6 +454,151 @@ static void run_fast_approach(ControlCore_t *cc, ControlCore_Actuators_t *out)
     cc->pid_diag.relief_active = 0u;
     cc->pid_diag.floor_applied = 0u;
     safe_actuators(out, 1.0f, 0u, 0u, 0u);
+}
+
+static uint32_t burst_length_ms(ControlCore_t *cc)
+{
+    float low = (float)cc->tuning.burst_min_on_ms;
+    float high = (float)cc->tuning.burst_max_on_ms;
+
+    if (high < low) { high = low; }
+    if (cc->burst_learned_ms < low) { cc->burst_learned_ms = low; }
+    if (cc->burst_learned_ms > high) { cc->burst_learned_ms = high; }
+    return (uint32_t)cc->burst_learned_ms;
+}
+
+static float burst_tick(ControlCore_t *cc, float floor_power, uint32_t dt_ms)
+{
+    uint32_t used = (dt_ms < cc->burst_on_ms) ? dt_ms : cc->burst_on_ms;
+
+    cc->burst_on_ms -= used;
+    cc->burst_credit_ms -= (float)used;
+    if (cc->burst_credit_ms < 0.0f) { cc->burst_credit_ms = 0.0f; }
+    return floor_power;
+}
+
+/* Potencia abaixo do piso da bomba vira rajadas no piso: a media no tempo e'
+ * a pedida e cada rajada dura ao menos burst_min_on_ms. */
+static float burst_modulate(ControlCore_t *cc, float power, uint32_t dt_ms)
+{
+    float floor_power = cc->tuning.pump_min_effective;
+
+    if (power >= floor_power) {
+        cc->burst_credit_ms = 0.0f;
+        cc->burst_on_ms = 0u;
+        return power;
+    }
+    if ((power <= 0.0f) || (floor_power <= 0.0f)) {
+        cc->burst_credit_ms = 0.0f;
+        return (cc->burst_on_ms > 0u) ? burst_tick(cc, floor_power, dt_ms) : 0.0f;
+    }
+
+    cc->burst_credit_ms += (power / floor_power) * (float)dt_ms;
+    if ((cc->burst_on_ms == 0u) && (cc->burst_credit_ms >= (float)burst_length_ms(cc))) {
+        cc->burst_on_ms = burst_length_ms(cc);
+    }
+    return (cc->burst_on_ms > 0u) ? burst_tick(cc, floor_power, dt_ms) : 0.0f;
+}
+
+/** @brief Regulacao por velocidade + alivio (ver CONTROL_CORE_RATE_*). */
+static void run_rate_regulation(ControlCore_t *cc, const ControlCore_Inputs_t *in,
+                                ControlCore_Actuators_t *out)
+{
+    const ControlCore_TuningConfig_t *t = &cc->tuning;
+    float dt_s = (float)in->dt_ms / 1000.0f;
+    float setpoint = cc->runtime->setpoint_mmhg;
+    float error_mmhg = setpoint - cc->p_filt_mmhg;
+    float deadband = t->rate_deadband_fraction * cc->cfg->stabilization.band_mmhg;
+    float authority = (cc->pump_authority_mmhg_s > 1.0f)
+        ? cc->pump_authority_mmhg_s : CONTROL_CORE_AUTHORITY_DEFAULT_MMHG_S;
+    float rate_ref = (t->rate_time_s > 0.0f) ? (error_mmhg / t->rate_time_s) : 0.0f;
+    float rate_error;
+    float power;
+    uint8_t relief_on;
+
+    if (rate_ref < 0.0f) { rate_ref = 0.0f; }
+    if (rate_ref > t->rate_max_mmhg_s) { rate_ref = t->rate_max_mmhg_s; }
+
+    rate_error = (rate_ref - cc->rise_rate_mmhg_s) / authority;
+    relief_on = update_relief_valve(cc, cc->p_filt_mmhg - setpoint, in->dt_ms);
+
+    if ((relief_window_active(cc) != 0u) || (error_mmhg <= deadband)) {
+        /* Chegou (ou esta' aliviando): sem bomba e sem acumular integral. */
+        cc->rate_integral = 0.0f;
+        power = 0.0f;
+    } else {
+        if (t->rate_ti_s > 0.0f) {
+            cc->rate_integral += rate_error * dt_s / t->rate_ti_s;
+        }
+        if (cc->rate_integral > 1.0f) { cc->rate_integral = 1.0f; }
+        if (cc->rate_integral < 0.0f) { cc->rate_integral = 0.0f; }
+        power = cc->rate_integral + rate_error;
+        if (power > 1.0f) { power = 1.0f; }
+        if (power < 0.0f) { power = 0.0f; }
+    }
+
+    cc->pid_diag.error_mmhg = error_mmhg;
+    cc->pid_diag.rate_ref_mmhg_s = rate_ref;
+    cc->pid_diag.pump_power_pid = power;
+    power = burst_modulate(cc, power, in->dt_ms);
+    cc->pid_diag.pump_power_final = power;
+    cc->pid_diag.floor_applied = 0u;
+    cc->pid_diag.relief_active = relief_on;
+
+    if (relief_on != 0u) {
+        safe_actuators(out, power, cc->relief_coarse, (cc->relief_coarse == 0u) ? 1u : 0u, 0u);
+    } else {
+        safe_actuators(out, power, 0u, 0u, 0u);
+    }
+}
+
+/* Rajada minima de reposicao na manutencao, quando a pressao assentada cai
+ * abaixo da zona morta. Devolve a potencia do passo. */
+static float run_hold_topup(ControlCore_t *cc, float error_mmhg, uint32_t dt_ms)
+{
+    float deadband = cc->tuning.rate_deadband_fraction * cc->cfg->stabilization.band_mmhg;
+
+    if (cc->burst_on_ms > 0u) {
+        cc->hold_since_burst_ms = 0u;
+        return burst_tick(cc, cc->tuning.pump_min_effective, dt_ms);
+    }
+    cc->hold_since_burst_ms += dt_ms;
+    if ((cc->hold_ref_valid == 0u) && (cc->hold_since_burst_ms >= CONTROL_CORE_HOLD_REF_DELAY_MS)) {
+        cc->hold_ref_mmhg = cc->p_filt_mmhg;
+        cc->hold_ref_valid = 1u;
+    }
+    if (cc->hold_wait_ms > dt_ms) {
+        cc->hold_wait_ms -= dt_ms;
+        return 0.0f;
+    }
+    cc->hold_wait_ms = 0u;
+    if (cc->hold_gain_pending != 0u) {
+        float gain = cc->p_filt_mmhg - cc->hold_p_before_mmhg;
+
+        cc->hold_gain_pending = 0u;
+        if (gain < CONTROL_CORE_BURST_GAIN_MIN_MMHG) {
+            cc->burst_learned_ms *= CONTROL_CORE_BURST_GROW;
+        } else if (gain > cc->cfg->stabilization.band_mmhg) {
+            float shrink = CONTROL_CORE_BURST_GAIN_TARGET_MMHG / gain;
+
+            if (shrink < CONTROL_CORE_BURST_SHRINK_MIN) { shrink = CONTROL_CORE_BURST_SHRINK_MIN; }
+            cc->burst_learned_ms *= shrink;
+        } else {
+            /* rajada na medida */
+        }
+    }
+    if (error_mmhg > deadband) {
+        if ((cc->hold_ref_valid != 0u) && (cc->hold_ref_mmhg > cc->p_filt_mmhg)) {
+            cc->hold_drop_mmhg += cc->hold_ref_mmhg - cc->p_filt_mmhg;
+        }
+        cc->hold_ref_valid = 0u;
+        cc->hold_bursts++;
+        cc->hold_gain_pending = 1u;
+        cc->hold_p_before_mmhg = cc->p_filt_mmhg;
+        cc->burst_on_ms = burst_length_ms(cc);
+        cc->hold_wait_ms = cc->burst_on_ms + cc->tuning.hold_settle_ms;
+    }
+    return 0.0f;
 }
 
 /** @brief PID + feedforward + alivio de sobrepressao. Usado por INFLATING e
@@ -396,6 +705,16 @@ static void run_pid_iteration(ControlCore_t *cc, const ControlCore_Inputs_t *in,
     safe_actuators(out, pump_power, relief_on, 0u, 0u);
 }
 
+static void run_regulation(ControlCore_t *cc, const ControlCore_Inputs_t *in,
+                           ControlCore_Actuators_t *out)
+{
+    if (cc->tuning.rate_ctrl_enable != 0u) {
+        run_rate_regulation(cc, in, out);
+    } else {
+        run_pid_iteration(cc, in, out);
+    }
+}
+
 static void handle_idle(ControlCore_Actuators_t *out)
 {
     safe_actuators(out, 0.0f, 1u, 1u, 0u);
@@ -417,7 +736,7 @@ static void handle_inflating(ControlCore_t *cc, const ControlCore_Inputs_t *in,
     if (cc->fast_approach != 0u) {
         run_fast_approach(cc, out);
     } else {
-        run_pid_iteration(cc, in, out);
+        run_regulation(cc, in, out);
     }
 
     error_mmhg = rt->setpoint_mmhg - rt->pressure_display;
@@ -446,7 +765,7 @@ static void handle_stabilizing(ControlCore_t *cc, const ControlCore_Inputs_t *in
     }
 
     update_fast_approach(cc, in->dt_ms);
-    run_pid_iteration(cc, in, out);
+    run_regulation(cc, in, out);
 
     /* Histerese: entra com |erro| <= banda (handle_inflating), mas so' sai
      * com |erro| > 2x banda por CONTROL_CORE_STABILIZING_EXIT_MS seguidos —
@@ -495,6 +814,7 @@ static void handle_stabilized(ControlCore_t *cc, const ControlCore_Inputs_t *in,
     SystemRuntime_t *rt = cc->runtime;
     float error_mmhg;
     float drop_mmhg;
+    float hold_power = 0.0f;
 
     safe_actuators(out, 0.0f, 0u, 0u, 0u);
     close_relief_valve(cc);
@@ -513,16 +833,31 @@ static void handle_stabilized(ControlCore_t *cc, const ControlCore_Inputs_t *in,
      * INFLATING e gerava um ciclo limite (bate-e-volta) que, no simulador,
      * levou dezenas de segundos para amortecer no manguito pequeno/rapido.
      * Sair exige uma banda MAIOR (2x) que a usada para entrar. */
-    error_mmhg = rt->setpoint_mmhg - rt->pressure_display;
+    update_rate_filter(cc, in->dt_ms);
+    error_mmhg = rt->setpoint_mmhg - cc->p_filt_mmhg;
     if (fabsf(error_mmhg) > (2.0f * cc->cfg->stabilization.band_mmhg)) {
-        cc->stabilized_out_of_band_calls++;
-        if (cc->stabilized_out_of_band_calls >= 2u) {
-            cc->stabilized_out_of_band_calls = 0u;
-            rt->state = SYSTEM_STATE_INFLATING;
+        cc->stabilized_out_of_band_ms += in->dt_ms;
+        if (cc->stabilized_out_of_band_ms >= cc->tuning.stabilizing_exit_ms) {
+            cc->stabilized_out_of_band_ms = 0u;
+            if ((cc->tuning.rate_ctrl_enable != 0u) && (error_mmhg > 0.0f) &&
+                (burst_length_ms(cc) >= cc->tuning.burst_max_on_ms)) {
+                cc->hold_low_exits++; /* com rajada menor ainda esta' aprendendo */
+            }
+            if (cc->hold_low_exits >= CONTROL_CORE_HOLD_MAX_LOW_EXITS) {
+                cc->last_error = CONTROL_ERR_E013_LEAK;
+                rt->state = SYSTEM_STATE_DEFLATING_FAST;
+            } else {
+                rt->state = SYSTEM_STATE_INFLATING;
+            }
             return;
         }
     } else {
-        cc->stabilized_out_of_band_calls = 0u;
+        cc->stabilized_out_of_band_ms = 0u;
+    }
+
+    if (cc->tuning.rate_ctrl_enable != 0u) {
+        hold_power = run_hold_topup(cc, error_mmhg, in->dt_ms);
+        out->pump_power = hold_power;
     }
 
     cc->leak_window_elapsed_ms += in->dt_ms;
@@ -531,7 +866,21 @@ static void handle_stabilized(ControlCore_t *cc, const ControlCore_Inputs_t *in,
     }
     if (cc->leak_window_elapsed_ms >= cc->safety.t_janela_ms) {
         drop_mmhg = cc->leak_window_start_mmhg - rt->pressure_display;
+        if (cc->tuning.rate_ctrl_enable != 0u) {
+            drop_mmhg = cc->hold_drop_mmhg;
+            if ((cc->hold_ref_valid != 0u) && (cc->hold_ref_mmhg > cc->p_filt_mmhg)) {
+                drop_mmhg += cc->hold_ref_mmhg - cc->p_filt_mmhg;
+            }
+            if (cc->hold_ref_valid != 0u) {
+                cc->hold_ref_mmhg = cc->p_filt_mmhg; /* nova janela parte daqui */
+            }
+            if (cc->hold_bursts >= CONTROL_CORE_HOLD_MAX_BURSTS) {
+                drop_mmhg = cc->safety.dp_vazamento_mmhg;
+            }
+            cc->hold_bursts = 0u;
+        }
         cc->leak_window_elapsed_ms = 0u;
+        cc->hold_drop_mmhg = 0.0f;
         if (drop_mmhg >= cc->safety.dp_vazamento_mmhg) {
             cc->last_error = CONTROL_ERR_E013_LEAK;
             rt->state = SYSTEM_STATE_DEFLATING_FAST;
@@ -641,6 +990,14 @@ void ControlCore_Step(ControlCore_t *cc, const ControlCore_Inputs_t *in,
          * STABILIZED — evita comparar com um baseline de uma visita antiga
          * (ex.: INFLATING<->STABILIZED oscilando perto da banda). */
         cc->leak_window_elapsed_ms = 0u;
+        cc->hold_drop_mmhg = 0.0f;
+        cc->hold_ref_valid = 0u;
+        cc->hold_since_burst_ms = 0u;
+        cc->hold_bursts = 0u;
+        cc->hold_gain_pending = 0u;
+        cc->hold_wait_ms = cc->tuning.hold_settle_ms;
+        cc->burst_on_ms = 0u;
+        cc->stabilized_out_of_band_ms = 0u;
     }
 
     cc->state_elapsed_ms = (rt->state == state_before) ? (cc->state_elapsed_ms + in->dt_ms) : 0u;

@@ -67,7 +67,9 @@ static const ControlCore_SafetyConfig_t s_control_safety = {
      * caracteristica fisica do embolo). */
     .t_inflar_max_ms = 180000u,
     .t_desinflar_max_ms = 15000u,
-    .dp_vazamento_mmhg = 1.0f,
+    /* 8 (antes 1): o manguito grande perde ~0,6 mmHg/s parado (bancada
+     * 2026-10-31, no copo), ~3 mmHg na janela. Com 1 todo ensaio dava E013. */
+    .dp_vazamento_mmhg = 8.0f,
     .t_janela_ms = 5000u,
     .p_segura_mmhg = 10.0f,
     .t_seguro_ms = 200u,
@@ -308,6 +310,10 @@ static void handle_state_manual(void) {
     }
 }
 
+/* TODO(BUG): falso APROVADO - o veredito so' existe na IHM e qualquer saida deste
+ * estado (E001, timeout) vira APROVADO. Refazer conforme o requisito de
+ * Docs/dev/00-auditoria.md: subir, estabilizar, desligar a bomba e comparar a
+ * queda com o limite, com veredito no firmware. Adiado pelo usuario (2026-10-31). */
 static void handle_state_leak_test(void) {
     uint32_t now = HAL_GetTick();
     float current_mmhg = s_control.runtime_data->pressure_kpa * MMHG_PER_KPA;

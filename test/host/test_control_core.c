@@ -533,6 +533,98 @@ static void test_manual_supervision_priorities(void)
     CHECK(ControlCore_OverPressure(&s, kpa_over) == 1u);
 }
 
+/*
+ * Varredura de manguitos (2026-10-31): do pequeno e rapido ao grande e lento,
+ * com bomba que nao gira abaixo de 30% e valvula de vazao fixa. Modelo ainda
+ * nao ajustado as curvas da bancada: compara estrategias, nao preve numeros.
+ */
+typedef struct {
+    float    overshoot_mmhg;
+    float    final_error_mmhg;
+    uint32_t reach_ms;
+    uint8_t  stabilized;
+    uint32_t relief_pulses;
+    uint32_t pump_starts;
+} SweepResult_t;
+
+static SweepResult_t run_cuff_sweep_case(float rise_mmhg_s, uint32_t rate_ctrl, float setpoint)
+{
+    SystemConfig_t cfg = default_cfg();
+    SystemRuntime_t rt;
+    ControlCore_SafetyConfig_t safety = default_safety();
+    ControlCore_t cc;
+    SimPlant_Config_t pc;
+    SimPlant_t plant;
+    SweepResult_t r;
+    float measured;
+    uint8_t last_v1 = 0u;
+    uint8_t pump_was_on = 0u;
+
+    /* defaults reais da EEPROM (default_cfg() tem os da Fase 3) */
+    cfg.pid.kd = 0.0f;
+    cfg.pid.out_max = 40.0f;
+    memset(&pc, 0, sizeof(pc));
+    /* Referencia: manguito grande medido em 2026-10-31 (~11 mmHg/s a 100%
+     * perto do alvo, leitura ~8 mmHg acima com a bomba ligada). */
+    pc.C_manguito = 11.0f / rise_mmhg_s;
+    pc.k_pump = 11.0f / MMHG_PER_KPA;
+    pc.tau_lag_s = 0.05f;
+    pc.C_tubo = 0.1f;
+    pc.r_tubo = 0.73f;
+    pc.valve_kpa_s = 300.0f / MMHG_PER_KPA;
+    pc.valve2_kpa_s = 36.0f / MMHG_PER_KPA;
+    pc.valve_dead_ms = 25u;
+    pc.pump_deadzone = 0.15f;
+    pc.sensor_noise_amplitude_kpa = 1.0f / MMHG_PER_KPA;
+    safety.dp_vazamento_mmhg = 8.0f; /* mesmo default de control_loop.c */
+    memset(&rt, 0, sizeof(rt));
+    memset(&r, 0, sizeof(r));
+    rt.setpoint_mmhg = setpoint;
+    ControlCore_Init(&cc, &cfg, &rt, &safety);
+    cc.tuning.rate_ctrl_enable = rate_ctrl;
+    SimPlant_Init(&plant, &pc, 7u);
+    ControlCore_StartInflation(&cc);
+    SimPlant_Step2(&plant, 0.0f, 0u, 0u, 0u, &measured);
+    for (uint32_t tick = 1u; tick <= 30000u; tick++) {
+        ControlCore_Inputs_t in = { measured, 1u, 0u, 1u };
+        ControlCore_Actuators_t out;
+        float p;
+
+        ControlCore_Step(&cc, &in, &out);
+        SimPlant_Step2(&plant, out.pump_power, out.valve1_open, out.valve2_open, 1u, &measured);
+        p = plant.true_pressure_kpa * MMHG_PER_KPA;
+        if ((p - setpoint) > r.overshoot_mmhg) { r.overshoot_mmhg = p - setpoint; }
+        if ((r.reach_ms == 0u) && (p >= (setpoint - 3.0f))) { r.reach_ms = tick; }
+        if ((out.valve1_open != 0u) && (last_v1 == 0u)) { r.relief_pulses++; }
+        last_v1 = out.valve1_open;
+        if ((out.pump_power > 0.0f) && (pump_was_on == 0u)) { r.pump_starts++; }
+        pump_was_on = (out.pump_power > 0.0f) ? 1u : 0u;
+    }
+    r.stabilized = (rt.state == SYSTEM_STATE_STABILIZED) ? 1u : 0u;
+    r.final_error_mmhg = (plant.true_pressure_kpa * MMHG_PER_KPA) - setpoint;
+    return r;
+}
+
+static void test_cuff_sweep(void)
+{
+    static const float rises[] = { 110.0f, 55.0f, 22.0f, 11.0f, 6.0f };
+
+    printf("  subida a 100%% | PID: over final pulsos partidas estab | velocidade: over final t_ms pulsos partidas estab\n");
+    for (uint32_t i = 0u; i < (sizeof(rises) / sizeof(rises[0])); i++) {
+        SweepResult_t a = run_cuff_sweep_case(rises[i], 0u, 100.0f);
+        SweepResult_t b = run_cuff_sweep_case(rises[i], 1u, 100.0f);
+
+        printf("  %6.0f mmHg/s | %5.1f %5.1f %3u %3u %u | %5.1f %5.1f %6u %3u %3u %u\n",
+               (double)rises[i],
+               (double)a.overshoot_mmhg, (double)a.final_error_mmhg, (unsigned)a.relief_pulses,
+               (unsigned)a.pump_starts, a.stabilized,
+               (double)b.overshoot_mmhg, (double)b.final_error_mmhg, (unsigned)b.reach_ms,
+               (unsigned)b.relief_pulses, (unsigned)b.pump_starts, b.stabilized);
+        CHECK(b.stabilized == 1u);
+        CHECK(b.overshoot_mmhg <= 3.0f);
+    }
+}
+
 int main(void)
 {
     test_manual_supervision_priorities();
@@ -549,6 +641,7 @@ int main(void)
     test_abort_during_inflation_sets_nc07_flag();
     test_relief_valve_hysteresis_with_ripple();
     test_fast_approach_full_power_far_from_setpoint();
+    test_cuff_sweep();
     printf(s_fail ? "control_core: %d FALHA(S)\n" : "control_core: OK\n", s_fail);
     return s_fail != 0;
 }
