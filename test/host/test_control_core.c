@@ -43,6 +43,7 @@ static ControlCore_SafetyConfig_t default_safety(void)
     s.t_desinflar_max_ms = 15000u;
     s.dp_vazamento_mmhg = 1.0f;
     s.t_janela_ms = 5000u;
+    s.t_plato_max_ms = 600000u;
     s.p_segura_mmhg = 5.0f;
     s.t_seguro_ms = 200u;
     return s;
@@ -435,6 +436,51 @@ static void test_arterial_pulse_does_not_widen_plateau_band(void)
     CHECK(cc.last_error == CONTROL_ERR_NONE);
 }
 
+/* Sem pedal nem PC o plato termina sozinho, sem erro tecnico nem NC07. */
+static void test_plateau_time_limit_deflates(void)
+{
+    SystemConfig_t cfg = default_cfg();
+    SystemRuntime_t rt;
+    ControlCore_SafetyConfig_t safety = default_safety();
+    ControlCore_t cc;
+    SimPlant_t plant;
+    SimPlant_Config_t pcfg = plant_small_cuff();
+    float measured_kpa;
+    const ControlCore_CycleStats_t *stats;
+    uint32_t tick;
+
+    safety.t_plato_max_ms = 3000u;
+    safety.dp_vazamento_mmhg = 8.0f;
+    memset(&rt, 0, sizeof(rt));
+    rt.setpoint_mmhg = 40.0f;
+    ControlCore_Init(&cc, &cfg, &rt, &safety);
+    SimPlant_Init(&plant, &pcfg, 42u);
+    ControlCore_StartInflation(&cc);
+    SimPlant_Step(&plant, 0.0f, 0u, 0u, &measured_kpa);
+    stats = ControlCore_GetCycleStats(&cc);
+
+    for (tick = 1u; (tick <= 60000u) && (stats->finalized == 0u); tick++) {
+        ControlCore_Inputs_t in;
+        ControlCore_Actuators_t out;
+
+        in.pressure_kpa = measured_kpa;
+        in.sensor_ok = 1u;
+        in.abort_request = 0u;
+        in.dt_ms = 1u;
+        ControlCore_Step(&cc, &in, &out);
+        SimPlant_Step(&plant, out.pump_power,
+                     (uint8_t)(out.valve1_open + out.valve2_open + out.valve3_open),
+                     1u, &measured_kpa);
+    }
+
+    printf("  [plato_max] plato=%u ms err=%u\n", (unsigned)stats->plateau_time_ms, (unsigned)cc.last_error);
+    CHECK(stats->finalized != 0u);
+    CHECK((stats->plateau_time_ms >= 3000u) && (stats->plateau_time_ms <= 3010u));
+    CHECK(cc.last_error == CONTROL_ERR_NONE);
+    CHECK(stats->aborted_by_operator == 0u);
+    CHECK(stats->technical_fault == 0u);
+}
+
 /* Pedal durante a INFLACAO (antes do plato) = interrupcao pelo operador. */
 static void test_abort_during_inflation_sets_nc07_flag(void)
 {
@@ -693,6 +739,7 @@ int main(void)
     test_abort_request_deflates_to_idle();
     test_cycle_stats_full_run();
     test_arterial_pulse_does_not_widen_plateau_band();
+    test_plateau_time_limit_deflates();
     test_abort_during_inflation_sets_nc07_flag();
     test_relief_valve_hysteresis_with_ripple();
     test_fast_approach_full_power_far_from_setpoint();

@@ -318,7 +318,8 @@ typedef struct {
  *                   heap_minimo u32, flags u8 (bit0=hard fault no boot anterior,
  *                   bit1=reset por IWDG), fault_pc u32, fault_lr u32, cfsr u32,
  *                   hfsr u32, n u8, n x pilha_livre_palavras u16 (ordem: control,
- *                   safety, input, app, usbProto, storage, ui, audio)
+ *                   safety, input, app, usbProto, storage, ui, audio),
+ *                   jitter_max_em_ms u32, exec_max_us u32, jitter_max_estado u8
  * SELFTEST  req: -  rsp: status (ESTADO_INVALIDO fora de STANDBY), falhas u8
  *                   (mascara USB_PROTO_SELFTEST_*; 0 = aprovado), pressao_mmhg f32
  *                   Nao aciona bomba nem valvulas.
@@ -326,7 +327,7 @@ typedef struct {
  *                   depois da resposta e do registro no log.
  */
 #define USB_PROTO_DIAG_TASKS        (8U)
-#define USB_PROTO_DIAG_RSP_LEN      (59U)
+#define USB_PROTO_DIAG_RSP_LEN      (68U)
 #define USB_PROTO_SELFTEST_SD       (1U << 0)
 #define USB_PROTO_SELFTEST_RTC      (1U << 1)
 #define USB_PROTO_SELFTEST_EEPROM   (1U << 2)
@@ -346,6 +347,9 @@ typedef struct {
     uint32_t fault_cfsr;
     uint32_t fault_hfsr;
     uint16_t stack_free_words[USB_PROTO_DIAG_TASKS];
+    uint32_t jitter_max_at_ms;
+    uint32_t exec_max_us;
+    uint8_t  jitter_max_state;
 } UsbProtoDiag_t;
 
 typedef struct {

@@ -957,6 +957,9 @@ static void d_get(UsbProtoDiag_t *out)
     out->flags = 3U;
     out->fault_pc = 0x08001234U;
     out->stack_free_words[7] = 0xABCDU;
+    out->jitter_max_at_ms = 0x0A0B0C0DU;
+    out->exec_max_us = 0x11223344U;
+    out->jitter_max_state = 5U;
 }
 
 static uint8_t d_selftest(uint8_t *fail_mask, float *pressure_mmhg)
@@ -1002,6 +1005,9 @@ static void test_diag_commands(void)
     CHECK((rsp[26] == 0x34U) && (rsp[29] == 0x08U));
     CHECK(rsp[42] == USB_PROTO_DIAG_TASKS);
     CHECK((rsp[57] == 0xCDU) && (rsp[58] == 0xABU));
+    CHECK((rsp[59] == 0x0DU) && (rsp[62] == 0x0AU));
+    CHECK((rsp[63] == 0x44U) && (rsp[66] == 0x11U));
+    CHECK(rsp[67] == 5U);
 
     CHECK(call_full(USB_PROTO_CMD_SELFTEST, NULL, 0U, &ctx, rsp, sizeof(rsp)) == 6U);
     CHECK(rsp[1] == (USB_PROTO_SELFTEST_SD | USB_PROTO_SELFTEST_ZERO));

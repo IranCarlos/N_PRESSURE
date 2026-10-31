@@ -245,7 +245,7 @@ TIM_HandleTypeDef htim15;
 
 /* Definitions for controlTask */
 osThreadId_t controlTaskHandle;
-uint32_t controlTaskBuffer[ 256 ];
+uint32_t controlTaskBuffer[ 384 ];
 osStaticThreadDef_t controlTaskControlBlock;
 const osThreadAttr_t controlTask_attributes = {
   .name = "controlTask",
@@ -257,7 +257,7 @@ const osThreadAttr_t controlTask_attributes = {
 };
 /* Definitions for safetyTask */
 osThreadId_t safetyTaskHandle;
-uint32_t safetyTaskBuffer[ 128 ];
+uint32_t safetyTaskBuffer[ 192 ];
 osStaticThreadDef_t safetyTaskControlBlock;
 const osThreadAttr_t safetyTask_attributes = {
   .name = "safetyTask",
@@ -329,7 +329,7 @@ const osThreadAttr_t uiTask_attributes = {
 };
 /* Definitions for audioTask */
 osThreadId_t audioTaskHandle;
-uint32_t audioTaskBuffer[ 128 ];
+uint32_t audioTaskBuffer[ 192 ];
 osStaticThreadDef_t audioTaskControlBlock;
 const osThreadAttr_t audioTask_attributes = {
   .name = "audioTask",

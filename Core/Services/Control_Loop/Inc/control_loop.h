@@ -84,6 +84,14 @@ void ControlLoop_Update(void);
  */
 uint32_t ControlLoop_GetMaxJitterCycles(void);
 
+/** @brief Quando (HAL_GetTick) e em que SystemState_t ocorreu o maior jitter. */
+uint32_t ControlLoop_GetMaxJitterTick(void);
+uint32_t ControlLoop_GetMaxJitterState(void);
+
+/** @brief Maior duracao (ciclos de CPU) de ControlLoop_Update(), interrupcoes
+ *         incluidas. */
+uint32_t ControlLoop_GetMaxExecCycles(void);
+
 /**
  * @brief Ultimo erro latched pelo nucleo do ensaio automatico (Control_Core)
  *        — ver ControlCore_Error_t em control_core.h (subconjunto do

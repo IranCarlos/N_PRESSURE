@@ -747,6 +747,9 @@ static void diag_get(UsbProtoDiag_t * out)
 
     out->uptime_ms = HAL_GetTick();
     out->jitter_max_us = ControlLoop_GetMaxJitterCycles() / (SystemCoreClock / 1000000u);
+    out->jitter_max_at_ms = ControlLoop_GetMaxJitterTick();
+    out->jitter_max_state = (uint8_t)ControlLoop_GetMaxJitterState();
+    out->exec_max_us = ControlLoop_GetMaxExecCycles() / (SystemCoreClock / 1000000u);
     out->boot_rsr = g_boot_rsr;
     out->telemetry_dropped = g_usb_telemetry.dropped;
     out->heap_free = (uint32_t)xPortGetFreeHeapSize();

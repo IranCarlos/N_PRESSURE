@@ -49,6 +49,8 @@ def show_diag(ser, seq):
     if flags & 1:
         print(f"fault: pc={pc:#010x} lr={lr:#010x} cfsr={cfsr:#010x} hfsr={hfsr:#010x}")
     print("pilha livre (palavras): " + ", ".join(f"{n}={s}" for n, s in zip(TASKS, stacks)))
+    at_ms, exec_us = struct.unpack("<2I", p[59:67])
+    print(f"pior jitter em {at_ms / 1000.0:.1f} s, estado {p[67]}; execucao maxima do controle {exec_us} us")
     return True
 
 

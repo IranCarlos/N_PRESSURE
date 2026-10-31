@@ -1684,3 +1684,19 @@ Pulso arterial na leitura: +-1,1 a +-2,2 mmHg. Tempo real ate' <5 mmHg: 3,2-4,3 
 Conclusao: nenhuma melhora vem do controle; subida e descida dependem de bomba e valvulas.
 TODO(DIAG): jitter maximo 899 us (186 us logo apos o boot). So' mede o valor maximo: falta
 registrar o que rodava no pior caso para achar a origem.
+
+### Fechamento da Fase 7 (2026-10-31)
+
+- Plato: `t_plato_max_ms = 15000` no firmware. Acima dos 10 s da especificacao de proposito:
+  sem parada do operador o ciclo desinfla sozinho e registra NC04. Testado so' no host.
+- Pilhas: control 256->384, safety e audio 128->192 palavras (main.c e .ioc). Livre em repouso:
+  control 215, safety 157, audio 161.
+- GET_DIAG (68 bytes): instante e estado do pior jitter e execucao maxima do controle. Em
+  repouso: 144 us aos 0,5 s (boot) e execucao de 27 us.
+Bancada, manguito menor na perna: sem parada do operador o plato terminou em 15000 ms, NC04, sem erro.
+Jitter ficou em 144 us (boot) em 7 ciclos com USB e SD; execucao maxima 38 us. Os 899 us nao se
+repetiram e a origem nao foi achada; o GET_DIAG mostra instante e estado se voltarem.
+Num ciclo de 80 mmHg a pressao caiu de 81 a 72 em <1 s com bomba e valvulas paradas, provavel
+movimento da perna; reentrou em INFLATING e voltou ao plato em ~3 s, sem erro.
+Descompressao a 100 mmHg no mesmo manguito variou de 1,48 a 2,79 s entre ciclos, causa nao medida.
+TODO(DECISAO): `t_inflar_max_ms` segue em 180 s, placeholder do PID antigo.

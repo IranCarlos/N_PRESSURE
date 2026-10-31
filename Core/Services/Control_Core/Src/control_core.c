@@ -912,6 +912,13 @@ static void handle_stabilized(ControlCore_t *cc, const ControlCore_Inputs_t *in,
         return;
     }
 
+    /* Sem pedal, botao ou PC ninguem encerraria o plato. Nao e' erro tecnico:
+     * o ciclo termina e fica registrado como NC04 (plato acima do limite). */
+    if (cc->cycle.plateau_time_ms >= cc->safety.t_plato_max_ms) {
+        rt->state = SYSTEM_STATE_DEFLATING_FAST;
+        return;
+    }
+
     /* Histerese (achado desta fase, nao existia no Control_Loop atual, que
      * usava a MESMA banda para entrar e sair de STABILIZED): ao entrar em
      * STABILIZED a bomba e' cortada para 0 de uma vez, mas o fluxo real

@@ -71,6 +71,9 @@ static const ControlCore_SafetyConfig_t s_control_safety = {
      * 2026-10-31, no copo), ~3 mmHg na janela. Com 1 todo ensaio dava E013. */
     .dp_vazamento_mmhg = 8.0f,
     .t_janela_ms = 5000u,
+    /* Acima dos 10 s da especificacao de proposito: quem passa do limite vira
+     * NC04 no registro, em vez de um ciclo que parece conforme. */
+    .t_plato_max_ms = 15000u,
     .p_segura_mmhg = 10.0f,
     .t_seguro_ms = 200u,
 };
@@ -131,6 +134,9 @@ static struct {
     // consecutivas de ControlLoop_Update(); o alvo e' CONTROL_LOOP_PERIOD_MS.
     uint32_t last_update_cycles;
     uint32_t max_jitter_cycles; /**< maior |delta - periodo esperado| ja' visto */
+    uint32_t max_jitter_tick;   /**< HAL_GetTick() do pior caso */
+    uint32_t max_jitter_state;  /**< SystemState_t no pior caso */
+    uint32_t max_exec_cycles;   /**< maior duracao de ControlLoop_Update() */
     uint8_t  jitter_has_sample;
 
 } s_control;
@@ -406,15 +412,30 @@ static void update_jitter_measurement(void) {
 
         if (jitter > s_control.max_jitter_cycles) {
             s_control.max_jitter_cycles = jitter;
+            s_control.max_jitter_tick = HAL_GetTick();
+            s_control.max_jitter_state = (uint32_t)s_control.runtime_data->state;
         }
     }
     s_control.last_update_cycles = now_cycles;
     s_control.jitter_has_sample = 1u;
 }
 
-void ControlLoop_Update(void) {
-    update_jitter_measurement();
+static void control_loop_step(void);
 
+void ControlLoop_Update(void) {
+    uint32_t start_cycles;
+    uint32_t exec_cycles;
+
+    update_jitter_measurement();
+    start_cycles = PortDWT_GetCycles();
+    control_loop_step();
+    exec_cycles = PortDWT_GetCycles() - start_cycles;
+    if (exec_cycles > s_control.max_exec_cycles) {
+        s_control.max_exec_cycles = exec_cycles;
+    }
+}
+
+static void control_loop_step(void) {
     // Atualiza as leituras de pressão do módulo ADC
     ADC_Acq_Update();
     s_control.runtime_data->pressure_kpa = ADC_Acq_GetPressureKpa();
@@ -473,6 +494,18 @@ void ControlLoop_Update(void) {
 
 uint32_t ControlLoop_GetMaxJitterCycles(void) {
     return s_control.max_jitter_cycles;
+}
+
+uint32_t ControlLoop_GetMaxJitterTick(void) {
+    return s_control.max_jitter_tick;
+}
+
+uint32_t ControlLoop_GetMaxJitterState(void) {
+    return s_control.max_jitter_state;
+}
+
+uint32_t ControlLoop_GetMaxExecCycles(void) {
+    return s_control.max_exec_cycles;
 }
 
 ControlCore_Error_t ControlLoop_GetLastError(void) {

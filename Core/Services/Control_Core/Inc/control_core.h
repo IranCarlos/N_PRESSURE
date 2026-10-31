@@ -56,6 +56,7 @@ typedef struct {
     uint32_t t_desinflar_max_ms;   /* tempo em DEFLATING_FAST -> E004 */
     float    dp_vazamento_mmhg;    /* queda de pressao... */
     uint32_t t_janela_ms;          /* ...nesta janela, durante STABILIZED -> E013 */
+    uint32_t t_plato_max_ms;       /* tempo acumulado em STABILIZED -> desinfla */
     float    p_segura_mmhg;        /* P_SEGURA: abaixo disto por t_seguro = desinflado */
     uint32_t t_seguro_ms;
 } ControlCore_SafetyConfig_t;

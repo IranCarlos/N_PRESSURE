@@ -1018,6 +1018,9 @@ static size_t handle_diag(const UsbProtoDispatchCtx_t *ctx, uint16_t cmd, uint16
         for (i = 0U; i < USB_PROTO_DIAG_TASKS; i++) {
             write_u16_le(&rsp_payload[43U + (2U * i)], d.stack_free_words[i]);
         }
+        write_u32_le(&rsp_payload[59], d.jitter_max_at_ms);
+        write_u32_le(&rsp_payload[63], d.exec_max_us);
+        rsp_payload[67] = d.jitter_max_state;
         return USB_PROTO_DIAG_RSP_LEN;
     }
 }
