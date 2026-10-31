@@ -8,6 +8,8 @@ equipamento (`python -m app --virtual`).
 from __future__ import annotations
 
 import hashlib
+import hmac
+import os
 import queue
 import struct
 import threading
@@ -18,6 +20,14 @@ from . import protocol as p
 from .sdfiles import GENESIS
 
 _DEV_ONLY_FIRST = 0x0100
+_SERIAL = bytes(range(12))
+_PARAMS = [
+    # id, inteiro, grupo, min, max, fabrica, nome, unidade
+    (0x0101, 0, 0, 0.0, 100.0, 1.0, "pid.kp", ""),
+    (0x0201, 0, 1, 0.5, 20.0, 3.0, "estab.banda", "mmHg"),
+    (0x0505, 0, 5, 0.0, 50.0, 8.0, "vaz.queda", "mmHg"),
+    (0x0506, 1, 5, 1000.0, 60000.0, 5000.0, "vaz.janela", "ms"),
+]
 _ALLOWED_ROOTS = ("/tests", "/logs/events", "/logs/errors", "/users", "/reports")
 
 
@@ -89,7 +99,7 @@ class VirtualCard:
 class FakeDevice:
     """Implementa Transport: `write` recebe do PC, `read` devolve ao PC."""
 
-    def __init__(self, card: VirtualCard | None = None, time_scale: float = 1.0) -> None:
+    def __init__(self, card: VirtualCard | None = None, time_scale: float = 1.0, dev_key: bytes | None = None) -> None:
         self.card = card or VirtualCard()
         self._time_scale = time_scale
         self._rx = p.FrameSplitter()
@@ -107,7 +117,20 @@ class FakeDevice:
         self._t0 = time.monotonic()
         self._hello_seen = False
         self._cycle: dict | None = None
-        self._samples: list[p.Sample] = []
+        self.dev_key = dev_key
+        self.role = 0
+        self._nonce = b""
+        self.param_values = {row[0]: row[5] for row in _PARAMS}
+        self.saved_values = dict(self.param_values)
+        self.commits = 0
+        self.audit: list[str] = []
+        self.pump = 0
+        self.valves = 0
+        self.leak_rate = 0.3  # mmHg/s com tudo fechado
+        self._manual_seen = 0.0
+        self.cal_points: list[tuple[float, float]] = []
+        self.cal_active = False
+        self.cal_offset = 0.0
         self._thread = threading.Thread(target=self._run, name="fake-device", daemon=True)
         self._thread.start()
 
@@ -138,18 +161,130 @@ class FakeDevice:
         self.state = state
 
     def _handle(self, cmd: int, data: bytes) -> bytes:
-        if cmd >= _DEV_ONLY_FIRST:
-            return bytes([p.RSP_FORBIDDEN])
         try:
+            if cmd in (0x0040, 0x0041, 0x0042):
+                return self._auth(cmd, data)
+            if cmd >= _DEV_ONLY_FIRST:
+                return self._dev(cmd, data) if self.role == 1 else bytes([p.RSP_FORBIDDEN])
             return self._command(cmd, data)
         except struct.error:
             return bytes([3])
+
+    def _auth(self, cmd: int, data: bytes) -> bytes:
+        if cmd == 0x0040:
+            self._nonce = os.urandom(16)
+            return bytes([0]) + self._nonce
+        if cmd == 0x0041:
+            good = self.dev_key is not None and self._nonce and hmac.compare_digest(
+                hmac.new(self.dev_key, self._nonce + _SERIAL, hashlib.sha256).digest(), data)
+            self._nonce = b""
+            if not good:
+                return bytes([8, 0])
+            self.role = 1
+            return bytes([0, 1])
+        self.role = 0
+        return bytes([0, 0])
+
+    def _dev(self, cmd: int, data: bytes) -> bytes:
+        idle = self.state == p.ST_IDLE
+        if cmd == 0x0100:
+            start = struct.unpack("<H", data)[0]
+            page = _PARAMS[start:start + 2]
+            out = bytearray(bytes([0]) + struct.pack("<HBB", len(_PARAMS), self._dirty(), len(page)))
+            for pid, kind, group, low, high, factory, name, unit in page:
+                out += struct.pack("<HBBffff", pid, kind, group, low, high, factory, self.param_values[pid])
+                out += bytes([len(name)]) + name.encode() + bytes([len(unit)]) + unit.encode()
+            return bytes(out)
+        if cmd == 0x0102:
+            pid, value = struct.unpack("<Hf", data)
+            row = next((r for r in _PARAMS if r[0] == pid), None)
+            if row is None:
+                return bytes([3])
+            if not idle:
+                return bytes([5])
+            if not row[3] <= value <= row[4]:
+                return bytes([7])
+            self.audit.append(f"param {row[6]} {self.param_values[pid]} -> {value}")
+            self.param_values[pid] = value
+            return bytes([0]) + struct.pack("<f", value)
+        if cmd == 0x0103:
+            self.saved_values = dict(self.param_values)
+            self.commits += 1
+            return bytes([0]) + struct.pack("<I", self.commits)
+        if cmd == 0x0104:
+            self.param_values = {r[0]: r[5] for r in _PARAMS} if data[0] == 1 else dict(self.saved_values)
+            return bytes([0])
+        if cmd == 0x0110:
+            if not idle:
+                return bytes([5])
+            self._set_state(p.ST_MANUAL)
+            self._manual_seen = time.monotonic()
+            self.pump, self.valves = 0, 0
+            return bytes([0])
+        if cmd == 0x0111:
+            if self.state == p.ST_MANUAL:
+                self._leave_manual()
+            return bytes([0])
+        if cmd == 0x0112:
+            if self.state != p.ST_MANUAL:
+                return bytes([5])
+            self.pump, self.valves = data[0], data[1]
+            self._manual_seen = time.monotonic()
+            return bytes([0])
+        if cmd == 0x0120:
+            if self.state not in (p.ST_IDLE, p.ST_MANUAL):
+                return bytes([5])
+            self.cal_active, self.cal_points = True, []
+            return bytes([0])
+        if cmd == 0x0121:
+            ref = struct.unpack("<f", data)[0]
+            if not self.cal_active:
+                return bytes([5])
+            if any(abs(ref - r) < 5.0 for r, _ in self.cal_points):
+                return bytes([10])
+            self.cal_points.append((ref, self.pressure))
+            return bytes([0, len(self.cal_points) - 1, len(self.cal_points)]) + \
+                struct.pack("<ffff", self.pressure, 0.1, self.pressure, self.pressure - ref)
+        if cmd == 0x0122:
+            pts = self.cal_points
+            n = len(pts)
+            span = (max(r for r, _ in pts) - min(r for r, _ in pts)) if pts else 0.0
+            fit = 1 if n < 3 else (2 if span < 50.0 else 0)
+            offset = sum(r - d for r, d in pts) / n if n else 0.0
+            body = bytes([fit, n]) + struct.pack("<ffff", 1.0, offset, 0.2, span)
+            if fit:
+                return bytes([10]) + body
+            self.audit.append(f"cal offset {self.cal_offset} -> {offset}")
+            self.cal_offset = offset
+            self.cal_active = False
+            return bytes([0]) + body
+        if cmd == 0x0123:
+            self.cal_active = False
+            return bytes([0])
+        if cmd == 0x0140:
+            if not idle:
+                return bytes([5])
+            return bytes([0, 0]) + struct.pack("<f", self.pressure)
+        if cmd == 0x0150:
+            return bytes([0]) + struct.pack("<6I", 12000, 144, 0x01420000, 0, 15144, 15144) + bytes([0]) + \
+                struct.pack("<4I", 0, 0, 0, 0) + bytes([8]) + struct.pack("<8H", 215, 149, 215, 333, 173, 352, 940, 153) + \
+                struct.pack("<2I", 500, 38) + bytes([1])
+        if cmd == 0x0160:
+            return bytes([0]) if idle else bytes([5])
+        return bytes([1])
+
+    def _dirty(self) -> int:
+        return 1 if self.param_values != self.saved_values else 0
+
+    def _leave_manual(self) -> None:
+        self.pump, self.valves = 0, 7
+        self._set_state(p.ST_IDLE)
 
     def _command(self, cmd: int, data: bytes) -> bytes:
         if cmd == p.CMD_HELLO:
             self._hello_seen = True
             return (bytes([0, 1]) + b"myPRESSURE VIRT".ljust(16, b"\0") + b"virtual".ljust(12, b"\0") +
-                    bytes([0]) + bytes(range(12)))
+                    bytes([self.role]) + _SERIAL)
         if cmd == p.CMD_GET_STATUS:
             return bytes([0, self.state]) + struct.pack("<ff", self.pressure, self.setpoint) + \
                 bytes([1, 1, self.error]) + struct.pack("<I", self.card.last_id)
@@ -173,6 +308,8 @@ class FakeDevice:
             self._start_cycle()
             return bytes([0])
         if cmd == p.CMD_ABORT_TEST:
+            if self.state == p.ST_MANUAL:
+                self._leave_manual()
             if self._cycle:
                 cancel = data == b"\x01"
                 self._cycle["aborted"] = cancel or self.state in (p.ST_INFLATING, p.ST_STABILIZING)
@@ -180,7 +317,7 @@ class FakeDevice:
             return bytes([0])
         if cmd == p.CMD_STREAM_START:
             rate = struct.unpack("<H", data)[0]
-            if rate > p.USER_STREAM_MAX_HZ:
+            if rate > (1000 if self.role == 1 else p.USER_STREAM_MAX_HZ):
                 return bytes([p.RSP_FORBIDDEN])
             self._stream_period = 1.0 / max(1, rate)
             return bytes([0]) + struct.pack("<H", rate)
@@ -196,7 +333,8 @@ class FakeDevice:
     def _fs(self, cmd: int, data: bytes) -> bytes:
         skip = {p.CMD_FS_LIST: 2, p.CMD_FS_READ: 6}.get(cmd, 0)
         path = data[skip:].decode()
-        if not any(path == r or path.startswith(r + "/") for r in _ALLOWED_ROOTS):
+        roots = _ALLOWED_ROOTS + (("/logs/audit",) if self.role == 1 else ())
+        if not any(path == r or path.startswith(r + "/") for r in roots):
             return bytes([p.RSP_FORBIDDEN])
         card = self.card
         if cmd == p.CMD_FS_LIST:
@@ -248,6 +386,18 @@ class FakeDevice:
 
     def _step(self, dt: float) -> None:
         c = self._cycle
+        if self.state == p.ST_MANUAL:
+            if time.monotonic() - self._manual_seen > 0.3:
+                self.error = 10
+                self._leave_manual()
+                return
+            self.pressure += (self.pump * 0.3 - self.leak_rate) * dt
+            if self.valves & 2:
+                self.pressure -= 40.0 * dt
+            if self.valves & 1:
+                self.pressure -= 80.0 * dt
+            self.pressure = max(0.0, self.pressure)
+            return
         if c is None:
             self.pressure = max(0.0, self.pressure - 40.0 * dt)
             return

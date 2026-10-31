@@ -120,3 +120,108 @@ def test_busy_banner_shows_while_loading(qapp, window):
     assert window.busy_frame.isVisible()
     assert "Carregando" in window.busy_label.text()
     assert pump(qapp, lambda: not window.busy_frame.isVisible())
+
+
+KEY = bytes(range(32))
+
+
+@pytest.fixture
+def dev_window(qapp, monkeypatch, tmp_path):
+    monkeypatch.setattr(QStandardPaths, 'writableLocation', staticmethod(lambda *_: str(tmp_path)))
+    fakes = []
+
+    def make():
+        fakes.append(FakeDevice(dev_key=KEY, time_scale=2.0))
+        return fakes[-1]
+
+    w = MainWindow(make)
+    w.show()
+    w._toggle_connection()
+    assert pump(qapp, lambda: w.device is not None and w.status is not None)
+    w.fake = fakes[0]
+    yield w
+    w.close()
+
+
+def test_dev_tabs_only_after_login_and_gone_after_logout(qapp, dev_window):
+    w = dev_window
+    assert w.tabs.count() == 4
+    w._login(KEY.hex())
+    assert pump(qapp, lambda: w.dev_panel is not None)
+    assert w.tabs.count() == 5
+    assert pump(qapp, lambda: w.dev_panel.param_table.rowCount() == 4)
+    w._toggle_dev()
+    assert w.dev_panel is None and w.tabs.count() == 4
+    assert pump(qapp, lambda: w.fake.role == 0)
+
+
+def test_wrong_key_opens_nothing(qapp, dev_window, monkeypatch):
+    w = dev_window
+    shown = []
+    monkeypatch.setattr(QMessageBox, 'warning', staticmethod(lambda *a, **k: shown.append(a[2])))
+    w._login(('00' * 32))
+    assert pump(qapp, lambda: shown)
+    assert w.dev_panel is None and w.fake.role == 0
+
+
+def test_session_expiry_closes_dev(qapp, dev_window, monkeypatch):
+    w = dev_window
+    monkeypatch.setattr(QMessageBox, 'information', staticmethod(lambda *a, **k: None))
+    w._login(KEY.hex())
+    assert pump(qapp, lambda: w.dev_panel is not None)
+    w._on_event(p.EVT_AUTH_EXPIRED, b'')
+    assert w.dev_panel is None and w.tabs.count() == 4
+
+
+def test_manual_tab_drives_pump_and_stops_safe(qapp, dev_window, monkeypatch):
+    w = dev_window
+    monkeypatch.setattr(QMessageBox, 'question', staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    w._login(KEY.hex())
+    assert pump(qapp, lambda: w.dev_panel is not None)
+    panel = w.dev_panel
+    panel.manual_button.click()
+    assert pump(qapp, lambda: panel._manual is not None)
+    panel.pump_slider.setValue(40)
+    panel.valve_boxes[2].setChecked(True)
+    assert pump(qapp, lambda: w.fake.pump == 40 and w.fake.valves == 4)
+    pump(qapp, lambda: False, 0.5)
+    assert w.fake.state == p.ST_MANUAL
+    panel.manual_stop.click()
+    assert pump(qapp, lambda: w.fake.state == p.ST_IDLE and w.fake.pump == 0)
+
+
+def test_declined_confirmation_never_enters_manual(qapp, dev_window, monkeypatch):
+    w = dev_window
+    monkeypatch.setattr(QMessageBox, 'question', staticmethod(lambda *a, **k: QMessageBox.StandardButton.Cancel))
+    w._login(KEY.hex())
+    assert pump(qapp, lambda: w.dev_panel is not None)
+    w.dev_panel.manual_button.click()
+    pump(qapp, lambda: False, 0.3)
+    assert w.fake.state == p.ST_IDLE
+
+
+def test_leak_tab_gives_verdict(qapp, dev_window, monkeypatch):
+    w = dev_window
+    monkeypatch.setattr(QMessageBox, 'question', staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    w._login(KEY.hex())
+    assert pump(qapp, lambda: w.dev_panel is not None)
+    panel = w.dev_panel
+    panel.leak_target.setValue(40.0)
+    panel.leak_hold.setValue(5)
+    panel.leak_start.click()
+    assert pump(qapp, lambda: panel.leak_result.text() == 'APROVADO', 15.0), panel.leak_detail.text()
+    assert pump(qapp, lambda: w.fake.state == p.ST_IDLE)
+
+
+def test_disconnect_with_manual_on_leaves_device_safe(qapp, dev_window, monkeypatch):
+    w = dev_window
+    fake = w.fake
+    monkeypatch.setattr(QMessageBox, 'question', staticmethod(lambda *a, **k: QMessageBox.StandardButton.Yes))
+    w._login(KEY.hex())
+    assert pump(qapp, lambda: w.dev_panel is not None)
+    w.dev_panel.manual_button.click()
+    assert pump(qapp, lambda: w.dev_panel._manual is not None)
+    w.dev_panel.pump_slider.setValue(30)
+    assert pump(qapp, lambda: fake.pump == 30)
+    w._disconnect()
+    assert pump(qapp, lambda: fake.state == p.ST_IDLE and fake.pump == 0)

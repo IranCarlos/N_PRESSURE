@@ -1,11 +1,13 @@
 # pc/ — Aplicativo de PC
 
-Um único programa com dois níveis de acesso (decisão do projeto). O nível de usuário é a Fase 8;
-o nível DEV (parâmetros, modo manual, calibração, osciloscópio) entra na Fase 9.
+Um único programa com dois níveis de acesso (decisão do projeto). O nível de usuário é a Fase 8; o
+nível DEV (Fase 9) só aparece depois do login com a chave de desenvolvedor, que fica só em memória.
+No modo `--virtual`, a chave são 64 zeros e só vale para o dispositivo virtual.
 
 - `core/`: protocolo USB, cliente do equipamento, leitura dos arquivos do SD, verificação de
   integridade, relatórios e dispositivo virtual. Não depende de Qt.
-- `app/`: interface em PySide6.
+- `core/dev.py`, `core/procedures.py`: nível DEV. O nível de usuário não os importa.
+- `app/`: interface em PySide6 (`dev_panel.py` é o nível DEV).
 - `tests/`: `pytest`, com a janela real contra o dispositivo virtual.
 
 ## Rodar

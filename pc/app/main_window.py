@@ -14,9 +14,9 @@ import pyqtgraph as pg
 from PySide6.QtCore import QDate, QObject, QRunnable, QStandardPaths, Qt, QThreadPool, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDateEdit, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QLabel, QMainWindow,
-                               QMessageBox, QProgressBar, QPushButton, QSpinBox, QSplitter, QTableWidget,
-                               QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
+                               QFrame, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView, QInputDialog, QLabel,
+                               QLineEdit, QMainWindow, QMessageBox, QProgressBar, QPushButton, QSpinBox, QSplitter,
+                               QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
 from core import protocol as p
 from core import reports, sdfiles as sd
@@ -102,6 +102,7 @@ class MainWindow(QMainWindow):
         self._polling = False
         self._rows: list[reports.TestRow] = []
         self._busy = 0
+        self.dev_panel = None
         self.bridge = Bridge()
         self.bridge.samples.connect(self._on_samples)
         self.bridge.event.connect(self._on_event)
@@ -189,12 +190,68 @@ class MainWindow(QMainWindow):
         refresh.clicked.connect(self._refresh_ports)
         self.connect_button = QPushButton("Conectar")
         self.connect_button.clicked.connect(self._toggle_connection)
+        self.dev_button = QPushButton("Acesso desenvolvedor")
+        self.dev_button.clicked.connect(self._toggle_dev)
+        self.dev_button.setEnabled(False)
         self.device_label = QLabel("Desconectado")
         self.device_label.setStyleSheet(f"color:{MUTED}")
         for widget in (QLabel("Porta"), self.port_box, refresh, self.connect_button, self.device_label):
             bar.addWidget(widget)
         bar.addStretch(1)
+        bar.addWidget(self.dev_button)
         return bar
+
+    # --- Nivel DEV -----------------------------------------------------
+
+    def _toggle_dev(self) -> None:
+        if self.dev_panel:
+            session = self.dev_panel.session
+            self._close_dev()
+            self.run(session.logout, failed=lambda _: None)
+            return
+        name, _ = QFileDialog.getOpenFileName(self, "Arquivo da chave de desenvolvedor (Cancelar para digitar)")
+        if name:
+            try:
+                text = Path(name).read_text("utf-8")
+            except (OSError, UnicodeDecodeError) as exc:
+                QMessageBox.warning(self, "Chave", f"Não foi possível ler o arquivo: {exc}")
+                return
+        else:
+            text, accepted = QInputDialog.getText(self, "Acesso desenvolvedor", "Chave (64 hexadecimais):",
+                                                  QLineEdit.EchoMode.Password)
+            if not accepted or not text:
+                return
+        self._login(text)
+
+    def _login(self, key_text: str) -> None:
+        from app.dev_panel import DevPanel
+        from core.dev import DevSession, parse_key
+
+        try:
+            key = parse_key(key_text)
+        except ValueError as exc:
+            QMessageBox.warning(self, "Chave", str(exc))
+            return
+        device = self.device
+
+        def done(session: DevSession) -> None:
+            self.dev_panel = DevPanel(self, session)
+            self.tabs.addTab(self.dev_panel, "Desenvolvedor")
+            self.tabs.setCurrentWidget(self.dev_panel)
+            self.dev_button.setText("Sair do acesso desenvolvedor")
+
+        def failed(exc: Exception) -> None:
+            QMessageBox.warning(self, "Acesso desenvolvedor", f"Acesso recusado: {exc}")
+
+        self.run(lambda: DevSession.login(device, key), done, failed)
+
+    def _close_dev(self) -> None:
+        panel, self.dev_panel = self.dev_panel, None
+        if panel:
+            panel.shutdown()
+            self.tabs.removeTab(self.tabs.indexOf(panel))
+            panel.deleteLater()
+            self.dev_button.setText("Acesso desenvolvedor")
 
     def _refresh_ports(self) -> None:
         self.port_box.clear()
@@ -256,6 +313,7 @@ class MainWindow(QMainWindow):
         self._apply_state()
 
     def _disconnect(self) -> None:
+        self._close_dev()
         device, self.device = self.device, None
         self._poll.stop()
         self.status = None
@@ -391,6 +449,7 @@ class MainWindow(QMainWindow):
         for widget in (self.apply_button, self.clock_button, self.setpoint_spin, self.operator_spin, self.participant_spin):
             widget.setEnabled(idle)
         self.sync_button.setEnabled(idle)
+        self.dev_button.setEnabled(connected)
         if not connected:
             for label in (self.pressure_label, self.state_label, self.target_label, self.clock_label, self.sd_label,
                           self.error_label):
@@ -429,6 +488,9 @@ class MainWindow(QMainWindow):
             done = p.parse_test_done(payload)
             text = f"{done.nc_code}: {reports.NC_NAMES.get(done.nc_code, '')}. Pico {done.peak:.1f} mmHg."
             self.statusBar().showMessage(f"Ensaio concluído. {text}", 20000)
+        elif cmd == p.EVT_AUTH_EXPIRED:
+            self._close_dev()
+            QMessageBox.information(self, "Acesso desenvolvedor", "A sessão expirou por inatividade.")
         elif cmd == p.EVT_ERROR and payload and payload[0]:
             name = p.ERROR_NAMES.get(payload[0], "Erro do equipamento")
             self.statusBar().showMessage(f"E{payload[0]:03d}: {name}", 20000)

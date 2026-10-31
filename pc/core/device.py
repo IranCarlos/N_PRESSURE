@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import struct
 import threading
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Protocol
@@ -19,9 +20,13 @@ from . import protocol as p
 class DeviceError(Exception):
     """Comando recusado pelo equipamento."""
 
-    def __init__(self, status: int) -> None:
+    def __init__(self, status: int, payload: bytes = b"") -> None:
         super().__init__(p.RSP_NAMES.get(status, f"status {status}"))
         self.status = status
+        self.payload = payload  # alguns comandos explicam a recusa aqui
+
+    def payload_f32(self) -> float:
+        return struct.unpack("<f", self.payload[1:5])[0]
 
 
 class LinkLost(Exception):
@@ -76,6 +81,8 @@ class Device:
         self._pending: dict[int, tuple[threading.Event, list[bytes]]] = {}
         self._pending_lock = threading.Lock()
         self._alive = True
+        self.last_sample: p.Sample | None = None
+        self.last_sample_at = 0.0
         self.on_samples: Callable[[list[p.Sample], int], None] | None = None
         self.on_event: Callable[[int, bytes], None] | None = None
         self.on_lost: Callable[[], None] | None = None
@@ -108,9 +115,13 @@ class Device:
             if waiter:
                 waiter[1].append(frame.payload)
                 waiter[0].set()
-        elif frame.type == p.TYPE_STREAM and self.on_samples:
+        elif frame.type == p.TYPE_STREAM:
             dropped, samples = p.parse_stream(frame.payload)
-            self.on_samples(samples, dropped)
+            if samples:
+                self.last_sample = samples[-1]
+                self.last_sample_at = time.monotonic()
+            if self.on_samples:
+                self.on_samples(samples, dropped)
         elif frame.type == p.TYPE_EVT and self.on_event:
             self.on_event(frame.cmd, frame.payload)
 
@@ -133,7 +144,7 @@ class Device:
                 raise LinkLost("sem resposta do equipamento")
         rsp = box[0]
         if rsp[0] != p.RSP_OK:
-            raise DeviceError(rsp[0])
+            raise DeviceError(rsp[0], rsp)
         return rsp
 
     def hello(self) -> p.Hello:

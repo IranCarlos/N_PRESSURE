@@ -43,7 +43,7 @@ STATE_NAMES = {
     ST_STABILIZING: "Estabilizando", ST_HOLD: "Em platô", ST_DEFLATING: "Desinflando",
     ST_LEAK: "Teste de vazamento", ST_CONFIG: "Ajustes", ST_FAULT: "Erro", ST_MANUAL: "Manual (PC)",
 }
-ERROR_NAMES = {
+ERROR_NAMES = {  # Apendice D
     1: "Sobrepressão", 2: "Falha no sensor de pressão", 3: "Não atingiu o alvo a tempo",
     4: "Tempo de desinflar excedido", 10: "Sinal de vida do PC perdido", 13: "Vazamento detectado",
 }

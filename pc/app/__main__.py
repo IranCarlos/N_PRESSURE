@@ -12,6 +12,9 @@ from app.main_window import MainWindow
 from core.fake_device import FakeDevice
 
 
+VIRTUAL_KEY = bytes(32)  # so' do dispositivo virtual: 64 zeros; nao abre o equipamento
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--virtual", action="store_true", help="usa o dispositivo virtual")
@@ -19,7 +22,7 @@ def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("nPressure")
     app.setStyle("Fusion")
-    window = MainWindow(FakeDevice if args.virtual else None)
+    window = MainWindow((lambda: FakeDevice(dev_key=VIRTUAL_KEY)) if args.virtual else None)
     window.show()
     return app.exec()
 
