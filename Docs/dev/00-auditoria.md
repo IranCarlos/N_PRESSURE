@@ -1766,3 +1766,14 @@ contribuicao nao foi separada. V1-V3 sao NA (rele ligado = fechada): ramo da V3 
 TODO(BANCADA): separar sede da V3, saida da valvula e conexoes do manometro. O ~0,6 mmHg/s antes tido
 como queda natural pode ser em parte este mesmo vazamento.
 Padrao do teste de vazamento pelo app: 100 mmHg, 10 s, 8 mmHg (decisao do usuario).
+
+V3 invertida (2026-10-31): V3 e' NF e V1/V2 NA (usuario); o firmware tratava as tres como NA. Ate' aqui,
+em todo ensaio a V3 comandada fechada estava aberta (rele ligado, manometro no circuito) e, comandada
+aberta, fechada. Isso explica o vazamento na mangueira do manometro aparecer nos ensaios e "V3 nao
+alivia nada" na caracterizacao. Vazamento resolvido pelo usuario (mangueira). Polaridade corrigida com
+`inverted_mask`, gravada, ainda sem bancada: TODOS os numeros de ensaio anteriores tinham a V3 assim.
+Bancada apos a correcao, 100 mmHg, 10 s, 8 mmHg, mangueira consertada: V3 fechada 98,6 -> 95,3 (0,32
+mmHg/s); V3 aberta 99,2 -> 95,5 (0,54 mmHg/s). Ambos APROVADO, cerca de 37 s por ensaio. Falta o usuario
+confirmar no ponteiro que a V3 abre e fecha como comandado.
+TODO(DECISAO): `handle_deflating` e o estado seguro abrem a V3; com a polaridade certa isso liga o
+manometro na descida. Ensaios automaticos e NC00 anteriores rodaram com a V3 invertida: refazer.

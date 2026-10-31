@@ -75,9 +75,9 @@ Todos os pinos de GPIO de válvula/backlight/TFT são reiniciados para `GPIO_PIN
   fechada, nessa convenção de software.
 - `MX_GPIO_Init()` inicializa V1/V2/V3 em `GPIO_PIN_RESET` (`LOW`) antes de qualquer código de
   aplicação — na convenção acima, isso corresponde a "abertas" já na inicialização do MCU.
-- **H4 resolvido (confirmado pelo usuário)**: as válvulas são **NA (normalmente aberta)** e este
-  deve ser o estado de reset — bate exatamente com a convenção de software já existente
-  (`LOW` = aberta, `MX_GPIO_Init` zera os 3 pinos antes de qualquer código de aplicação rodar).
+- **Correção (usuário, 2026-10-31)**: **V1 e V2 são NA, V3 é NF**. A nota antiga dizia que as três
+  eram NA, e por isso a V3 ficou invertida até esta data (`inverted_mask` em `valve.h`). Em reset,
+  com pinos em `LOW`, V1 e V2 ficam abertas e a V3 fechada (relé desligado).
   Ainda assim, vale confirmar fisicamente que o estágio de potência (transistor/relé) entre o
   GPIO e o solenoide não inverte essa lógica em brownout/tri-state real de bancada — a análise de
   esquema deu "compatível", a validação final é de bancada (regra de segurança do `CLAUDE.md`).

@@ -18,7 +18,8 @@ static void gpio_write(void *ctx, Valve_Id_t id, uint8_t pin_level)
 
 void Valve_InitGpio(const Valve_GpioMap_t *map)
 {
-    Valve_Hw_t hw = { .write = gpio_write, .ctx = NULL, .open_level = 0u };
+    Valve_Hw_t hw = { .write = gpio_write, .ctx = NULL, .open_level = 0u,
+                      .inverted_mask = (uint8_t)(1u << (unsigned)VALVE_3) };
 
     s_map = *map;
     Valve_Init(&hw);

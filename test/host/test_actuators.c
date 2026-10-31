@@ -189,9 +189,28 @@ static void test_bench_pump_pause_resets_timer(void)
     CHECK(o.pump_power > 0.0f && b.trip == ACTBENCH_TRIP_NONE);
 }
 
+/* V3 e' NF: com a mascara, o mesmo comando sai com o nivel oposto so' nela. */
+static void test_valve_inverted_mask(void)
+{
+    Valve_Hw_t hw = { .write = mock_write, .ctx = NULL, .open_level = 0u,
+                      .inverted_mask = (uint8_t)(1u << (unsigned)VALVE_3) };
+
+    Valve_Init(&hw);
+    Valve_SetAll(1u, 1u, 0u); /* repouso: V3 fechada = pino LOW = rele desligado */
+    CHECK(s_pin[VALVE_1] == 0u);
+    CHECK(s_pin[VALVE_2] == 0u);
+    CHECK(s_pin[VALVE_3] == 0u);
+    Valve_SetAll(0u, 0u, 1u);
+    CHECK(s_pin[VALVE_1] == 1u);
+    CHECK(s_pin[VALVE_2] == 1u);
+    CHECK(s_pin[VALVE_3] == 1u);
+    CHECK(Valve_Get(VALVE_3) == VALVE_OPEN);
+}
+
 int main(void)
 {
     test_valve_na_low_is_open();
+    test_valve_inverted_mask();
     test_valve_polarity_inverted();
     test_valve_guards();
     test_pwm_mapping();

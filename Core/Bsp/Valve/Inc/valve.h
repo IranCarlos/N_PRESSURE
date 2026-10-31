@@ -8,8 +8,9 @@
  * manometro externo de calibracao). Logica pura: o acesso ao pino e' injetado
  * (Valve_Hw_t), entao compila no host. Binding STM32 em valve_gpio.c.
  *
- * Hoje: valvulas NA (normalmente abertas), pino em LOW = aberta. `open_level`
- * concentra essa polaridade — trocar para NF e' mudar UM campo.
+ * V1 e V2 sao NA (normalmente abertas: pino em LOW = aberta); V3 e' NF (normalmente
+ * fechada: pino em HIGH = aberta). `open_level` vale para todas e `inverted_mask`
+ * marca as que tem a polaridade oposta.
  */
 #ifndef VALVE_H
 #define VALVE_H
@@ -29,6 +30,7 @@ typedef struct {
     Valve_WriteFn write;
     void         *ctx;
     uint8_t       open_level; /* nivel do pino (0/1) que ABRE a valvula */
+    uint8_t       inverted_mask; /* bit por Valve_Id_t: valvula com a polaridade oposta */
 } Valve_Hw_t;
 
 /* Registra o hardware e leva TODAS as valvulas ao estado aberto (seguro). */

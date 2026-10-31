@@ -25,7 +25,7 @@ typedef struct {
     Valve_GpioPin_t valve[VALVE_COUNT];
 } Valve_GpioMap_t;
 
-/* Placa NA com pino LOW = aberta (open_level = 0). Abre todas as valvulas. */
+/* V1 e V2 NA (LOW = aberta), V3 NF (HIGH = aberta). Abre todas as valvulas. */
 void Valve_InitGpio(const Valve_GpioMap_t *map);
 
 #ifdef __cplusplus

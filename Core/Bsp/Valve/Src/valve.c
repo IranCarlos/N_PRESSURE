@@ -14,8 +14,13 @@ static Valve_State_t s_state[VALVE_COUNT];
 
 static void drive(Valve_Id_t id, Valve_State_t state)
 {
-    uint8_t level = (state == VALVE_OPEN) ? s_hw.open_level
-                                          : (uint8_t)((s_hw.open_level == 0u) ? 1u : 0u);
+    uint8_t open_level = s_hw.open_level;
+    uint8_t level;
+
+    if ((s_hw.inverted_mask & (uint8_t)(1u << (unsigned)id)) != 0u) {
+        open_level = (uint8_t)((open_level == 0u) ? 1u : 0u);
+    }
+    level = (state == VALVE_OPEN) ? open_level : (uint8_t)((open_level == 0u) ? 1u : 0u);
     s_hw.write(s_hw.ctx, id, level);
     s_state[id] = state;
 }

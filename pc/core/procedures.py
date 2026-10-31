@@ -167,17 +167,17 @@ class LeakResult:
         return self.held and self.drop <= self.limit
 
 
-def leak_test(ctx: Context, target: float, hold_s: float, max_drop: float) -> LeakResult:
+def leak_test(ctx: Context, target: float, hold_s: float, max_drop: float, keep_valves: int = 0) -> LeakResult:
     """Aprova so' se (pressao estabilizada - pressao apos o tempo) nao passar do limite.
 
     Falha ou cancelamento vira excecao: nunca existe aprovacao sem medida. Nao manter
     a pressao e' reprovacao, nao falta de resultado.
     """
     try:
-        start = go_to_pressure(ctx, target)
+        start = go_to_pressure(ctx, target, keep_valves)
     except Unstable as exc:
         return LeakResult(target, target, exc.pressure, 0.0, max_drop, held=False)
-    ctx.link.set(0, 0)
+    ctx.link.set(0, keep_valves)
     end_time = time.monotonic() + hold_s
     while time.monotonic() < end_time:
         ctx.check()
