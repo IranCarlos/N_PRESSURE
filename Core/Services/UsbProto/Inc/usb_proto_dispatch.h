@@ -267,6 +267,50 @@ typedef struct {
     uint8_t (*heartbeat)(void);
 } UsbProtoManualOps_t;
 
+/* ---- Fase 7.8: calibracao completa do sensor (so' DEV) -------------------
+ *
+ * CAL_START  req: -              rsp: status (STANDBY ou MANUAL; apaga pontos)
+ * CAL_POINT  req: ref_mmhg f32   (pressao lida no manometro de referencia)
+ *            rsp OK:      status, indice u8, n u8, d_mmhg f32 (diferencial
+ *                         bruto), desvio_mmhg f32, leitura_atual_mmhg f32,
+ *                         erro_atual_mmhg f32 (leitura - referencia)
+ *            rsp OCUPADO: status, desvio_mmhg f32 (pressao ainda variando:
+ *                         esperar estabilizar e repetir)
+ *            CONFLITO = ponto repetido (< 5 mmHg de outro); FORA_DE_FAIXA =
+ *            referencia fora do sensor ou pontos esgotados (8)
+ * CAL_APPLY  req: -              rsp: status, resultado u8 (Cal_FitResult_t),
+ *                         n u8, escala f32, offset_mmhg f32, residuo_max f32,
+ *                         faixa_mmhg f32 - OK = aplicado e gravado; CONFLITO =
+ *                         reprovado (resultado diz por que); ERRO_SD = EEPROM
+ * CAL_ABORT  req: -              rsp: status
+ * Para manter a pressao num ponto, use o modo manual (MANUAL_*): bomba
+ * parada e valvulas fechadas, V3 aberta para o manometro.
+ */
+typedef struct {
+    uint8_t index;
+    uint8_t n;
+    float   d_mmhg;
+    float   deviation_mmhg;
+    float   reading_mmhg;
+    float   error_mmhg;
+} UsbProtoCalPoint_t;
+
+typedef struct {
+    uint8_t fit_result;
+    uint8_t n;
+    float   scale;
+    float   offset_mmhg;
+    float   max_residual_mmhg;
+    float   span_mmhg;
+} UsbProtoCalApply_t;
+
+typedef struct {
+    uint8_t (*start)(void);
+    uint8_t (*point)(float ref_mmhg, UsbProtoCalPoint_t *out); /* OCUPADO: out->deviation_mmhg valido */
+    uint8_t (*apply)(UsbProtoCalApply_t *out);
+    uint8_t (*abort)(void);
+} UsbProtoCalOps_t;
+
 #define USB_PROTO_PARAM_LIST_MAX (16U)
 #define USB_PROTO_PARAM_NAME_MAX (23U)
 #define USB_PROTO_PARAM_UNIT_MAX (7U)
@@ -314,6 +358,7 @@ typedef struct {
     const UsbProtoFsOps_t *fs;        /* Fase 7.5 - FS_* (NULL -> OCUPADO) */
     const UsbProtoParamOps_t *params; /* Fase 7.6 - PARAM_* (NULL -> OCUPADO) */
     const UsbProtoManualOps_t *manual; /* Fase 7.7 - MANUAL_* (NULL -> OCUPADO) */
+    const UsbProtoCalOps_t *cal;       /* Fase 7.8 - CAL_* (NULL -> OCUPADO) */
 } UsbProtoDispatchCtx_t;
 
 /**

@@ -13,6 +13,7 @@
 #include "ui_backend_stm32.h"
 #include "params.h"
 #include "eeprom_storage_io.h"
+#include "cal_manager.h"
 #include "valve.h"
 #include "pwm_motor.h"
 #include "cycle_record.h"
@@ -537,6 +538,9 @@ const UsbProtoParamOps_t * UsbActionsStm32_GetParamOps(void)
     return &s_param_ops;
 }
 
+static uint8_t s_cal_active; /* Fase 7.8 - ver abaixo */
+static uint8_t cal_abort(void);
+
 /* --- Fase 7.7: modo manual remoto (DEV) ---------------------------------- */
 
 static uint8_t man_enter(void)
@@ -595,4 +599,121 @@ void UsbActionsStm32_EnforceManualSession(uint8_t dev_session_active)
         ControlLoop_ExitRemoteManual();
         log_usb_command(STORAGE_LOG_LEVEL_AUDIT, "USB: modo manual encerrado (sessao DEV terminou)");
     }
+    /* Calibracao tambem so' dentro da sessao DEV (pontos descartados). */
+    if ((dev_session_active == 0u) && (s_cal_active != 0u)) {
+        (void)cal_abort();
+    }
+}
+
+/* --- Fase 7.8: calibracao completa pelo app DEV ------------------------- */
+
+/* Mesmo criterio de estabilidade da verificacao da IHM. */
+#define USB_CAL_MAX_DEVIATION_MMHG (1.0f)
+/* Referencia plausivel: um pouco abaixo de zero (ruido do manometro) ate' o
+ * fundo de escala do sensor deste hardware (MPXV7025DP, 187,5 mmHg). */
+#define USB_CAL_REF_MIN_MMHG (-5.0f)
+#define USB_CAL_REF_MAX_MMHG (187.0f)
+
+static uint8_t s_cal_n;
+static Cal_Point_t s_cal_pts[CAL_MAX_POINTS];
+
+static uint8_t cal_state_ok(void)
+{
+    return ((s_rt != NULL) &&
+            ((s_rt->state == SYSTEM_STATE_IDLE) || (s_rt->state == SYSTEM_STATE_MANUAL))) ? 1u : 0u;
+}
+
+static uint8_t cal_start(void)
+{
+    if (cal_state_ok() == 0u) {
+        return (uint8_t)USB_PROTO_RSP_ESTADO_INVALIDO;
+    }
+    s_cal_active = 1u;
+    s_cal_n = 0u;
+    log_usb_command(STORAGE_LOG_LEVEL_AUDIT, "CAL PC: calibracao iniciada");
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static uint8_t cal_point(float ref_mmhg, UsbProtoCalPoint_t * out)
+{
+    float d_kpa;
+    float dev_mmhg;
+    float ref_kpa = ref_mmhg / CAL_MMHG_PER_KPA;
+    const Cal_Coeffs_t * cur = &CalManager_Get()->coeffs;
+
+    if ((s_cal_active == 0u) || (cal_state_ok() == 0u)) {
+        return (uint8_t)USB_PROTO_RSP_ESTADO_INVALIDO;
+    }
+    if ((ref_mmhg < USB_CAL_REF_MIN_MMHG) || (ref_mmhg > USB_CAL_REF_MAX_MMHG) ||
+        (s_cal_n >= CAL_MAX_POINTS)) {
+        return (uint8_t)USB_PROTO_RSP_FORA_DE_FAIXA;
+    }
+    if (Cal_IsDuplicatePoint(s_cal_pts, s_cal_n, ref_kpa) != 0u) {
+        return (uint8_t)USB_PROTO_RSP_CONFLITO;
+    }
+    if (CalManager_Capture(&d_kpa, &dev_mmhg) == 0u) {
+        return (uint8_t)USB_PROTO_RSP_ERRO_SD; /* sensor invalido */
+    }
+    out->deviation_mmhg = dev_mmhg;
+    if (dev_mmhg > USB_CAL_MAX_DEVIATION_MMHG) {
+        return (uint8_t)USB_PROTO_RSP_OCUPADO; /* ainda variando */
+    }
+
+    s_cal_pts[s_cal_n].ref_kpa = ref_kpa;
+    s_cal_pts[s_cal_n].d_kpa = d_kpa;
+    out->index = s_cal_n;
+    s_cal_n++;
+    out->n = s_cal_n;
+    out->d_mmhg = d_kpa * CAL_MMHG_PER_KPA;
+    out->reading_mmhg = Cal_ApplyMmHg(cur, d_kpa);
+    out->error_mmhg = out->reading_mmhg - ref_mmhg;
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static uint8_t cal_apply(UsbProtoCalApply_t * out)
+{
+    Cal_Fit_t fit;
+    Cal_FitResult_t r;
+    char msg[64];
+
+    if ((s_cal_active == 0u) || (cal_state_ok() == 0u) || (s_cfg == NULL)) {
+        return (uint8_t)USB_PROTO_RSP_ESTADO_INVALIDO;
+    }
+    r = Cal_FitPc(s_cal_pts, s_cal_n, s_cfg->cal_linearity_max_mmhg, &fit);
+    out->fit_result = (uint8_t)r;
+    out->n = fit.n;
+    out->scale = fit.coeffs.scale;
+    out->offset_mmhg = fit.coeffs.offset_kpa * CAL_MMHG_PER_KPA;
+    out->max_residual_mmhg = fit.max_residual_mmhg;
+    out->span_mmhg = fit.span_mmhg;
+    if (r != CAL_FIT_OK) {
+        /* Reprovada: os pontos ficam, o PC pode acrescentar mais ou abortar. */
+        (void)snprintf(msg, sizeof(msg), "CAL PC: reprovada (motivo %u, res %.2f mmHg)",
+                       (unsigned)r, (double)fit.max_residual_mmhg);
+        log_usb_command(STORAGE_LOG_LEVEL_AUDIT, msg);
+        return (uint8_t)USB_PROTO_RSP_CONFLITO;
+    }
+    if (CalManager_Commit(&fit.coeffs, CAL_SOURCE_PC, fit.n, fit.max_residual_mmhg, "CAL PC") == 0u) {
+        return (uint8_t)USB_PROTO_RSP_ERRO_SD; /* falha de gravacao - a anterior continua */
+    }
+    s_cal_active = 0u;
+    s_cal_n = 0u;
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static uint8_t cal_abort(void)
+{
+    if (s_cal_active != 0u) {
+        log_usb_command(STORAGE_LOG_LEVEL_AUDIT, "CAL PC: calibracao abortada");
+    }
+    s_cal_active = 0u;
+    s_cal_n = 0u;
+    return (uint8_t)USB_PROTO_RSP_OK;
+}
+
+static const UsbProtoCalOps_t s_cal_ops = { cal_start, cal_point, cal_apply, cal_abort };
+
+const UsbProtoCalOps_t * UsbActionsStm32_GetCalOps(void)
+{
+    return &s_cal_ops;
 }

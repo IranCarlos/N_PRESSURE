@@ -9,6 +9,10 @@
 #include <string.h>
 #include <math.h>
 
+/* Fase 7.8: media de captura de calibracao - 1/500 por bloco de 1 ms
+ * (~0,5 s de constante de tempo). */
+#define PRESSURE_CAL_AVG_ALPHA (0.002f)
+
 static float counts_to_sensor_volts(float counts)
 {
     return counts * (PRESSURE_SENSOR_VSS_V / PRESSURE_ADC_MAX_COUNTS);
@@ -112,6 +116,15 @@ void PressureCore_ProcessBlock(PressureCore_t *pc, const uint16_t *raw,
         diff -= pc->atmospheric_kpa;
     }
     pc->pressure_kpa = (diff * pc->cal.scale) + pc->cal.offset_kpa;
+
+    if (pc->cal_avg_valid == 0u) {
+        pc->cal_avg_kpa = diff;
+        pc->cal_dev_kpa = 0.0f;
+        pc->cal_avg_valid = 1u;
+    } else {
+        pc->cal_avg_kpa += (diff - pc->cal_avg_kpa) * PRESSURE_CAL_AVG_ALPHA;
+        pc->cal_dev_kpa += (fabsf(diff - pc->cal_avg_kpa) - pc->cal_dev_kpa) * PRESSURE_CAL_AVG_ALPHA;
+    }
 }
 
 void PressureCore_ZeroNow(PressureCore_t *pc)

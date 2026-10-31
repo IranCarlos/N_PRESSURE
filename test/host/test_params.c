@@ -23,6 +23,9 @@ static void load_factory(void)
     s_cfg.pid.i_max = 8.0f;
     s_cfg.max_setpoint_mmhg = 180.0f;
     s_cfg.setpoint_warn_mmhg = 170.0f;
+    s_cfg.cal_linearity_max_mmhg = 2.0f;
+    s_cfg.cal_verify_ok_mmhg = 1.0f;
+    s_cfg.cal_verify_fix_max_mmhg = 5.0f;
     s_cfg.stabilization.band_mmhg = 3.0f;
     s_cfg.stabilization.time_ms = 1000U;
     s_cfg.leak_test.target_mmhg = 180.0f;
@@ -126,6 +129,9 @@ static void test_consistency_rules(void)
     /* limites do sensor deste hardware (187,5 mmHg) */
     CHECK(Params_Set(idx_of(0x0501U), 190.0f) == PARAMS_ERR_RANGE);
     CHECK(Params_Set(idx_of(0x0701U), 181.0f) == PARAMS_ERR_RANGE);
+    /* verificacao: faixa OK tem que ser menor que a que corrige */
+    CHECK(Params_Set(idx_of(0x0802U), 6.0f) == PARAMS_ERR_CONSISTENCY);
+    CHECK(Params_Set(idx_of(0x0803U), 0.8f) == PARAMS_ERR_CONSISTENCY);
     /* out_min >= out_max */
     CHECK(Params_Set(idx_of(0x0105U), 40.0f) == PARAMS_ERR_CONSISTENCY);
 }

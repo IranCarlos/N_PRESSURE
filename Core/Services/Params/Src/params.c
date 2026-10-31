@@ -83,6 +83,12 @@ static const Entry_t k_table[] = {
     /* Limites do usuario */
     { { 0x0701U, F32, PARAM_GROUP_LIMITES, "limite.setpoint_max",    "mmHg", 0.0f, PARAMS_SETPOINT_MAX_MMHG }, CFG(max_setpoint_mmhg) },
     { { 0x0702U, F32, PARAM_GROUP_LIMITES, "limite.setpoint_alerta", "mmHg", 0.0f, PARAMS_SETPOINT_MAX_MMHG }, CFG(setpoint_warn_mmhg) },
+
+    /* Calibracao (Fase 7.8): linearidade da calibracao do PC e as faixas
+     * da verificacao feita pelo operador na IHM. */
+    { { 0x0801U, F32, PARAM_GROUP_CALIBRACAO, "cal.linearidade_max", "mmHg", 0.2f, 10.0f }, CFG(cal_linearity_max_mmhg) },
+    { { 0x0802U, F32, PARAM_GROUP_CALIBRACAO, "cal.verif_ok",        "mmHg", 0.1f, 10.0f }, CFG(cal_verify_ok_mmhg) },
+    { { 0x0803U, F32, PARAM_GROUP_CALIBRACAO, "cal.verif_corrige",   "mmHg", 0.5f, 15.0f }, CFG(cal_verify_fix_max_mmhg) },
 };
 
 #define N_PARAMS ((uint16_t)(sizeof(k_table) / sizeof(k_table[0])))
@@ -165,6 +171,10 @@ static uint8_t consistent(void)
     /* O limite absoluto tem que ficar ACIMA de qualquer setpoint permitido,
      * senao todo ensaio no topo da faixa terminaria em E001. */
     if (s_t.cfg->max_setpoint_mmhg >= s_t.safety->p_max_abs_mmhg) {
+        return 0U;
+    }
+    /* Verificacao: a faixa "OK" tem que caber dentro da que corrige. */
+    if (s_t.cfg->cal_verify_ok_mmhg >= s_t.cfg->cal_verify_fix_max_mmhg) {
         return 0U;
     }
     return 1U;

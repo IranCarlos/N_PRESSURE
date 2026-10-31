@@ -176,6 +176,12 @@ void EEPROM_Storage_LoadDefaults(SystemConfig_t *cfg)
      * alerta acima de 170; voltar a 300 com o sensor do proximo hardware. */
     cfg->max_setpoint_mmhg = 180.0f;
     cfg->setpoint_warn_mmhg = 170.0f;
+
+    /* Fase 7.8 - valores iniciais, a confirmar em bancada com o manometro
+     * de referencia (ver Docs/dev/00-auditoria.md). */
+    cfg->cal_linearity_max_mmhg = 2.0f;
+    cfg->cal_verify_ok_mmhg = 1.0f;
+    cfg->cal_verify_fix_max_mmhg = 5.0f;
     cfg->current_setpoint_mmhg = 100.0f; /* padrao pedido pelo usuario (2026-10-17) */
     /* 3.0 mmHg (nao mais 2.0): a saida de STABILIZED usa o DOBRO desta banda
      * como histerese (ver handle_stabilized em control_core.c) para nao
@@ -442,5 +448,79 @@ uint8_t EEPROM_Storage_SaveParams(uint32_t *out_seq)
     if (out_seq != NULL) {
         *out_seq = seq;
     }
+    return 1u;
+}
+
+/* ---- Fase 7.8: registro de calibracao, copias A/B ------------------------ */
+
+static uint8_t  s_cal_buf[EEPROM_CAL_SLOT_SIZE];
+static uint32_t s_cal_seq;
+static uint8_t  s_cal_newest = 0xFFu; /* 0 = A, 1 = B, 0xFF = nenhuma */
+
+static uint16_t cal_slot_addr(uint8_t slot)
+{
+    return (slot == 0u) ? (uint16_t)EEPROM_ADDR_CAL_A : (uint16_t)EEPROM_ADDR_CAL_B;
+}
+
+static uint8_t cal_read_slot(uint8_t slot, Cal_Record_t *rec, uint32_t *seq)
+{
+    if (EEPROM_Read(&s_eeprom, cal_slot_addr(slot), s_cal_buf, (uint16_t)CAL_RECORD_BLOB_LEN) != EEPROM_OK) {
+        return 0u;
+    }
+    return Cal_RecordParse(s_cal_buf, CAL_RECORD_BLOB_LEN, rec, seq);
+}
+
+uint8_t EEPROM_Storage_LoadCal(Cal_Record_t *out)
+{
+    Cal_Record_t a;
+    Cal_Record_t b;
+    uint32_t seq_a = 0u;
+    uint32_t seq_b = 0u;
+    uint8_t ok_a;
+    uint8_t ok_b;
+
+    Cal_RecordFactory(out);
+    s_cal_newest = 0xFFu;
+    s_cal_seq = 0u;
+    if (s_ready == 0u) {
+        return 0u;
+    }
+    ok_a = cal_read_slot(0u, &a, &seq_a);
+    ok_b = cal_read_slot(1u, &b, &seq_b);
+    if ((ok_a != 0u) && ((ok_b == 0u) || ((int32_t)(seq_a - seq_b) > 0))) {
+        *out = a;
+        s_cal_seq = seq_a;
+        s_cal_newest = 0u;
+        return 1u;
+    }
+    if (ok_b != 0u) {
+        *out = b;
+        s_cal_seq = seq_b;
+        s_cal_newest = 1u;
+        return 1u;
+    }
+    return 0u;
+}
+
+uint8_t EEPROM_Storage_SaveCal(const Cal_Record_t *rec)
+{
+    Cal_Record_t check;
+    uint32_t seq = s_cal_seq + 1u;
+    uint32_t check_seq = 0u;
+    uint8_t slot;
+
+    if ((s_ready == 0u) || (rec == NULL)) {
+        return 0u;
+    }
+    slot = (s_cal_newest == 0u) ? 1u : 0u;
+    if (Cal_RecordSerialize(rec, seq, s_cal_buf, sizeof(s_cal_buf)) == 0u) {
+        return 0u;
+    }
+    EEPROM_TRY_OK(EEPROM_Write(&s_eeprom, cal_slot_addr(slot), s_cal_buf, (uint16_t)CAL_RECORD_BLOB_LEN));
+    if ((cal_read_slot(slot, &check, &check_seq) == 0u) || (check_seq != seq)) {
+        return 0u;
+    }
+    s_cal_seq = seq;
+    s_cal_newest = slot;
     return 1u;
 }

@@ -131,6 +131,10 @@ typedef struct
      * sobrepressao reduzida perto do fundo de escala do sensor). Nao e'
      * gravado no bloco legado da EEPROM - so' na tabela de parametros. */
     float setpoint_warn_mmhg;
+    /* Fase 7.8: tolerancias da calibracao (tabela de parametros, DEV). */
+    float cal_linearity_max_mmhg;  /* PC: residuo maximo aceito na reta */
+    float cal_verify_ok_mmhg;      /* IHM: erro ate' isto = calibracao OK */
+    float cal_verify_fix_max_mmhg; /* IHM: ate' isto o equipamento corrige; acima, alerta */
     StabilizationConfig_t stabilization;
     LeakTestConfig_t leak_test;
 } SystemConfig_t;

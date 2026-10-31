@@ -1492,3 +1492,21 @@ Diff conferido: supply LDO e VOS0 mantidos, clock inalterado (HSE 25 MHz /2 ×32
 `Device_Only_FS` (MSP do PCD agora em `USB_DEVICE/Target/usbd_conf.c`, IRQs OTG prioridade 5),
 PB8/PB9 com pull-up, `uiTask` com 2048 palavras de pilha, CSS do LSE removido. Bloco `PCC.*`
 (calculadora de consumo do CubeMX) e' inofensivo.
+
+## Fase 7.8 — Calibracao do sensor (2026-10-22/24): implementada, NAO validada em bancada
+
+Build limpo e testes de host OK (`calibration`, `params`, `pressure_core`, `usb_proto_dispatch`).
+Implementado: `Services/Calibration` (reta por minimos quadrados de 3-8 pontos, sanidade de
+escala/offset/linearidade/estabilidade; verificacao de 2 pontos da IHM com 3 faixas de erro),
+`App/Cal_Port/cal_manager` (aplica coeficientes, grava `Cal_Record_t` na EEPROM com CRC, log de
+auditoria antes/depois), comandos USB `CAL_START/POINT/APPLY/ABORT` (so' DEV), tela de verificacao
+em Ajustes e `tools/bench_usb_hello.py --cmd cal`.
+
+**TODO(BANCADA) — pendente: sem manometro de referencia (2026-10-24). Usuario decidiu seguir para
+a proxima fase e voltar a isto depois.** Checklist quando o manometro estiver disponivel:
+1. `--cmd cal` com 3+ pontos (ex.: 0/80/160 mmHg) via modo manual + V3: `CAL_APPLY` OK, erro
+   residual coerente com o manometro, coeficientes sobrevivem ao reboot (EEPROM).
+2. Reprovacoes: ponto repetido (CONFLITO), referencia fora de faixa, pressao variando (OCUPADO).
+3. Verificacao pela IHM (2 pontos): as tres faixas (sem mudanca / corrige sozinho / alerta de
+   assistencia), e que o alerta nao altera a calibracao.
+4. Log de auditoria no SD com valores antes/depois de cada aplicacao.

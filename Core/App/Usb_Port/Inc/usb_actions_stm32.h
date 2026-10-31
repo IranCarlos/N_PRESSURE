@@ -85,6 +85,9 @@ const UsbProtoManualOps_t * UsbActionsStm32_GetManualOps(void);
 /* Chamar a cada volta da usbProtoTask: sem sessao DEV, encerra o manual. */
 void UsbActionsStm32_EnforceManualSession(uint8_t dev_session_active);
 
+/* Fase 7.8: calibracao completa do sensor (CAL_*, so' DEV). */
+const UsbProtoCalOps_t * UsbActionsStm32_GetCalOps(void);
+
 #ifdef __cplusplus
 }
 #endif

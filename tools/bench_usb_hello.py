@@ -30,6 +30,7 @@ import hmac
 import hashlib
 import struct
 import sys
+import threading
 import time
 
 try:
@@ -72,8 +73,15 @@ CMD_MANUAL_ENTER = 0x0110
 CMD_MANUAL_EXIT = 0x0111
 CMD_MANUAL_SET = 0x0112
 CMD_MANUAL_HEARTBEAT = 0x0113
+CMD_CAL_START = 0x0120
+CMD_CAL_POINT = 0x0121
+CMD_CAL_APPLY = 0x0122
+CMD_CAL_ABORT = 0x0123
+CAL_FIT_NAMES = {0: "OK", 1: "poucos pontos (minimo 3)", 2: "faixa pequena (minimo 50 mmHg)",
+                 3: "pontos degenerados", 4: "escala implausivel", 5: "offset implausivel",
+                 6: "nao linear (residuo acima do limite)"}
 STATE_MANUAL = 9  # SystemState_t (system_types.h)
-PARAM_GROUP_NAMES = {0: "PID", 1: "Estabilizacao", 2: "Valvula de alivio", 3: "Aproximacao",
+PARAM_GROUP_NAMES = {0: "PID", 1: "Estabilizacao", 2: "Valvula de alivio", 3: "Aproximacao", 7: "Calibracao",
                      4: "Seguranca", 5: "Vazamento", 6: "Limites"}
 FS_READ_MAX = 1016
 
@@ -587,6 +595,116 @@ def run_manual(ser: serial.Serial, seq: int, pump_pct: int, valves: int, seconds
     return ok and st == 0
 
 
+CAL_HELP = """
+Comandos (Enter apos cada um):
+  b <0-100>      bomba em % (ex.: b 40)  - b 0 para parar
+  v <lista>      valvulas ABERTAS (ex.: v V3  |  v V1,V2,V3  |  v nenhuma)
+  p <mmHg>       captura um ponto com a leitura do manometro (ex.: p 100.5)
+  s              mostra a pressao atual
+  a              calcula, valida e grava (minimo 3 pontos, faixa >= 50 mmHg)
+  q              cancela e sai
+Roteiro: v V3 -> p 0 -> b 30 ... b 0 (estabilizar) -> p <manometro> -> repetir -> a
+"""
+
+
+def run_cal(ser: serial.Serial, seq: int, timeout_s: float) -> bool:
+    """Calibracao interativa: modo manual (bomba/valvulas) + CAL_*.
+    O sinal de vida do manual (10 Hz) roda numa thread; o acesso a serial e'
+    serializado por um lock."""
+    lock = threading.Lock()
+    state = {"seq": seq, "pump": 0, "valves": 0b100, "stop": False}
+
+    def req(cmd: int, payload: bytes = b"") -> bytes:
+        with lock:
+            state["seq"] = (state["seq"] % 0xFFFF) + 1  # SEQ e' u16 no frame
+            return send_and_receive(ser, state["seq"], cmd, payload, timeout_s)["payload"]
+
+    def heartbeat():
+        while not state["stop"]:
+            try:
+                st_hb = req(CMD_MANUAL_SET, bytes([state["pump"], state["valves"]]))[0]
+                if st_hb != 0:
+                    print(f"\n  ATENCAO: o equipamento saiu do modo manual ({RSP_STATUS_NAMES.get(st_hb, st_hb)})"
+                          " - pedal, Ajustes ou sobrepressao. Use q para sair.\ncal> ", end="")
+                    return
+            except (ValueError, TimeoutError):
+                pass
+            time.sleep(0.1)
+
+    st = req(CMD_MANUAL_ENTER)[0]
+    if st != 0:
+        print(f"MANUAL_ENTER: {RSP_STATUS_NAMES.get(st, st)} (o equipamento esta' em STANDBY?)")
+        return False
+    st = req(CMD_CAL_START)[0]
+    if st != 0:
+        print(f"CAL_START: {RSP_STATUS_NAMES.get(st, st)}")
+        req(CMD_MANUAL_EXIT)
+        return False
+    req(CMD_MANUAL_SET, bytes([0, state["valves"]]))  # V3 aberta para o manometro
+    hb = threading.Thread(target=heartbeat, daemon=True)
+    hb.start()
+    print(CAL_HELP)
+    applied = False
+    try:
+        while True:
+            line = input("cal> ").strip()
+            if not line:
+                continue
+            cmd, _, arg = line.partition(" ")
+            cmd = cmd.lower()
+            try:
+                if cmd == "b":
+                    state["pump"] = max(0, min(100, int(arg)))
+                elif cmd == "v":
+                    state["valves"] = parse_valves(arg)
+                elif cmd == "s":
+                    p = req(CMD_GET_STATUS)
+                    print(f"  pressao = {struct.unpack('<f', p[2:6])[0]:.1f} mmHg (calibracao atual)")
+                elif cmd == "p":
+                    r = req(CMD_CAL_POINT, struct.pack("<f", float(arg)))
+                    if r[0] == 0:
+                        idx, n = r[1], r[2]
+                        d, dev, rd, err = struct.unpack("<ffff", r[3:19])
+                        print(f"  ponto {idx + 1} (total {n}): ref {float(arg):.1f}  sensor {rd:.1f} mmHg"
+                              f"  erro atual {err:+.2f}  (bruto {d:.2f}, variacao {dev:.2f})")
+                    elif r[0] == 4:
+                        print(f"  pressao ainda variando ({struct.unpack('<f', r[1:5])[0]:.2f} mmHg) -"
+                              " pare a bomba, espere alguns segundos e repita")
+                    else:
+                        print(f"  recusado: {RSP_STATUS_NAMES.get(r[0], r[0])}"
+                              f"{' (ponto repetido: < 5 mmHg de outro)' if r[0] == 10 else ''}")
+                elif cmd == "a":
+                    r = req(CMD_CAL_APPLY)
+                    if len(r) >= 19:
+                        res, n = r[1], r[2]
+                        scale, off, resid, span = struct.unpack("<ffff", r[3:19])
+                        print(f"  {n} pontos, faixa {span:.0f} mmHg: escala {scale:.5f}, offset {off:+.2f} mmHg,"
+                              f" residuo max {resid:.2f} mmHg")
+                    if r[0] == 0:
+                        print("  CALIBRACAO APLICADA E GRAVADA.")
+                        applied = True
+                        break
+                    if len(r) >= 2:
+                        print(f"  REPROVADA: {CAL_FIT_NAMES.get(r[1], r[1])} - pode acrescentar pontos ou q")
+                    else:
+                        print(f"  falhou: {RSP_STATUS_NAMES.get(r[0], r[0])}")
+                elif cmd == "q":
+                    break
+                else:
+                    print(CAL_HELP)
+            except ValueError as exc:
+                print(f"  entrada invalida: {exc}")
+    finally:
+        state["pump"] = 0
+        state["stop"] = True
+        hb.join(timeout=1.0)
+        if not applied:
+            req(CMD_CAL_ABORT)
+        req(CMD_MANUAL_EXIT)
+        print("Modo manual encerrado (bomba off, valvulas abertas).")
+    return applied
+
+
 def parse_hello(payload: bytes) -> dict:
     role_idx = 2 + DEVICE_ID_FIELD_LEN + FW_VERSION_FIELD_LEN
     return {
@@ -712,7 +830,7 @@ def main():
     parser.add_argument("--cmd", choices=["hello", "status", "auth", "both",
                                           "setpoint", "datetime", "operator", "start", "abort",
                                           "stream", "logtail", "listen", "ls", "stat", "get",
-                                          "params", "pset", "pcommit", "prevert", "manual"], default="both")
+                                          "params", "pset", "pcommit", "prevert", "manual", "cal"], default="both")
     parser.add_argument("--pump", type=int, default=0, help="--cmd manual: potencia da bomba 0..100 %%")
     parser.add_argument("--valves", default="V1,V2", help="--cmd manual: valvulas ABERTAS, ex.: 'V1,V3' ou 'nenhuma'")
     parser.add_argument("--no-heartbeat", action="store_true",
@@ -816,6 +934,18 @@ def main():
                 else:
                     out = args.out or args.path.rstrip("/").split("/")[-1] or "download.bin"
                     ok = ok and run_get(ser, seq, args.path, out, args.timeout)
+            except (ValueError, TimeoutError) as exc:
+                print(f"FALHA: {exc}", file=sys.stderr)
+                ok = False
+
+        if args.cmd == "cal":
+            if not args.dev_key_hex:
+                print("Calibracao exige sessao DEV: passe --dev-key-hex", file=sys.stderr)
+                sys.exit(1)
+            try:
+                ok = run_auth_flow(ser, seq, bytes.fromhex(args.dev_key_hex), args.timeout, logout=False)
+                seq += 10
+                ok = ok and run_cal(ser, seq, args.timeout)
             except (ValueError, TimeoutError) as exc:
                 print(f"FALHA: {exc}", file=sys.stderr)
                 ok = False

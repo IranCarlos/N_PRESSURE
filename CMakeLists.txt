@@ -141,10 +141,12 @@ set(N_PRESSURE_INC_DIRS
     Core/Services/UsbProto/Inc
     Core/Services/Event_Watch/Inc
     Core/Services/Params/Inc
+    Core/Services/Calibration/Inc
     Core/App/HMI_UI/Inc
     Core/App/HMI_Port/Inc
     Core/App/Usb_Port/Inc
     Core/App/App_Log/Inc
+    Core/App/Cal_Port/Inc
     Core/App/Bench/Inc
 )
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE ${N_PRESSURE_INC_DIRS})

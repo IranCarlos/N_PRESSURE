@@ -437,17 +437,18 @@ void UiBackend_CalAbort(void)
     s_cal_pump_pct = 0u;
 }
 
-void UiBackend_CalCapture(uint8_t point, float ref_mmhg)
+bool UiBackend_CalCapture(uint8_t point, float ref_mmhg)
 {
     printf("[mock] cal P%u: ref %d mmHg, bruto %d mmHg\n", (unsigned int)point,
            (int)ref_mmhg, (int)UiBackend_GetRawPressureMmHg());
+    return true;
 }
 
-bool UiBackend_CalComputeAndSave(char * msg, size_t msg_len)
+UiCalVerify_t UiBackend_CalVerify(char * msg, size_t msg_len)
 {
     s_cal_pump_pct = 0u;
     if ((msg != NULL) && (msg_len > 0u)) {
-        (void)snprintf(msg, msg_len, "Calibracao salva.");
+        (void)snprintf(msg, msg_len, "Erro 2.4 mmHg: corrigido.");
     }
-    return true;
+    return UI_CAL_CORRECTED;
 }

@@ -83,6 +83,14 @@ typedef struct {
     uint16_t last_p2p_counts;    /* ruido instantaneo do bloco */
     uint32_t stuck_blocks;
     uint32_t flags;              /* PressureFlags_t */
+
+    /* Fase 7.8: media lenta do diferencial (antes da calibracao) e seu
+     * desvio medio, para capturar pontos de calibracao/verificacao: uma
+     * leitura instantanea carrega a ondulacao da bomba de embolo. Constante
+     * de tempo ~0,5 s (1 bloco por ms). cal_dev alto = pressao ainda mexendo. */
+    float   cal_avg_kpa;
+    float   cal_dev_kpa;
+    uint8_t cal_avg_valid;
 } PressureCore_t;
 
 void PressureCore_Init(PressureCore_t *pc, const PressureCal_t *cal);

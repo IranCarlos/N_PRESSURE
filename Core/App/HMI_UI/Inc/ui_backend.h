@@ -135,12 +135,24 @@ void UiBackend_BuzzerBeep(uint16_t freq_hz, uint16_t duration_ms);
 void UiBackend_SubmitCycleRecord(uint16_t operator_id, uint16_t participant_id,
                                  uint16_t cycle_number);
 
-/* Calibracao de 2 pontos com manometro externo na V3. */
+/* Verificacao da calibracao pelo operador (Fase 7.8), manometro na V3:
+ * compara 2 pontos com a calibracao atual. A calibracao completa e' feita
+ * pelo app DEV (PC). */
+typedef enum {
+    UI_CAL_INCOMPLETE = 0, /* falta capturar P1/P2 */
+    UI_CAL_OK,             /* dentro da tolerancia: nada mudou */
+    UI_CAL_CORRECTED,      /* erro aceitavel: o equipamento corrigiu e gravou */
+    UI_CAL_ALERT,          /* erro grande: NAO corrigiu - assistencia tecnica */
+    UI_CAL_FAILED          /* falha de gravacao */
+} UiCalVerify_t;
+
 void UiBackend_CalZero(void);
 void UiBackend_CalSetPumpPct(uint8_t pct);     /* abre V1+V2+V3 + bomba em pct */
 void UiBackend_CalAbort(void);                 /* bomba off, valvulas ao controle */
-void UiBackend_CalCapture(uint8_t point, float ref_mmhg); /* point = 1 ou 2 */
-bool UiBackend_CalComputeAndSave(char * msg, size_t msg_len);
+/* point = 1 ou 2. false = leitura ainda variando (ou sensor invalido):
+ * aguardar estabilizar e capturar de novo. */
+bool UiBackend_CalCapture(uint8_t point, float ref_mmhg);
+UiCalVerify_t UiBackend_CalVerify(char * msg, size_t msg_len);
 
 #ifdef __cplusplus
 }

@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "eeprom_storage.h"
+#include "calibration.h"
 #include "stm32h7xx_hal.h"
 
 #ifdef __cplusplus
@@ -87,6 +88,22 @@ uint16_t EEPROM_Storage_LoadParams(void);
  * @return 1 gravado e conferido; 0 falha (a copia anterior continua valendo).
  */
 uint8_t EEPROM_Storage_SaveParams(uint32_t *out_seq);
+
+/**
+ * @brief Fase 7.8: carrega o registro de calibracao (copia A/B mais nova e
+ *        valida). Sem copia valida, `out` volta como "fabrica" (escala 1,
+ *        offset 0, origem CAL_SOURCE_FACTORY). Mesma restricao de boot de
+ *        EEPROM_Storage_LoadParams().
+ * @return 1 se veio da EEPROM, 0 se ficou o de fabrica.
+ */
+uint8_t EEPROM_Storage_LoadCal(Cal_Record_t *out);
+
+/**
+ * @brief Fase 7.8: grava o registro na copia A/B mais antiga e confere
+ *        lendo de volta (~5 ms). So' com o controle parado.
+ * @return 1 gravado e conferido; 0 falha (a anterior continua valendo).
+ */
+uint8_t EEPROM_Storage_SaveCal(const Cal_Record_t *rec);
 
 #ifdef __cplusplus
 }

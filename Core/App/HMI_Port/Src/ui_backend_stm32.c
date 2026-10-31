@@ -26,6 +26,7 @@
 #include "cycle_record.h"
 #include "buzzer.h"
 #include "fw_version.h"
+#include "cal_manager.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -34,6 +35,8 @@
 extern RTC_HandleTypeDef hrtc;
 
 #define UI_MMHG_PER_KPA (7.50062f)
+/* Captura de ponto so' com a media estavel (mesmo criterio do app DEV). */
+#define UI_CAL_MAX_DEVIATION_MMHG (1.0f)
 
 static SystemRuntime_t * s_rt;
 static SystemConfig_t * s_cfg;
@@ -402,7 +405,16 @@ void UiBackend_SubmitCycleRecord(uint16_t operator_id, uint16_t participant_id,
     info.metrics = s_last_metrics;
     info.device_id = DEVICE_ID;
     info.firmware_version = FIRMWARE_VERSION;
-    /* last_calibration fica zerado — data da calibracao ainda nao e' gravada. */
+    /* Fase 7.8: data da calibracao em uso (zero = nunca calibrado). */
+    {
+        const Cal_Record_t * cal = CalManager_Get();
+        info.last_calibration.year = cal->year;
+        info.last_calibration.month = cal->month;
+        info.last_calibration.day = cal->day;
+        info.last_calibration.hour = cal->hour;
+        info.last_calibration.minute = cal->minute;
+        info.last_calibration.second = cal->second;
+    }
 
     if (UiBackend_GetDateTime(&now)) {
         info.datetime.year = now.year;
@@ -440,11 +452,17 @@ void UiBackend_CalAbort(void)
     s_cal_point2_ok = 0u;
 }
 
-void UiBackend_CalCapture(uint8_t point, float ref_mmhg)
+bool UiBackend_CalCapture(uint8_t point, float ref_mmhg)
 {
     float ref_kpa = ref_mmhg / UI_MMHG_PER_KPA;
-    float d_kpa = ui_diff_kpa();
+    float d_kpa;
+    float dev_mmhg;
 
+    /* Media de ~0,5 s (Pressure_Core), nao a leitura instantanea: a bomba
+     * de embolo deixa ondulacao. Variando demais = ainda nao estabilizou. */
+    if ((CalManager_Capture(&d_kpa, &dev_mmhg) == 0u) || (dev_mmhg > UI_CAL_MAX_DEVIATION_MMHG)) {
+        return false;
+    }
     if (point == 1u) {
         s_cal_ref1_kpa = ref_kpa;
         s_cal_d1_kpa = d_kpa;
@@ -454,37 +472,66 @@ void UiBackend_CalCapture(uint8_t point, float ref_mmhg)
         s_cal_d2_kpa = d_kpa;
         s_cal_point2_ok = 1u;
     } else {
-        /* ponto invalido: ignorado */
+        return false;
     }
+    return true;
 }
 
-bool UiBackend_CalComputeAndSave(char * msg, size_t msg_len)
+UiCalVerify_t UiBackend_CalVerify(char * msg, size_t msg_len)
 {
-    PressureCal_t new_cal;
-    const char * text;
-    bool ok = false;
+    Cal_Point_t p1;
+    Cal_Point_t p2;
+    Cal_Verify_t v;
+    Cal_VerifyResult_t r;
+    UiCalVerify_t out;
+    char log_msg[64];
 
-    if ((s_cal_point1_ok == 0u) || (s_cal_point2_ok == 0u)) {
-        text = "Capture P1 e P2 antes.";
-    } else if (PressureCore_CalibrateTwoPoint(s_cal_ref1_kpa, s_cal_d1_kpa,
-                                              s_cal_ref2_kpa, s_cal_d2_kpa, &new_cal) != 0) {
-        text = "Pontos invalidos (P1=P2?).";
-    } else {
-        if (s_cfg != NULL) {
-            s_cfg->sensor_cal.offset_kpa = new_cal.offset_kpa;
-            s_cfg->sensor_cal.scale = new_cal.scale;
-            (void)EEPROM_Storage_Save(s_cfg);
+    if ((s_cal_point1_ok == 0u) || (s_cal_point2_ok == 0u) || (s_cfg == NULL)) {
+        if ((msg != NULL) && (msg_len > 0u)) {
+            (void)snprintf(msg, msg_len, "Capture P1 e P2 antes.");
         }
-        /* Calibracao concluida: bomba off, valvulas de volta ao controle. */
-        UiBackend_CalAbort();
-        text = "Calibracao salva.";
-        ok = true;
+        return UI_CAL_INCOMPLETE;
+    }
+    p1.ref_kpa = s_cal_ref1_kpa;
+    p1.d_kpa = s_cal_d1_kpa;
+    p2.ref_kpa = s_cal_ref2_kpa;
+    p2.d_kpa = s_cal_d2_kpa;
+    r = Cal_Verify(&CalManager_Get()->coeffs, &p1, &p2,
+                   s_cfg->cal_verify_ok_mmhg, s_cfg->cal_verify_fix_max_mmhg, &v);
+
+    switch (r) {
+        case CAL_VERIFY_OK:
+            (void)snprintf(msg, msg_len, "OK: erro %.1f mmHg.", (double)v.max_abs_err_mmhg);
+            (void)snprintf(log_msg, sizeof(log_msg), "CAL IHM: verificacao OK (erro max %.1f mmHg)",
+                           (double)v.max_abs_err_mmhg);
+            CalManager_Log(0u, "", log_msg);
+            out = UI_CAL_OK;
+            break;
+        case CAL_VERIFY_CORRECTED:
+            if (CalManager_Commit(&v.new_coeffs, CAL_SOURCE_HMI_FIX, 2u, v.max_abs_err_mmhg,
+                                  "CAL IHM") != 0u) {
+                (void)snprintf(msg, msg_len, "Erro %.1f mmHg: corrigido.", (double)v.max_abs_err_mmhg);
+                out = UI_CAL_CORRECTED;
+            } else {
+                (void)snprintf(msg, msg_len, "Falha ao gravar.");
+                out = UI_CAL_FAILED;
+            }
+            break;
+        case CAL_VERIFY_ALERT:
+        case CAL_VERIFY_INVALID:
+        default:
+            /* Nao corrige: um erro desse tamanho e' defeito (sensor,
+             * vazamento, manometro), nao deriva - assistencia tecnica. */
+            (void)snprintf(msg, msg_len, "ERRO %.1f mmHg! Assist. tecnica.", (double)v.max_abs_err_mmhg);
+            (void)snprintf(log_msg, sizeof(log_msg), "Verificacao: erro %.1f mmHg acima do limite",
+                           (double)v.max_abs_err_mmhg);
+            CalManager_Log(1u, "W_CAL", log_msg);
+            out = UI_CAL_ALERT;
+            break;
     }
 
-    if ((msg != NULL) && (msg_len > 0u)) {
-        (void)snprintf(msg, msg_len, "%s", text);
-    }
-    return ok;
+    UiBackend_CalAbort(); /* bomba off, valvulas ao controle, pontos descartados */
+    return out;
 }
 
 /* --- Internos ------------------------------------------------------------ */

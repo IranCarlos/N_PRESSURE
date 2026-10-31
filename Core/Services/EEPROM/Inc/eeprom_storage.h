@@ -166,6 +166,15 @@ extern "C" {
 #define EEPROM_ADDR_PARAMS_B                       (0x0800U)
 #define EEPROM_PARAMS_SLOT_SIZE                    (0x0200U)
 
+/* ---- Fase 7.8: calibracao do sensor (Core/Services/Calibration) ----------
+ * Mesmo esquema A/B dos parametros, registro de 40 B (Cal_RecordSerialize),
+ * uma pagina de 64 B por copia (gravacao numa escrita so'). Autoridade da
+ * calibracao a partir da Fase 7.8 - o campo sensor_cal do bloco legado de
+ * SystemConfig_t deixou de ser lido no bring-up. */
+#define EEPROM_ADDR_CAL_A                          (0x0A00U)
+#define EEPROM_ADDR_CAL_B                          (0x0A40U)
+#define EEPROM_CAL_SLOT_SIZE                       (0x0040U)
+
 #ifdef __cplusplus
 }
 #endif

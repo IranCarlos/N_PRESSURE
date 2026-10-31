@@ -13,9 +13,9 @@
  *          | y=6   [ Setpoint                      [ 160 ] ]   |
  *          | y=40  [ Unidade                    [ mmHg  ] ]    |
  *          | y=74  [ Buzzer          [Testar] [ Ligado ]  ]    |
- *          | y=108 [ Calibracao (manometro na V3)         ]    |
- *          |       [ Leitura bruta / Zerar / Pressao de teste ] |
- *          |       [ P1 [spin][Capturar] OK / P2 ... / Salvar ] |
+ *          | y=108 [ Verificar calibracao (manometro na V3) ]  |
+ *          |       [ Leitura / Zerar / Pressao de teste       ] |
+ *          |       [ P1 [spin][Capturar] OK / P2 ... / Verificar] |
  *          | y=326 [ Teste de vazamento: tempo, queda, result ] |
  *          | y=408 [ Data/Hora DD MM AAAA HH MM  [Aplicar]    ] |
  *          | y=500 [ Operador ativo (OP)            [ 03 ]    ] |
@@ -295,10 +295,10 @@ static lv_obj_t * ui_row_box(int32_t y, const char * title)
 static void ui_create_calibration(int32_t y)
 {
     lv_obj_t * box = UiW_TitledBox(s_content, 6, y, LV_HOR_RES - 26, 212,
-                                   "Calibracao (manometro na V3)");
+                                   "Verificar calibracao (manometro na V3)");
     lv_obj_t * lbl;
 
-    s_lbl_cal_reading = UiW_LabelBody(box, "Leitura bruta: -- mmHg");
+    s_lbl_cal_reading = UiW_LabelBody(box, "Leitura: -- mmHg");
     lv_obj_set_pos(s_lbl_cal_reading, 6, 22);
 
     s_btn_cal_zero = UiW_Button(box, 110, 24, "Zerar (ar)", ui_cal_zero_event_cb);
@@ -328,7 +328,7 @@ static void ui_create_calibration(int32_t y)
     s_lbl_cal_point2 = UiW_LabelHint(box, "--");
     lv_obj_set_pos(s_lbl_cal_point2, 188, 138);
 
-    s_btn_cal_save = UiW_Button(box, 150, 24, "Calcular e salvar", ui_cal_save_event_cb);
+    s_btn_cal_save = UiW_Button(box, 150, 24, "Verificar", ui_cal_save_event_cb);
     lv_obj_set_pos(s_btn_cal_save, 6, 164);
 
     /* Linha propria para o resultado (texto longo nao cabe ao lado). */
@@ -485,11 +485,12 @@ static void ui_update_info_panel(void)
 
 static void ui_update_cal_reading(void)
 {
-    int32_t reading = (int32_t)UiBackend_GetRawPressureMmHg();
+    /* Leitura CALIBRADA: e' ela que o operador compara com o manometro. */
+    int32_t reading = (int32_t)UiBackend_GetPressureMmHg();
 
     if (reading != s_shown_cal_reading) {
         s_shown_cal_reading = reading;
-        lv_label_set_text_fmt(s_lbl_cal_reading, "Leitura bruta: %d mmHg", (int)reading);
+        lv_label_set_text_fmt(s_lbl_cal_reading, "Leitura: %d mmHg", (int)reading);
     }
 }
 
@@ -556,15 +557,17 @@ static void ui_cal_pump_changed_cb(lv_event_t * e)
 static void ui_cal_capture1_event_cb(lv_event_t * e)
 {
     LV_UNUSED(e);
-    UiBackend_CalCapture(1u, (float)lv_spinbox_get_value(s_spin_cal_ref1));
-    lv_label_set_text_static(s_lbl_cal_point1, "OK");
+    lv_label_set_text_static(s_lbl_cal_point1,
+                             UiBackend_CalCapture(1u, (float)lv_spinbox_get_value(s_spin_cal_ref1))
+                             ? "OK" : "Aguarde");
 }
 
 static void ui_cal_capture2_event_cb(lv_event_t * e)
 {
     LV_UNUSED(e);
-    UiBackend_CalCapture(2u, (float)lv_spinbox_get_value(s_spin_cal_ref2));
-    lv_label_set_text_static(s_lbl_cal_point2, "OK");
+    lv_label_set_text_static(s_lbl_cal_point2,
+                             UiBackend_CalCapture(2u, (float)lv_spinbox_get_value(s_spin_cal_ref2))
+                             ? "OK" : "Aguarde");
 }
 
 static void ui_cal_save_event_cb(lv_event_t * e)
@@ -574,10 +577,26 @@ static void ui_cal_save_event_cb(lv_event_t * e)
     LV_UNUSED(e);
 
     msg[0] = '\0';
-    if (UiBackend_CalComputeAndSave(msg, sizeof(msg))) {
-        /* Backend ja' desligou a bomba e fechou V3. */
-        lv_spinbox_set_value(s_spin_cal_pump_pct, 0);
+    switch (UiBackend_CalVerify(msg, sizeof(msg))) {
+        case UI_CAL_OK:
+        case UI_CAL_CORRECTED:
+            lv_obj_set_style_text_color(s_lbl_cal_result, UiTheme_ColorOk(), 0);
+            break;
+        case UI_CAL_ALERT:
+        case UI_CAL_FAILED:
+            lv_obj_set_style_text_color(s_lbl_cal_result, UiTheme_ColorDanger(), 0);
+            UiSession_Beep(600u, 120u);
+            UiSession_Beep(600u, 120u);
+            break;
+        case UI_CAL_INCOMPLETE:
+        default:
+            lv_obj_remove_local_style_prop(s_lbl_cal_result, LV_STYLE_TEXT_COLOR, 0);
+            break;
     }
+    /* Backend ja' desligou a bomba e devolveu as valvulas ao controle. */
+    lv_spinbox_set_value(s_spin_cal_pump_pct, 0);
+    lv_label_set_text_static(s_lbl_cal_point1, "--");
+    lv_label_set_text_static(s_lbl_cal_point2, "--");
     lv_label_set_text(s_lbl_cal_result, msg);
 }
 

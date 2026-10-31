@@ -898,6 +898,74 @@ static size_t handle_manual(const UsbProtoDispatchCtx_t *ctx, uint16_t cmd,
     return 1U;
 }
 
+/* ---- Fase 7.8: CAL_* (so' DEV) ------------------------------------------- */
+
+static size_t handle_cal(const UsbProtoDispatchCtx_t *ctx, uint16_t cmd,
+                         const uint8_t *req_payload, uint16_t req_len,
+                         uint8_t *rsp_payload, size_t rsp_cap)
+{
+    const UsbProtoCalOps_t *ops;
+    uint8_t st;
+
+    if (ctx_role(ctx) != USB_PROTO_ROLE_DEV) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_SEM_PERMISSAO);
+    }
+    if ((ctx == NULL) || (ctx->cal == NULL) || (rsp_cap < 19U)) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_OCUPADO);
+    }
+    ops = ctx->cal;
+
+    if (cmd == USB_PROTO_CMD_CAL_POINT) {
+        UsbProtoCalPoint_t p;
+        float ref;
+        if ((req_payload == NULL) || (req_len != 4U)) {
+            return rsp_status(rsp_payload, USB_PROTO_RSP_PARAM_INVALIDO);
+        }
+        ref = read_f32_le(req_payload);
+        if (ref != ref) { /* NaN */
+            return rsp_status(rsp_payload, USB_PROTO_RSP_FORA_DE_FAIXA);
+        }
+        memset(&p, 0, sizeof(p));
+        st = ops->point(ref, &p);
+        rsp_payload[0] = st;
+        if (st == (uint8_t)USB_PROTO_RSP_OCUPADO) {
+            write_f32_le(&rsp_payload[1], p.deviation_mmhg);
+            return 5U;
+        }
+        if (st != (uint8_t)USB_PROTO_RSP_OK) {
+            return 1U;
+        }
+        rsp_payload[1] = p.index;
+        rsp_payload[2] = p.n;
+        write_f32_le(&rsp_payload[3], p.d_mmhg);
+        write_f32_le(&rsp_payload[7], p.deviation_mmhg);
+        write_f32_le(&rsp_payload[11], p.reading_mmhg);
+        write_f32_le(&rsp_payload[15], p.error_mmhg);
+        return 19U;
+    }
+    if (req_len != 0U) {
+        return rsp_status(rsp_payload, USB_PROTO_RSP_PARAM_INVALIDO);
+    }
+    if (cmd == USB_PROTO_CMD_CAL_APPLY) {
+        UsbProtoCalApply_t a;
+        memset(&a, 0, sizeof(a));
+        st = ops->apply(&a);
+        rsp_payload[0] = st;
+        if ((st != (uint8_t)USB_PROTO_RSP_OK) && (st != (uint8_t)USB_PROTO_RSP_CONFLITO)) {
+            return 1U;
+        }
+        rsp_payload[1] = a.fit_result;
+        rsp_payload[2] = a.n;
+        write_f32_le(&rsp_payload[3], a.scale);
+        write_f32_le(&rsp_payload[7], a.offset_mmhg);
+        write_f32_le(&rsp_payload[11], a.max_residual_mmhg);
+        write_f32_le(&rsp_payload[15], a.span_mmhg);
+        return 19U;
+    }
+    rsp_payload[0] = (cmd == USB_PROTO_CMD_CAL_START) ? ops->start() : ops->abort();
+    return 1U;
+}
+
 size_t UsbProtoDispatch_Handle(uint16_t cmd,
                                 const uint8_t *req_payload, uint16_t req_len,
                                 const UsbProtoDispatchCtx_t *ctx,
@@ -957,6 +1025,11 @@ size_t UsbProtoDispatch_Handle(uint16_t cmd,
         case USB_PROTO_CMD_MANUAL_SET:
         case USB_PROTO_CMD_MANUAL_HEARTBEAT:
             return handle_manual(ctx, cmd, req_payload, req_len, rsp_payload);
+        case USB_PROTO_CMD_CAL_START:
+        case USB_PROTO_CMD_CAL_POINT:
+        case USB_PROTO_CMD_CAL_APPLY:
+        case USB_PROTO_CMD_CAL_ABORT:
+            return handle_cal(ctx, cmd, req_payload, req_len, rsp_payload, rsp_cap);
         default:
             rsp_payload[0] = (uint8_t)USB_PROTO_RSP_CMD_DESCONHECIDO;
             return 1U;

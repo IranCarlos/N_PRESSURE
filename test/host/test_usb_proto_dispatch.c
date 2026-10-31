@@ -870,8 +870,86 @@ static void test_manual_commands(void)
     CHECK(s_man_calls == 4);
 }
 
+/* ---- Fase 7.8: CAL_* com operacoes falsas ------------------------------ */
+
+static uint8_t s_cal_point_status;
+static float s_cal_last_ref;
+static uint8_t c_start(void) { return (uint8_t)USB_PROTO_RSP_OK; }
+static uint8_t c_point(float ref, UsbProtoCalPoint_t *o)
+{
+    s_cal_last_ref = ref;
+    o->deviation_mmhg = 0.25f;
+    o->index = 2U;
+    o->n = 3U;
+    o->d_mmhg = 99.0f;
+    o->reading_mmhg = 101.0f;
+    o->error_mmhg = 1.0f;
+    return s_cal_point_status;
+}
+static uint8_t c_apply(UsbProtoCalApply_t *o)
+{
+    o->fit_result = 6U; /* CAL_FIT_NONLINEAR */
+    o->n = 3U;
+    o->scale = 1.01f;
+    o->max_residual_mmhg = 3.5f;
+    return (uint8_t)USB_PROTO_RSP_CONFLITO;
+}
+static uint8_t c_abort(void) { return (uint8_t)USB_PROTO_RSP_OK; }
+static const UsbProtoCalOps_t FAKE_CAL = { c_start, c_point, c_apply, c_abort };
+
+static size_t cal_call(uint16_t cmd, const uint8_t *req, uint16_t len, UsbProtoRole_t role, uint8_t *rsp)
+{
+    UsbProtoAuthSession_t sess;
+    UsbProtoDispatchCtx_t ctx = { .auth = &sess, .cal = &FAKE_CAL };
+    UsbProtoAuth_Init(&sess, KEY, 1U);
+    sess.role = role;
+    return UsbProtoDispatch_Handle(cmd, req, len, &ctx, rsp, 64U);
+}
+
+static void test_cal_commands(void)
+{
+    const uint8_t ref_100[4] = { 0x00, 0x00, 0xC8, 0x42 }; /* 100.0f */
+    const uint8_t nan_ref[4] = { 0x00, 0x00, 0xC0, 0x7F };
+    uint8_t rsp[64];
+    float f;
+
+    CHECK(cal_call(USB_PROTO_CMD_CAL_START, NULL, 0U, USB_PROTO_ROLE_USER, rsp) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_SEM_PERMISSAO);
+    CHECK(cal_call(USB_PROTO_CMD_CAL_START, NULL, 0U, USB_PROTO_ROLE_DEV, rsp) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_OK);
+
+    s_cal_point_status = (uint8_t)USB_PROTO_RSP_OK;
+    CHECK(cal_call(USB_PROTO_CMD_CAL_POINT, ref_100, 4U, USB_PROTO_ROLE_DEV, rsp) == 19U);
+    CHECK(s_cal_last_ref == 100.0f);
+    CHECK((rsp[1] == 2U) && (rsp[2] == 3U));
+    memcpy(&f, &rsp[15], 4U);
+    CHECK(f == 1.0f);
+
+    s_cal_point_status = (uint8_t)USB_PROTO_RSP_OCUPADO; /* ainda variando */
+    CHECK(cal_call(USB_PROTO_CMD_CAL_POINT, ref_100, 4U, USB_PROTO_ROLE_DEV, rsp) == 5U);
+    memcpy(&f, &rsp[1], 4U);
+    CHECK(f == 0.25f);
+
+    s_cal_point_status = (uint8_t)USB_PROTO_RSP_CONFLITO;
+    CHECK(cal_call(USB_PROTO_CMD_CAL_POINT, ref_100, 4U, USB_PROTO_ROLE_DEV, rsp) == 1U);
+    CHECK(cal_call(USB_PROTO_CMD_CAL_POINT, nan_ref, 4U, USB_PROTO_ROLE_DEV, rsp) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_FORA_DE_FAIXA);
+    CHECK(cal_call(USB_PROTO_CMD_CAL_POINT, ref_100, 3U, USB_PROTO_ROLE_DEV, rsp) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_PARAM_INVALIDO);
+
+    /* reprovada: devolve o motivo e os numeros */
+    CHECK(cal_call(USB_PROTO_CMD_CAL_APPLY, NULL, 0U, USB_PROTO_ROLE_DEV, rsp) == 19U);
+    CHECK((rsp[0] == (uint8_t)USB_PROTO_RSP_CONFLITO) && (rsp[1] == 6U));
+    memcpy(&f, &rsp[11], 4U);
+    CHECK(f == 3.5f);
+
+    CHECK(cal_call(USB_PROTO_CMD_CAL_ABORT, NULL, 0U, USB_PROTO_ROLE_DEV, rsp) == 1U);
+    CHECK(rsp[0] == (uint8_t)USB_PROTO_RSP_OK);
+}
+
 int main(void)
 {
+    test_cal_commands();
     test_manual_commands();
     test_param_requires_dev();
     test_param_list_pages();

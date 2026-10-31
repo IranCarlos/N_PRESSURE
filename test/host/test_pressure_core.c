@@ -144,6 +144,28 @@ static void test_noise_stats_and_guards(void)
     PressureCore_ProcessBlock(&pc, NULL, 4, 0);
 }
 
+/* Fase 7.8: media de captura - converge para o diferencial e o desvio
+ * mostra quando a pressao esta' variando. */
+static void test_cal_average_and_deviation(void)
+{
+    PressureCore_t pc; uint16_t b[16]; int i;
+    PressureCore_Init(&pc, NULL);
+    fill(b, 16, counts_for_sensor_v(2.50f));
+    PressureCore_ProcessBlock(&pc, b, 16, 1);           /* zero */
+    for (i = 0; i < 6000; i++) {                         /* 6 s a +1 kPa estavel */
+        fill(b, 16, counts_for_sensor_v(2.50f + 0.09f));
+        PressureCore_ProcessBlock(&pc, b, 16, 0);
+    }
+    NEAR(pc.cal_avg_kpa, 1.0f, 0.01f);
+    CHECK(pc.cal_dev_kpa < 0.005f);
+    for (i = 0; i < 3000; i++) {                         /* ondulacao +-0,5 kPa (bomba) */
+        fill(b, 16, counts_for_sensor_v(2.50f + 0.09f + (((i / 20) % 2) ? 0.045f : -0.045f)));
+        PressureCore_ProcessBlock(&pc, b, 16, 0);
+    }
+    NEAR(pc.cal_avg_kpa, 1.0f, 0.05f);                  /* media continua no centro */
+    CHECK(pc.cal_dev_kpa > 0.3f);                        /* mas acusa a variacao */
+}
+
 int main(void)
 {
     test_curve_endpoints();
@@ -156,6 +178,7 @@ int main(void)
     test_out_of_range();
     test_stuck();
     test_noise_stats_and_guards();
+    test_cal_average_and_deviation();
     printf(s_fail ? "pressure_core: %d FALHA(S)\n" : "pressure_core: OK\n", s_fail);
     return s_fail != 0;
 }

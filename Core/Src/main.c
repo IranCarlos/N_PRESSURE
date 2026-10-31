@@ -60,6 +60,7 @@
 #include "event_watch.h"
 #include "app_event_log.h"
 #include "params.h"
+#include "cal_manager.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -363,7 +364,10 @@ lv_mem_monitor_t g_lv_mem;
 // Estado do supervisor (ver StartSafetyTask): mascara de tarefas que fizeram
 // check-in na ultima janela e contador de janelas com falta de check-in.
 #if (APP_MODE_BRINGUP && BRINGUP_ENABLE_PRESSURE)
+#if !BRINGUP_ENABLE_CONTROL
+// Sem controle (bring-up so' do sensor): sem calibracao, leitura do datasheet.
 static const SensorConfig_t s_bringup_sensor_cal = { .offset_kpa = 0.0f, .scale = 1.0f };
+#endif
 static SystemRuntime_t s_bringup_runtime = { .state = SYSTEM_STATE_IDLE };
 const PressureCore_t *g_pressure_diag; // Live Watch: expandir para ver ruido/flags
 #endif
@@ -429,7 +433,8 @@ uint8_t g_device_serial[USB_PROTO_AUTH_SERIAL_LEN];
 uint8_t g_dev_key[USB_PROTO_AUTH_DEV_KEY_LEN];
 uint8_t g_dev_key_valid;
 volatile uint32_t g_eeprom_i2c_error;
-volatile uint16_t g_params_loaded; // Fase 7.6: parametros vindos da EEPROM no boot (0 = todos de fabrica) // hi2c1.ErrorCode apos carregar a chave DEV (diagnostico de bancada)
+volatile uint16_t g_params_loaded;
+volatile uint8_t g_cal_loaded; // Fase 7.8: 1 = calibracao veio da EEPROM; 0 = de fabrica // Fase 7.6: parametros vindos da EEPROM no boot (0 = todos de fabrica) // hi2c1.ErrorCode apos carregar a chave DEV (diagnostico de bancada)
 UsbProtoAuthSession_t g_usb_auth_session;
 // Fase 7.4: fila de telemetria - controlTask produz (1 kHz), usbProtoTask
 // consome (usb_telemetry.h). ~2 KB.
@@ -839,7 +844,18 @@ int main(void)
 #endif
 
 #if BRINGUP_ENABLE_PRESSURE
+#if BRINGUP_ENABLE_CONTROL
+  // Fase 7.8: o ADC le a calibracao de g_bringup_sys_cfg.sensor_cal - a
+  // mesma que a IHM e o app DEV ajustam (CalManager). Antes lia uma
+  // constante (escala 1, offset 0): a calibracao da IHM era gravada mas
+  // NUNCA aplicada (achado 2026-10-22). Defaults antes do Init para o
+  // primeiro bloco ja' sair com escala 1 (nao 0); a calibracao gravada e'
+  // carregada no bloco da EEPROM, mais abaixo.
+  EEPROM_Storage_LoadDefaults(&g_bringup_sys_cfg);
+  ADC_Acq_Init(&hadc2, &htim15, &g_bringup_sys_cfg.sensor_cal, &s_bringup_runtime);
+#else
   ADC_Acq_Init(&hadc2, &htim15, &s_bringup_sensor_cal, &s_bringup_runtime);
+#endif
   g_pressure_diag = ADC_Acq_GetDiagnostics();
 #endif
 
@@ -870,6 +886,8 @@ int main(void)
       };
       Params_Bind(&targets);
     }
+    // Fase 7.8: calibracao de fabrica ate' o bloco da EEPROM carregar a gravada.
+    CalManager_Init(&g_bringup_sys_cfg.sensor_cal, NULL);
 #if BRINGUP_ENABLE_STORAGE
     // Fase 7.4: estado/erros/SD/fim de ensaio no log do SD (appTask).
     AppEventLog_Init(g_control_runtime);
@@ -990,6 +1008,12 @@ int main(void)
 #if BRINGUP_ENABLE_CONTROL
     // Fase 7.6: parametros de controle gravados pelo app DEV (copia A/B).
     g_params_loaded = EEPROM_Storage_LoadParams();
+    // Fase 7.8: calibracao do sensor (copia A/B; sem copia = fabrica).
+    {
+      Cal_Record_t cal;
+      g_cal_loaded = EEPROM_Storage_LoadCal(&cal);
+      CalManager_Init(&g_bringup_sys_cfg.sensor_cal, &cal);
+    }
 #endif
   } else {
     g_dev_key_valid = 0u;
@@ -2304,6 +2328,7 @@ void StartUsbProtoTask(void *argument)
               ctx.telemetry = &g_usb_telemetry;
               ctx.params = UsbActionsStm32_GetParamOps(); /* Fase 7.6 - so' DEV */
               ctx.manual = UsbActionsStm32_GetManualOps(); /* Fase 7.7 - so' DEV */
+              ctx.cal = UsbActionsStm32_GetCalOps();       /* Fase 7.8 - so' DEV */
 #else
               ctx.actions = NULL;   /* sem Control_Loop: comandos de controle -> OCUPADO */
               ctx.telemetry = NULL; /* sem controlTask produzindo amostras -> OCUPADO */
