@@ -138,6 +138,10 @@
  * pressao no manguito. A estatistica ignora este tempo apos cada rajada, em que
  * o sensor ve o salto da tubulacao. A confirmar com manometro no manguito. */
 #define CONTROL_CORE_PLATEAU_SETTLE_MS      (350u)
+/* Decisoes do plato usam esta media: com o manguito num membro o pulso arterial
+ * dispararia a reposicao em cada vale e, sem valvula aberta, a pressao so' sobe.
+ * Atenua ~5x um pulso de 75 bpm. P_MAX_ABS continua na leitura bruta. */
+#define CONTROL_CORE_HOLD_MEAN_TAU_S        (0.6f)
 
 static void safe_actuators(ControlCore_Actuators_t *out, float pump,
                            uint8_t v1, uint8_t v2, uint8_t v3)
@@ -247,10 +251,53 @@ void ControlCore_StartInflation(ControlCore_t *cc)
         cc->stabilized_out_of_band_ms = 0u;
         cc->hold_low_exits = 0u;
         cc->hold_recover_ms = 0u;
+        cc->reg_pump_off_ms = 0u;
+
+        cc->plateau_bin_sum = 0.0f;
+        cc->plateau_bin_ms = 0u;
+        cc->plateau_win_sum = 0.0f;
+        cc->plateau_win_idx = 0u;
+        cc->plateau_win_count = 0u;
 
         memset(&cc->cycle, 0, sizeof(cc->cycle));
         cc->cycle.plateau_min_mmhg = 1.0e9f;   /* sentinela: nenhuma amostra ainda */
         cc->cycle.plateau_max_mmhg = -1.0e9f;
+    }
+}
+
+/* Minimo/maximo do plato sobre a media movel de 1 batimento, nao sobre a
+ * amostra bruta: com o manguito num membro a leitura oscila com a pressao
+ * arterial (+-1 mmHg medido na perna) e isso nao e' instabilidade do ensaio.
+ * Uma queda real continua aparecendo: ela desloca a media. */
+static void plateau_track_band(ControlCore_t *cc, float pressure_mmhg, uint32_t dt_ms)
+{
+    float mean_mmhg;
+
+    cc->plateau_bin_sum += pressure_mmhg * (float)dt_ms;
+    cc->plateau_bin_ms += dt_ms;
+    if (cc->plateau_bin_ms < CONTROL_CORE_PLATEAU_BIN_MS) {
+        return;
+    }
+
+    if (cc->plateau_win_count >= CONTROL_CORE_PLATEAU_WIN_BINS) {
+        cc->plateau_win_sum -= cc->plateau_win[cc->plateau_win_idx];
+    } else {
+        cc->plateau_win_count++;
+    }
+    cc->plateau_win[cc->plateau_win_idx] = cc->plateau_bin_sum / (float)cc->plateau_bin_ms;
+    cc->plateau_win_sum += cc->plateau_win[cc->plateau_win_idx];
+    cc->plateau_win_idx = (uint8_t)((cc->plateau_win_idx + 1u) % CONTROL_CORE_PLATEAU_WIN_BINS);
+    cc->plateau_bin_sum = 0.0f;
+    cc->plateau_bin_ms = 0u;
+
+    if (cc->plateau_win_count >= CONTROL_CORE_PLATEAU_WIN_BINS) {
+        mean_mmhg = cc->plateau_win_sum / (float)CONTROL_CORE_PLATEAU_WIN_BINS;
+        if (mean_mmhg < cc->cycle.plateau_min_mmhg) {
+            cc->cycle.plateau_min_mmhg = mean_mmhg;
+        }
+        if (mean_mmhg > cc->cycle.plateau_max_mmhg) {
+            cc->cycle.plateau_max_mmhg = mean_mmhg;
+        }
     }
 }
 
@@ -599,7 +646,7 @@ static float run_hold_topup(ControlCore_t *cc, float error_mmhg, uint32_t dt_ms)
     }
     cc->hold_since_burst_ms += dt_ms;
     if ((cc->hold_ref_valid == 0u) && (cc->hold_since_burst_ms >= CONTROL_CORE_HOLD_REF_DELAY_MS)) {
-        cc->hold_ref_mmhg = cc->p_filt_mmhg;
+        cc->hold_ref_mmhg = cc->hold_mean_mmhg;
         cc->hold_ref_valid = 1u;
     }
     if (cc->hold_wait_ms > dt_ms) {
@@ -623,8 +670,8 @@ static float run_hold_topup(ControlCore_t *cc, float error_mmhg, uint32_t dt_ms)
         }
     }
     if (error_mmhg > deadband) {
-        if ((cc->hold_ref_valid != 0u) && (cc->hold_ref_mmhg > cc->p_filt_mmhg)) {
-            cc->hold_drop_mmhg += cc->hold_ref_mmhg - cc->p_filt_mmhg;
+        if ((cc->hold_ref_valid != 0u) && (cc->hold_ref_mmhg > cc->hold_mean_mmhg)) {
+            cc->hold_drop_mmhg += cc->hold_ref_mmhg - cc->hold_mean_mmhg;
         }
         cc->hold_ref_valid = 0u;
         cc->hold_bursts++;
@@ -745,6 +792,7 @@ static void run_regulation(ControlCore_t *cc, const ControlCore_Inputs_t *in,
 {
     if (cc->tuning.rate_ctrl_enable != 0u) {
         run_rate_regulation(cc, in, out);
+        cc->reg_pump_off_ms = (out->pump_power > 0.0f) ? 0u : (cc->reg_pump_off_ms + in->dt_ms);
     } else {
         run_pid_iteration(cc, in, out);
     }
@@ -825,9 +873,14 @@ static void handle_stabilizing(ControlCore_t *cc, const ControlCore_Inputs_t *in
      * alivio: a saida acima e' suspensa durante pulso/acomodacao, entao sem
      * esta condicao pulsos seguidos deixavam o tempo correr e o estado
      * virava STABILIZED muito acima do alvo. */
+    /* A leitura chega ao alvo antes do manguito (bancada 2026-10-31: caia ~2 mmHg
+     * depois de parar a bomba e o plato comecava abaixo da banda). So' estabiliza
+     * com a pressao na banda e a bomba parada ha' PLATEAU_SETTLE_MS. */
     if ((cc->state_elapsed_ms >= cc->cfg->stabilization.time_ms) &&
         (fabsf(error_mmhg) <= control_band(cc)) &&
-        (relief_window_active(cc) == 0u)) {
+        (relief_window_active(cc) == 0u) &&
+        ((cc->tuning.rate_ctrl_enable == 0u) ||
+         (cc->reg_pump_off_ms >= CONTROL_CORE_PLATEAU_SETTLE_MS))) {
         rt->state = SYSTEM_STATE_STABILIZED;
     }
 
@@ -869,7 +922,9 @@ static void handle_stabilized(ControlCore_t *cc, const ControlCore_Inputs_t *in,
      * levou dezenas de segundos para amortecer no manguito pequeno/rapido.
      * Sair exige uma banda MAIOR (2x) que a usada para entrar. */
     update_rate_filter(cc, in->dt_ms);
-    error_mmhg = rt->setpoint_mmhg - cc->p_filt_mmhg;
+    cc->hold_mean_mmhg += (rt->pressure_display - cc->hold_mean_mmhg) *
+        ((float)in->dt_ms / ((1000.0f * CONTROL_CORE_HOLD_MEAN_TAU_S) + (float)in->dt_ms));
+    error_mmhg = rt->setpoint_mmhg - cc->hold_mean_mmhg;
     if (fabsf(error_mmhg) > (2.0f * control_band(cc))) {
         cc->stabilized_out_of_band_ms += in->dt_ms;
         if (cc->stabilized_out_of_band_ms >= cc->tuning.stabilizing_exit_ms) {
@@ -902,11 +957,11 @@ static void handle_stabilized(ControlCore_t *cc, const ControlCore_Inputs_t *in,
         drop_mmhg = cc->leak_window_start_mmhg - rt->pressure_display;
         if (cc->tuning.rate_ctrl_enable != 0u) {
             drop_mmhg = cc->hold_drop_mmhg;
-            if ((cc->hold_ref_valid != 0u) && (cc->hold_ref_mmhg > cc->p_filt_mmhg)) {
-                drop_mmhg += cc->hold_ref_mmhg - cc->p_filt_mmhg;
+            if ((cc->hold_ref_valid != 0u) && (cc->hold_ref_mmhg > cc->hold_mean_mmhg)) {
+                drop_mmhg += cc->hold_ref_mmhg - cc->hold_mean_mmhg;
             }
             if (cc->hold_ref_valid != 0u) {
-                cc->hold_ref_mmhg = cc->p_filt_mmhg; /* nova janela parte daqui */
+                cc->hold_ref_mmhg = cc->hold_mean_mmhg; /* nova janela parte daqui */
             }
             if (cc->hold_bursts >= CONTROL_CORE_HOLD_MAX_BURSTS) {
                 drop_mmhg = cc->safety.dp_vazamento_mmhg;
@@ -1045,6 +1100,7 @@ void ControlCore_Step(ControlCore_t *cc, const ControlCore_Inputs_t *in,
             cc->leak_window_elapsed_ms = 0u;
             cc->hold_drop_mmhg = 0.0f;
         }
+        cc->hold_mean_mmhg = cc->p_filt_mmhg;
         cc->hold_ref_valid = 0u;
         cc->hold_since_burst_ms = 0u;
         cc->hold_bursts = 0u;
@@ -1090,12 +1146,7 @@ void ControlCore_Step(ControlCore_t *cc, const ControlCore_Inputs_t *in,
                      (cc->hold_since_burst_ms >= CONTROL_CORE_PLATEAU_SETTLE_MS))) {
                     cc->cycle.plateau_sum_mmhg += rt->pressure_display;
                     cc->cycle.plateau_sample_count++;
-                    if (rt->pressure_display < cc->cycle.plateau_min_mmhg) {
-                        cc->cycle.plateau_min_mmhg = rt->pressure_display;
-                    }
-                    if (rt->pressure_display > cc->cycle.plateau_max_mmhg) {
-                        cc->cycle.plateau_max_mmhg = rt->pressure_display;
-                    }
+                    plateau_track_band(cc, rt->pressure_display, in->dt_ms);
                 }
             }
 
@@ -1117,6 +1168,11 @@ void ControlCore_Step(ControlCore_t *cc, const ControlCore_Inputs_t *in,
         if ((state_before != SYSTEM_STATE_IDLE) && (rt->state == SYSTEM_STATE_IDLE)) {
             cc->cycle.deflate_time_ms = cc->cycle.total_elapsed_ms - cc->cycle.deflate_start_ms;
             cc->cycle.residual_mmhg = rt->pressure_display;
+            if ((cc->cycle.plateau_sample_count > 0u) && (cc->cycle.plateau_min_mmhg > cc->cycle.plateau_max_mmhg)) {
+                /* plato mais curto que a janela da media: fica so' a media do trecho */
+                cc->cycle.plateau_min_mmhg = cc->cycle.plateau_sum_mmhg / (float)cc->cycle.plateau_sample_count;
+                cc->cycle.plateau_max_mmhg = cc->cycle.plateau_min_mmhg;
+            }
             cc->cycle.technical_fault = (cc->last_error != CONTROL_ERR_NONE) ? 1u : 0u;
             cc->cycle.finalized = 1u;
         }

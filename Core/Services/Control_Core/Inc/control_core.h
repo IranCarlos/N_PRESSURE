@@ -32,6 +32,10 @@ extern "C" {
 
 #define CONTROL_CORE_MMHG_PER_KPA (7.50062f)
 
+/* Media movel da estatistica do plato: 24 x 50 ms = 1,2 s, um batimento a 50 bpm */
+#define CONTROL_CORE_PLATEAU_BIN_MS   (50u)
+#define CONTROL_CORE_PLATEAU_WIN_BINS (24u)
+
 /* Subconjunto do Apendice D relevante a esta malha. Os demais codigos (SD,
  * RTC, EEPROM, USB, watchdog, hard fault) pertencem a outros modulos. */
 typedef enum {
@@ -223,6 +227,14 @@ typedef struct {
     float    hold_drop_mmhg;          /* queda somada entre rajadas, na janela */
     uint8_t  hold_low_exits;          /* saidas por baixo neste ciclo */
     uint32_t hold_recover_ms;         /* tempo tentando voltar ao plato */
+    uint32_t reg_pump_off_ms;         /* tempo com a bomba parada na regulacao */
+    float    hold_mean_mmhg;          /* media lenta do plato, sem o pulso arterial */
+    float    plateau_bin_sum;         /* media movel do plato: ver plateau_track_band() */
+    uint32_t plateau_bin_ms;
+    float    plateau_win[CONTROL_CORE_PLATEAU_WIN_BINS];
+    float    plateau_win_sum;
+    uint8_t  plateau_win_idx;
+    uint8_t  plateau_win_count;
 
     ControlCore_Error_t last_error;   /* ultimo erro latched; Init/novo ensaio zera */
 

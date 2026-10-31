@@ -117,6 +117,14 @@ bool UI_ErrorPopup_IsActive(void)
     return (s_dim_bg != NULL);
 }
 
+void UI_ErrorPopup_Dismiss(void)
+{
+    if (s_dim_bg != NULL) {
+        lv_obj_delete(s_dim_bg);
+        s_dim_bg = NULL;
+    }
+}
+
 static const UiErrorEntry_t * ui_find_entry(uint16_t code)
 {
     size_t i;

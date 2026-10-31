@@ -55,6 +55,8 @@ Popups (lv_layer_top): RESULTADO DO ENSAIO, ERRO
 
 - O erro tem prioridade: se chegar com o resultado aberto, o resultado é fechado. Um resultado que
   chegar com o erro aberto espera o erro ser fechado.
+- O início de um ensaio fecha os popups do ciclo anterior (só na borda de início: um erro surgido
+  durante o ensaio continua aberto).
 - O fim de ciclo é ignorado nos Ajustes (o teste de vazamento usa a mesma máquina de estados e não
   pode gerar popup clínico nem registro no SD).
 - O contador de ciclo avança na transição IDLE → ativo (não conta CONFIG nem LEAK_TEST), observada

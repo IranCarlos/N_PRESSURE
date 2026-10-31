@@ -40,6 +40,7 @@ typedef enum {
 static HmiScreen_t s_active_screen;
 static uint16_t s_last_error = UI_ERR_NONE;
 static bool s_result_pending;
+static bool s_cycle_active;
 static UiCycleResult_t s_pending_result;
 
 static void ui_show_screen(HmiScreen_t screen);
@@ -50,6 +51,7 @@ static void ui_on_menu_settings_cb(void);
 static void ui_on_home_cb(void);
 static void ui_on_menu_cb(void);
 static void ui_on_settings_back_cb(void);
+static bool ui_cycle_active(void);
 static void ui_poll_popups(void);
 static void ui_on_popup_closed_cb(void);
 
@@ -164,10 +166,30 @@ static void ui_on_settings_back_cb(void)
 
 /* --- Popups --- */
 
+static bool ui_cycle_active(void)
+{
+    UiState_t state = UiBackend_GetState();
+
+    return (state == UI_STATE_INFLATING) || (state == UI_STATE_STABILIZING) ||
+           (state == UI_STATE_STABILIZED);
+}
+
 static void ui_poll_popups(void)
 {
     uint16_t current_error = UiBackend_GetLastError();
     UiCycleResult_t result;
+    bool cycle_active = ui_cycle_active();
+
+    /* Ensaio comecou: a tela precisa mostrar a pressao, sem esperar alguem
+     * fechar o popup do ciclo anterior. So' na borda de inicio: um erro que
+     * apareca durante o ensaio continua aberto ate' ser lido. */
+    if (cycle_active && !s_cycle_active &&
+        (UI_ResultPopup_IsActive() || UI_ErrorPopup_IsActive())) {
+        UI_ResultPopup_Dismiss();
+        UI_ErrorPopup_Dismiss();
+        ui_on_popup_closed_cb();
+    }
+    s_cycle_active = cycle_active;
 
     if ((current_error != UI_ERR_NONE) && (current_error != s_last_error) &&
         (s_active_screen != HMI_SCREEN_BOOT)) {
@@ -188,6 +210,10 @@ static void ui_poll_popups(void)
                                     session->cycle_number);
         s_pending_result = result;
         s_result_pending = true;
+    }
+
+    if (cycle_active) {
+        s_result_pending = false; /* ciclo anterior: ja' registrado acima */
     }
 
     if (s_result_pending && !UI_ErrorPopup_IsActive()) {

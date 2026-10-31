@@ -381,6 +381,60 @@ static void test_cycle_stats_full_run(void)
     CHECK(stats->residual_mmhg < safety.p_segura_mmhg);
 }
 
+/* Manguito num membro: o pulso arterial aparece na leitura e nao pode reprovar
+ * o plato; o limite e' +-2% (+-2 mmHg em 100). */
+static void test_arterial_pulse_does_not_widen_plateau_band(void)
+{
+    SystemConfig_t cfg = default_cfg();
+    SystemRuntime_t rt;
+    ControlCore_SafetyConfig_t safety = default_safety();
+    ControlCore_t cc;
+    SimPlant_t plant;
+    SimPlant_Config_t pcfg = plant_large_cuff();
+    float measured_kpa;
+    const ControlCore_CycleStats_t *stats = NULL;
+    uint32_t tick;
+    uint32_t stabilized_at = 0u;
+
+    memset(&rt, 0, sizeof(rt));
+    rt.setpoint_mmhg = 100.0f;
+    ControlCore_Init(&cc, &cfg, &rt, &safety);
+    SimPlant_Init(&plant, &pcfg, 42u);
+    ControlCore_StartInflation(&cc);
+    SimPlant_Step(&plant, 0.0f, 0u, 0u, &measured_kpa);
+    stats = ControlCore_GetCycleStats(&cc);
+
+    for (tick = 1; tick <= 120000u; tick++) {
+        ControlCore_Inputs_t in;
+        ControlCore_Actuators_t out;
+        float pulse_mmhg = 0.0f;
+
+        /* +-3 mmHg a 75 bpm: sozinho ja' sairia da faixa de +-2 mmHg */
+        if (stabilized_at != 0u) {
+            pulse_mmhg = 3.0f * sinf(6.2832f * 1.25f * (float)tick / 1000.0f);
+        }
+        in.pressure_kpa = measured_kpa + (pulse_mmhg / CONTROL_CORE_MMHG_PER_KPA);
+        in.sensor_ok = 1u;
+        if ((rt.state == SYSTEM_STATE_STABILIZED) && (stabilized_at == 0u)) { stabilized_at = tick; }
+        in.abort_request = ((stabilized_at != 0u) && (tick == stabilized_at + 8000u)) ? 1u : 0u;
+        in.dt_ms = 1u;
+
+        ControlCore_Step(&cc, &in, &out);
+        SimPlant_Step(&plant, out.pump_power,
+                     (uint8_t)(out.valve1_open + out.valve2_open + out.valve3_open),
+                     1u, &measured_kpa);
+
+        if (stats->finalized != 0u) { break; }
+    }
+
+    printf("  [pulso] plato %.2f..%.2f erro=%u t=%u n=%u pico=%.1f\n", stats->plateau_min_mmhg,
+           stats->plateau_max_mmhg, (unsigned)cc.last_error, (unsigned)stats->plateau_time_ms, (unsigned)stats->plateau_sample_count, stats->peak_mmhg);
+    CHECK(stats->finalized != 0u);
+    CHECK(stats->plateau_min_mmhg >= 98.0f);
+    CHECK(stats->plateau_max_mmhg <= 102.0f);
+    CHECK(cc.last_error == CONTROL_ERR_NONE);
+}
+
 /* Pedal durante a INFLACAO (antes do plato) = interrupcao pelo operador. */
 static void test_abort_during_inflation_sets_nc07_flag(void)
 {
@@ -638,6 +692,7 @@ int main(void)
     test_overpressure_triggers_e001_immediately();
     test_abort_request_deflates_to_idle();
     test_cycle_stats_full_run();
+    test_arterial_pulse_does_not_widen_plateau_band();
     test_abort_during_inflation_sets_nc07_flag();
     test_relief_valve_hysteresis_with_ripple();
     test_fast_approach_full_power_far_from_setpoint();

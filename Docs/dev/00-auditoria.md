@@ -1621,3 +1621,66 @@ NC05 em 150 mmHg no manguito grande: desinflar ~2,1 s, com V3 sem saida e limite
 Resultado do criterio acima (manguito grande, platô de 8 s, 3 repeticoes de 60/80/100/120/150, primeira passagem apos
 reset): 8 NC00, 6 NC02 (60 x2, 80 x3, 100 x1) e 1 NC05 (150 mmHg, 2,05 s). Manguito pequeno ainda nao repetido com
 esta versao. Tambem corrigido: reentrada em STABILIZED zerava a janela de vazamento e escondia vazamento continuo.
+
+## STABILIZED so' com a pressao assentada (2026-10-31, ainda sem bancada)
+
+Curvas de 80 mmHg (`build/bench/k4_*`): a leitura chegava ao alvo antes do manguito, caia ~2 mmHg depois de parar a
+bomba e as rajadas da manutencao terminavam o enchimento dentro do plato (piso subindo de 77 a 80). STABILIZED agora
+exige pressao na banda e bomba parada ha' 350 ms. Compilado e testado no host; nao gravado.
+
+TODO(BANCADA) apos a troca de valvulas pelo usuario: repetir `bench_characterize.py` (valv.ms_por_mmhg,
+valv.atraso e V1/V2 mudam), procurar o vazamento (interno ou no manguito) e repetir a conformidade nos dois manguitos.
+
+## Ensaio com o manguito no membro (perna do usuario, 2026-10-31)
+
+Feito a pedido e com o consentimento do usuario, presente e com a parada local ao
+alcance. Sem troca de valvulas: so' as conexoes foram refeitas. Ciclos de 8 s, com
+corte do script em setpoint + 15 mmHg. Nada gravado na EEPROM.
+
+Medido na perna: 25-40 mmHg/s ate' 20 mmHg, depois 5-8 ate' 60 e ~11 acima de 60
+(bomba a 100%). Pulso arterial de +-1 mmHg na leitura.
+
+- O pulso reprovava o plato (min/max da amostra bruta). Agora min/max usam media
+  movel de 1,2 s (`plateau_track_band`). O pico continua bruto.
+- O pulso disparava reposicao no vale e, sem valvula aberta, a pressao subia (103 em
+  alvo 100 no simulador). Decisoes do plato usam media com tau 0,6 s
+  (`hold_mean_mmhg`); P_MAX_ABS continua na leitura bruta.
+- O inicio do ensaio fecha os popups do ciclo anterior (`hmi_ui.c`).
+
+Resultado final na perna: NC02 em nenhum dos 5 ciclos.
+
+| SP | inflar (s) | desinflar (s) | residual | NC |
+|----|-----------|---------------|----------|----|
+| 60 | 9,8 | 2,17 | 7,0 | NC05 |
+| 60 | 5,9 | 2,17 | 8,3 | NC05 |
+| 80 | 10,1 | 2,88 | 8,6 | NC03 |
+| 100 | 12,0 | 3,50 | 8,9 | NC03 |
+| 120 | 14,0 | 3,96 | 9,6 | NC03 |
+
+TODO(DECISAO): NC03 e NC05 sao limite fisico neste circuito (bomba a 100% na subida,
+V1+V2+V3 abertas na descida): exigem bomba/valvulas de maior vazao ou rever os limites.
+TODO(DECISAO): DEFLATING termina em p_segura=10 e o residual e' lido nesse instante, sempre
+7-10 mmHg. Correcao: ler depois nao resolve sozinho. Medido nas curvas: <5 mmHg so' 2,7-5,0 s
+apos o inicio da descida; o criterio combinado exige mais vazao ou rever os limites.
+TODO(SEGURANCA): STABILIZED nao tem limite de tempo no firmware. Se a USB ou o PC cairem
+num ensaio remoto, a pressao fica mantida ate' erro, botao ou pedal. Falta um tempo
+maximo de plato no firmware antes de uso em pessoa sem operador junto ao equipamento.
+TODO(BANCADA): plato a 150 mmHg no membro nao ensaiado; 60 mmHg teve ate' 6 rajadas em 5 s
+antes da media lenta, e 80 mmHg ainda teve 5 depois dela (E013 dispara com 7).
+
+### Manguito menor na perna (2026-10-31)
+
+Mesmo firmware, plato de 8 s, um ciclo por setpoint, sem erro do equipamento.
+
+| SP | Inflar (s) | Desinflar (s) | Residual | NC |
+|---|---|---|---|---|
+| 60 | 5,1 | 2,15 | 9,2 | NC02 (media 58,5, 1o ciclo apos a troca) |
+| 60 | 5,3 | 1,73 | 9,4 | NC06 |
+| 80 | 6,2 | 1,90 | 9,5 | NC06 |
+| 100 | 7,9 | 2,42 | 9,3 | NC05 |
+| 120 | 8,9 | 2,76 | 9,3 | NC05 |
+
+Pulso arterial na leitura: +-1,1 a +-2,2 mmHg. Tempo real ate' <5 mmHg: 3,2-4,3 s.
+Conclusao: nenhuma melhora vem do controle; subida e descida dependem de bomba e valvulas.
+TODO(DIAG): jitter maximo 899 us (186 us logo apos o boot). So' mede o valor maximo: falta
+registrar o que rodava no pior caso para achar a origem.

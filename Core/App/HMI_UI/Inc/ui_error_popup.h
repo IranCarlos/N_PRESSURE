@@ -30,6 +30,7 @@ typedef void (*UI_ErrorPopup_ClosedCb_t)(void);
 void UI_ErrorPopup_Init(UI_ErrorPopup_ClosedCb_t closed_cb);
 void UI_ErrorPopup_Show(uint16_t error_code);
 bool UI_ErrorPopup_IsActive(void);
+void UI_ErrorPopup_Dismiss(void);
 
 #ifdef __cplusplus
 }

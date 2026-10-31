@@ -8,8 +8,11 @@ desinfla. Grava CSV e imprime tempo ate' o alvo, pico, faixa no plato, pulsos
 de valvula e partidas de bomba. --set muda parametros so' em RAM (somem no
 reset; nao ha' PARAM_COMMIT aqui).
 
-Usar SOMENTE com o manguito fora de uma pessoa. Aborta o ensaio acima de
-setpoint + --margin, em erro do equipamento ou se a telemetria parar.
+Em pessoa, so' com o consentimento explicito dela, presente e com o pedal ou o
+botao ao alcance: o plato nao tem limite de tempo no firmware, entao se o PC ou
+a USB cairem so' a parada local desinfla. Use --rest para dar descanso ao membro.
+Aborta o ensaio acima de setpoint + --margin, em erro do equipamento ou se a
+telemetria parar.
 """
 import argparse
 import csv
@@ -109,6 +112,7 @@ def main():
     ap.add_argument("--timeout", type=float, default=60.0, help="tempo maximo ate' estabilizar (s)")
     ap.add_argument("--margin", type=float, default=20.0)
     ap.add_argument("--band", type=float, default=3.0)
+    ap.add_argument("--rest", type=float, default=1.0, help="pausa entre ciclos, ja' desinflado (s)")
     ap.add_argument("--set", action="append", default=[], metavar="nome=valor")
     ap.add_argument("--port", default="COM3")
     args = ap.parse_args()
@@ -158,7 +162,7 @@ def main():
                 link.wait(0.5)
                 link.wait(40.0, stop=lambda r: r[3] == ST_IDLE)
                 active = False
-                link.wait(1.0)
+                link.wait(args.rest)
                 rows = list(link.rows)
                 print(analyze(rows, sp, args.band), flush=True)
                 print("   equipamento: " + link.verdict.split("ENSAIO_CONCLUIDO:")[-1].strip(), flush=True)
