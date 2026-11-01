@@ -1840,3 +1840,6 @@ Bateria na coxa com V3 desligada: 8 de 8 NC00. Insuflacao 3,0-5,2 s, descida 0,7
 <= 102%. Ate' <5 mmHg: 0,56-1,40 s. A previsao de descida mais lenta sem a V3 estava errada: fechar a V3 tira o ramo
 do manometro do circuito. Causa nao medida isoladamente. TODO(DECISAO): voltar o limite a 2 s (maior valor 1,95 s) e
 avaliar o minimo de 1 s da especificacao, que o firmware nao verifica (ciclo de 0,76 s).
+
+Fim da Fase 9 (2026-10-31): limite de descompressao mantido em 3,5 s por decisao do usuario, que tambem confirmou no
+equipamento a verificacao de calibracao, o teste de vazamento, os sons, a serie de 3 medidas e a edicao do paciente.
