@@ -1804,3 +1804,11 @@ Bateria na perna (usuario confirmou o posicionamento), seg.p_segura=4,5 gravado,
 60 NC02, 80/100/120 NC00; insuflacao 3,1-3,8 s, descida 0,8-0,9 s, residual 2,2-3,4. Bem mais rapido que a
 bateria anterior na perna (ins 9-14 s): causa nao medida. Pico no plato passou a usar a media de 1,2 s.
 60 mmHg segue NC02 (3 de 3): pico 63,1-67,1 antes do plato.
+
+Rajada na estabilizacao com a potencia do plato e bomba cortada ao abrir a V2: NC02 a 60 mmHg sumiu, pico
+60,2-60,8, nenhum pulso de alivio e nenhuma reentrada.
+Montagens na perna (usuario): a bateria "perna_final" foi no meio da canela, manguito apertado (ins 3,4 s,
+descida 0,8 s); a de referencia e' coxa, manguito mais folgado.
+Coxa, 3 x 60, 2 x 80/100/120, plato 8 s, firmware atual: ins 4,6-7,3 s, pico <= 101,3% do alvo, residual 3,6-4,2.
+Todos NC05: descida 2,2-3,1 s. Ate' <10 mmHg 1,5-1,9 s; ate' <5 mmHg 2,2-2,7 s; a medida soma os 200 ms de
+`t_seguro`. Limite fisico de vazao com esse volume. TODO(DECISAO): valvulas NA maiores ou rever o limite.

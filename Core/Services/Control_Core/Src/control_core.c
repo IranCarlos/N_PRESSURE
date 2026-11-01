@@ -548,6 +548,8 @@ static uint32_t burst_length_ms(ControlCore_t *cc)
     return (uint32_t)cc->burst_learned_ms;
 }
 
+static float hold_power(const ControlCore_t *cc);
+
 static float burst_tick(ControlCore_t *cc, float floor_power, uint32_t dt_ms)
 {
     uint32_t used = (dt_ms < cc->burst_on_ms) ? dt_ms : cc->burst_on_ms;
@@ -563,6 +565,9 @@ static float burst_tick(ControlCore_t *cc, float floor_power, uint32_t dt_ms)
 static float burst_modulate(ControlCore_t *cc, float power, uint32_t dt_ms)
 {
     float floor_power = cc->tuning.pump_min_effective;
+    /* Perto do alvo a rajada usa a potencia do plato: no piso, a 60 mmHg, cada uma
+     * saltava ~7 mmHg na leitura e estourava o pico (bancada 2026-10-31). */
+    float burst_power = (cc->runtime->state == SYSTEM_STATE_STABILIZING) ? hold_power(cc) : floor_power;
 
     if (power >= floor_power) {
         cc->burst_credit_ms = 0.0f;
@@ -571,14 +576,14 @@ static float burst_modulate(ControlCore_t *cc, float power, uint32_t dt_ms)
     }
     if ((power <= 0.0f) || (floor_power <= 0.0f)) {
         cc->burst_credit_ms = 0.0f;
-        return (cc->burst_on_ms > 0u) ? burst_tick(cc, floor_power, dt_ms) : 0.0f;
+        return (cc->burst_on_ms > 0u) ? burst_tick(cc, burst_power, dt_ms) : 0.0f;
     }
 
     cc->burst_credit_ms += (power / floor_power) * (float)dt_ms;
     if ((cc->burst_on_ms == 0u) && (cc->burst_credit_ms >= (float)burst_length_ms(cc))) {
         cc->burst_on_ms = burst_length_ms(cc);
     }
-    return (cc->burst_on_ms > 0u) ? burst_tick(cc, floor_power, dt_ms) : 0.0f;
+    return (cc->burst_on_ms > 0u) ? burst_tick(cc, burst_power, dt_ms) : 0.0f;
 }
 
 /** @brief Regulacao por velocidade + alivio (ver CONTROL_CORE_RATE_*). */
@@ -607,6 +612,9 @@ static void run_rate_regulation(ControlCore_t *cc, const ControlCore_Inputs_t *i
         /* Chegou (ou esta' aliviando): sem bomba e sem acumular integral. */
         cc->rate_integral = 0.0f;
         power = 0.0f;
+        if (relief_on != 0u) {
+            cc->burst_on_ms = 0u; /* a rajada nao briga com a valvula aberta */
+        }
     } else {
         if (t->rate_ti_s > 0.0f) {
             cc->rate_integral += rate_error * dt_s / t->rate_ti_s;
