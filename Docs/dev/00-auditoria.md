@@ -1835,3 +1835,8 @@ inclusive na descida. So' RAM: volta ligada no boot. Sai no release com `CONTROL
 Pedido do usuario: V3 desligada por padrao nos ensaios (fechada tambem na descida) e, ao fim da bateria, "Outro
 paciente" abre o numero do paciente ja' em edicao, sem a tela de Novo Ensaio, que segue igual no menu.
 TODO(BANCADA): sem a V3 a descida conta com V1+V2; repetir a bateria e rever o limite de 3,5 s.
+
+Bateria na coxa com V3 desligada: 8 de 8 NC00. Insuflacao 3,0-5,2 s, descida 0,76-1,95 s, residual 0,8-3,2, pico
+<= 102%. Ate' <5 mmHg: 0,56-1,40 s. A previsao de descida mais lenta sem a V3 estava errada: fechar a V3 tira o ramo
+do manometro do circuito. Causa nao medida isoladamente. TODO(DECISAO): voltar o limite a 2 s (maior valor 1,95 s) e
+avaliar o minimo de 1 s da especificacao, que o firmware nao verifica (ciclo de 0,76 s).
