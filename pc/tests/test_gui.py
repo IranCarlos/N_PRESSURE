@@ -65,6 +65,7 @@ def test_full_cycle_then_history(qapp, window, monkeypatch):
     assert pump(qapp, lambda: window.table.rowCount() == 1)
     assert window.integrity.verdict == sd.INTACT
     assert window.verdict_label.text() == sd.INTACT
+    assert window.issues_table.rowCount() == 0
     window.table.selectRow(0)
     qapp.processEvents()
     assert "T00000001" in window.detail_label.text()

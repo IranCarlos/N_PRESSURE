@@ -162,6 +162,21 @@ static void test_curve_line(void)
     CHECK(strcmp(line, "239.90,-0.3") == 0);
 }
 
+static void test_tail_offset_reaches_end_of_file(void)
+{
+    uint32_t size;
+
+    CHECK(StorageFormat_TailReadOffset(0u, 1024u) == 0u);
+    CHECK(StorageFormat_TailReadOffset(1024u, 1024u) == 0u);
+    for (size = 1025u; size < 1100u; size++) {
+        uint32_t off = StorageFormat_TailReadOffset(size, 1024u);
+
+        CHECK((off % 4u) == 0u);
+        CHECK((off + 1024u) >= size);
+        CHECK(off <= (size - 1021u));
+    }
+}
+
 static void test_fmt_fixed(void)
 {
     char t[FMT_FIXED_LEN];
@@ -302,6 +317,7 @@ int main(void)
     test_find_last_hash();
     test_curve_line();
     test_fmt_fixed();
+    test_tail_offset_reaches_end_of_file();
     test_rec_line_nc05();
     test_rec_line_technical_fault();
     test_index_line();

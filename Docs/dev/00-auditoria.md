@@ -1843,3 +1843,9 @@ avaliar o minimo de 1 s da especificacao, que o firmware nao verifica (ciclo de 
 
 Fim da Fase 9 (2026-10-31): limite de descompressao mantido em 3,5 s por decisao do usuario, que tambem confirmou no
 equipamento a verificacao de calibracao, o teste de vazamento, os sons, a serie de 3 medidas e a edicao do paciente.
+
+Falso ADULTERADO no log (2026-10-31): a correcao de alinhamento de 0b755a7 recuava a leitura do fim do arquivo sem
+aumentar o alcance, e a corrente retomava da penultima linha em ~3 de 4 reboots. Corrigido com
+`StorageFormat_TailReadOffset`. Os elos antigos ficam no log: o app os mostra como "Retomada apos reinicio",
+nao verificaveis. Ressalva: esse padrao tambem aparece se a ultima linha for apagada antes de um boot com o firmware
+novo; nao ha' como distinguir. A aba Integridade lista cada ocorrencia.

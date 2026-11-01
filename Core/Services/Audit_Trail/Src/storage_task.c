@@ -371,9 +371,7 @@ static uint8_t read_tail_hash(const char *path, char *out_hex)
         return 0u;
     }
     size = f_size(&s_read_file);
-    /* Posicao multipla de 4: ver fs_job_read(). */
-    if ((size <= STORAGE_SCAN_BLOCK) ||
-        (f_lseek(&s_read_file, (size - STORAGE_SCAN_BLOCK) & ~(FSIZE_t)3u) == FR_OK)) {
+    if (f_lseek(&s_read_file, StorageFormat_TailReadOffset((uint32_t)size, STORAGE_SCAN_BLOCK)) == FR_OK) {
         if (f_read(&s_read_file, s_scan_buf, STORAGE_SCAN_BLOCK, &n) == FR_OK) {
             found = StorageFormat_FindLastHash((const char *)s_scan_buf, (size_t)n, out_hex);
         }

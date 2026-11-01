@@ -136,6 +136,18 @@ def parse_curve(text: str) -> list[tuple[float, float]]:
     return points
 
 
+@dataclass(frozen=True)
+class Issue:
+    """Uma ocorrencia para mostrar ao usuario: onde, quando, o que e o trecho."""
+
+    source: str
+    line: int
+    when: str
+    kind: str
+    detail: str
+    tampered: bool
+
+
 @dataclass
 class ChainReport:
     """Resultado da verificacao de um arquivo de log."""
@@ -145,6 +157,7 @@ class ChainReport:
     verified: int = 0
     unverifiable: int = 0
     problems: list[str] = field(default_factory=list)
+    issues: list[Issue] = field(default_factory=list)
     last_hash: str = ""
 
     @property
@@ -180,6 +193,12 @@ def verify_log(name: str, text: str, previous_hash: str | None = None) -> tuple[
     report = ChainReport(name)
     records = []
     expected = previous_hash
+    seen: set[str] = set()
+
+    def note(number: int, fields: dict[str, str], kind: str, tampered: bool, line: str) -> None:
+        detail = fields.get("msg") or line[:80]
+        report.issues.append(Issue(name, number, fields["when"][:19].replace("T", " "), kind, detail, tampered))
+
     for number, line in enumerate(text.splitlines(), 1):
         if not line:
             continue
@@ -190,18 +209,28 @@ def verify_log(name: str, text: str, previous_hash: str | None = None) -> tuple[
             # cortada: sem hash nao ha' como conferir, e o proximo elo fica sem referencia
             report.unverifiable += 1
             expected = None
+            note(number, fields, "Linha incompleta", False, line)
         else:
             body, prev, digest = match.groups()
             if hashlib.sha256((prev + body).encode("ascii", "replace")).hexdigest() != digest:
                 report.problems.append(f"linha {number}: conteúdo alterado")
+                note(number, fields, "Conteúdo alterado", True, line)
             elif expected is not None and prev == GENESIS:
                 # firmware antigo recomecava a corrente a cada boot: nao prova nem nega nada
                 report.unverifiable += 1
+                note(number, fields, "Corrente reiniciada", False, line)
+            elif expected is not None and prev != expected and prev in seen:
+                # O firmware retomou de uma linha que continua no arquivo: nada sumiu, mas
+                # este elo nao comprova a sequencia (retomada errada ate' 2026-10-31).
+                report.unverifiable += 1
+                note(number, fields, "Retomada após reinício", False, line)
             elif expected is not None and prev != expected:
                 report.problems.append(f"linha {number}: elo quebrado (linha removida ou inserida)")
+                note(number, fields, "Linha removida ou inserida", True, line)
             else:
                 report.verified += 1
             expected = digest
+            seen.add(digest)
             report.last_hash = digest
         try:
             pressure = float(fields.get("p", "0") or 0)
@@ -225,14 +254,18 @@ def test_hashes(records: list[LogRecord]) -> dict[str, tuple[str, str]]:
 
 
 def verify_test(test_id: str, record: TestRecord | None, curve_bytes: bytes | None,
-                hashes: dict[str, tuple[str, str]]) -> str:
-    """Compara um ensaio com os hashes guardados na corrente de eventos."""
+                hashes: dict[str, tuple[str, str]]) -> tuple[str, str]:
+    """Compara um ensaio com os hashes guardados na corrente de eventos: (veredito, motivo)."""
     known = hashes.get(test_id)
-    if known is None or record is None:
-        return UNVERIFIABLE
+    if known is None:
+        return UNVERIFIABLE, "Sem hash do ensaio no log"
+    if record is None:
+        return UNVERIFIABLE, "Registro do ensaio não encontrado"
     if hashlib.sha256(record.line.encode("ascii", "replace")).hexdigest()[:24] != known[0]:
-        return TAMPERED
+        return TAMPERED, "Registro (.rec) não confere com o log"
     if known[1] != "-":
-        if curve_bytes is None or hashlib.sha256(curve_bytes).hexdigest()[:24] != known[1]:
-            return TAMPERED
-    return INTACT
+        if curve_bytes is None:
+            return TAMPERED, "Curva (.csv) ausente"
+        if hashlib.sha256(curve_bytes).hexdigest()[:24] != known[1]:
+            return TAMPERED, "Curva (.csv) não confere com o log"
+    return INTACT, ""

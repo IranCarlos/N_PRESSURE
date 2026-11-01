@@ -115,6 +115,10 @@ typedef struct {
 
 void StorageFormat_IndexScanFeed(StorageFormat_IndexScan_t *scan, const uint8_t *data, size_t len);
 
+/* Onde comecar a ler `block` bytes para alcancar o fim de um arquivo de `size` bytes
+ * partindo de posicao multipla de 4, exigida pela IDMA do SDMMC. */
+uint32_t StorageFormat_TailReadOffset(uint32_t size, uint32_t block);
+
 /* Procura em `text` o ultimo ";hash=<64 hex>" completo. Devolve 1 e copia em
  * out_hex; 0 se nao houver (linha cortada por firmware antigo). */
 uint8_t StorageFormat_FindLastHash(const char *text, size_t len,

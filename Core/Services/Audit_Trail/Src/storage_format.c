@@ -168,6 +168,13 @@ void StorageFormat_IndexScanFeed(StorageFormat_IndexScan_t *scan, const uint8_t 
     }
 }
 
+uint32_t StorageFormat_TailReadOffset(uint32_t size, uint32_t block)
+{
+    /* Arredonda para cima: para baixo o fim do arquivo ficava de fora, e a corrente
+     * retomava da penultima linha (achado 2026-10-31 no app). */
+    return (size <= block) ? 0u : (((size - block) + 3u) & ~(uint32_t)3u);
+}
+
 static uint8_t is_hex_lower(char c)
 {
     return (((c >= '0') && (c <= '9')) || ((c >= 'a') && (c <= 'f'))) ? 1u : 0u;

@@ -124,16 +124,21 @@ class Archive:
                 report, records = sd.verify_log(f"{kind}/{path.name}", path.read_text("ascii", "replace"), previous)
                 previous = report.last_hash or None
                 result.logs.append(report)
+                result.issues += report.issues
                 if kind == "events":
                     result.records += records
                 else:
                     result.errors += records
         hashes = sd.test_hashes(result.records)
         for entry in self.index():
-            if not entry.hash_ok:
-                result.tests[entry] = sd.TAMPERED
+            if entry.hash_ok:
+                verdict, reason = sd.verify_test(entry.test_id, self.record(entry), self.curve_bytes(entry), hashes)
             else:
-                result.tests[entry] = sd.verify_test(entry.test_id, self.record(entry), self.curve_bytes(entry), hashes)
+                verdict, reason = sd.TAMPERED, "Linha do índice não confere"
+            result.tests[entry] = verdict
+            if verdict != sd.INTACT:
+                result.issues.append(sd.Issue(entry.test_id, 0, f"{entry.when:%Y-%m-%d %H:%M:%S}", reason, entry.nc,
+                                              verdict == sd.TAMPERED))
         return result
 
 
@@ -143,6 +148,7 @@ class IntegrityResult:
     records: list[sd.LogRecord] = field(default_factory=list)
     errors: list[sd.LogRecord] = field(default_factory=list)
     tests: dict[sd.IndexEntry, str] = field(default_factory=dict)
+    issues: list[sd.Issue] = field(default_factory=list)
 
     @property
     def verdict(self) -> str:

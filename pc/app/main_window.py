@@ -35,6 +35,7 @@ TEST_BUTTON = {
 }
 VERDICT_COLORS = {sd.INTACT: OK, sd.TAMPERED: BAD, sd.UNVERIFIABLE: WARN}
 PLOT_SECONDS = 60.0
+ISSUES_MAX_ROWS = 500
 
 pg.setConfigOption("background", "#FFFFFF")
 pg.setConfigOption("foreground", MUTED)
@@ -810,10 +811,16 @@ class MainWindow(QMainWindow):
         self.logs_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.logs_table.verticalHeader().hide()
         self.logs_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
-        self.problems_label = QLabel()
-        self.problems_label.setWordWrap(True)
-        self.problems_label.setStyleSheet(f"color:{BAD}")
-        for widget in (self.verdict_label, self.verdict_detail, self.logs_table, self.problems_label):
+        self.issues_title = QLabel("Ocorrências")
+        self.issues_title.setStyleSheet("font-weight:600")
+        self.issues_table = QTableWidget(0, 5)
+        self.issues_table.setHorizontalHeaderLabels(["Onde", "Linha", "Data e hora", "Ocorrência", "Detalhe"])
+        self.issues_table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.issues_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.issues_table.verticalHeader().hide()
+        self.issues_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        self.logs_table.setMaximumHeight(120)
+        for widget in (self.verdict_label, self.verdict_detail, self.logs_table, self.issues_title, self.issues_table):
             layout.addWidget(widget)
         return tab
 
@@ -835,5 +842,17 @@ class MainWindow(QMainWindow):
                 if col == 4:
                     item.setForeground(QColor(VERDICT_COLORS[report.verdict]))
                 self.logs_table.setItem(i, col, item)
-        problems = [f"{r.name}, {x}" for r in result.logs for x in r.problems[:5]]
-        self.problems_label.setText("\n".join(problems[:10]))
+        # adulteracao primeiro; a lista pode ser longa em registros de firmware antigo
+        issues = sorted(result.issues, key=lambda i: not i.tampered)
+        shown = issues[:ISSUES_MAX_ROWS]
+        self.issues_title.setText(f"Ocorrências ({len(issues)})" if len(shown) == len(issues)
+                                  else f"Ocorrências ({len(shown)} de {len(issues)})")
+        self.issues_table.setRowCount(len(shown))
+        for i, issue in enumerate(shown):
+            values = [issue.source, str(issue.line) if issue.line else "", issue.when, issue.kind, issue.detail]
+            for col, value in enumerate(values):
+                item = QTableWidgetItem(value)
+                if col == 3:
+                    item.setForeground(QColor(BAD if issue.tampered else WARN))
+                self.issues_table.setItem(i, col, item)
+        self.issues_table.resizeColumnsToContents()

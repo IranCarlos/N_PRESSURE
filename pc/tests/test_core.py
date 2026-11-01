@@ -273,3 +273,43 @@ def test_sync_replaces_a_bad_local_copy(tmp_path):
     archive.sync(dev)
     dev.close()
     assert archive.verify().verdict == sd.INTACT
+
+
+def chain(*links):
+    out, digests = [], []
+    for i, ref in enumerate(links):
+        prev = sd.GENESIS if ref is None else digests[ref]
+        body = f'2026-10-31T10:00:{i:02d}-03:00;seq={i};lvl=EVT;code=;test=;state=X;p=1.0;msg=evento {i};prev={prev}'
+        digest = hashlib.sha256((prev + body).encode()).hexdigest()
+        out.append(f'{body};hash={digest}')
+        digests.append(digest)
+    return chr(10).join(out) + chr(10)
+
+
+def test_resume_from_older_line_is_not_tampering():
+    report, _ = sd.verify_log('x', chain(None, 0, 1, 1))  # 4a linha retomou da 2a, e a 3a continua la'
+    assert report.verdict == sd.UNVERIFIABLE and not report.problems
+    issue = report.issues[0]
+    assert issue.line == 4 and issue.kind == 'Retomada após reinício' and not issue.tampered
+    assert issue.when == '2026-10-31 10:00:03' and issue.detail == 'evento 3'
+
+
+def test_removed_line_points_where():
+    lines = chain(None, 0, 1, 2).splitlines()
+    report, _ = sd.verify_log('x', chr(10).join(lines[:1] + lines[2:]))
+    assert report.verdict == sd.TAMPERED
+    issue = report.issues[0]
+    assert issue.line == 2 and issue.tampered and issue.detail == 'evento 2'
+
+
+def test_edited_line_points_where():
+    text = chain(None, 0, 1).replace('msg=evento 1', 'msg=evento 9')
+    report, _ = sd.verify_log('x', text)
+    assert report.issues[0].kind == 'Conteúdo alterado' and report.issues[0].line == 2
+
+
+def test_tampered_test_says_what(tmp_path):
+    archive = synced_archive(tmp_path)
+    tamper(archive.local('/tests/2026/10/T00000001.csv'), b'100.0', b'101.0')
+    issue = next(i for i in archive.verify().issues if i.tampered)
+    assert issue.source == 'T00000001' and 'Curva' in issue.kind
