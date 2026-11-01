@@ -14,15 +14,16 @@
  *          | y=40  [ Unidade                    [ mmHg  ] ]    |
  *          | y=74  [ Som do ensaio   [Testar] [ Ligado ]  ]    |
  *          | y=108 [ Som do encoder           [ Ligado ]  ]    |
- *          | y=142 [ Verificar calibracao (manometro na V3) ]  |
+ *          | y=142 [ V3 nos ensaios           [ Ligada ]  ]    |
+ *          | y=176 [ Verificar calibracao (manometro na V3) ]  |
  *          |       [ Leitura, situacao                        ] |
  *          |       [ Pressao de teste [spin] [Ir]             ] |
  *          |       [ Manometro [spin] [Capturar P1]           ] |
  *          |       [ [Zerar] [Parar] [Verificar]              ] |
- *          | y=334 [ Teste de vazamento: situacao, queda      ] |
- *          | y=416 [ Data/Hora DD MM AAAA HH MM  [Aplicar]    ] |
- *          | y=508 [ Operador ativo (OP)            [ 03 ]    ] |
- *          | y=544 [ Informacoes (so' leitura)                ] |
+ *          | y=368 [ Teste de vazamento: situacao, queda      ] |
+ *          | y=450 [ Data/Hora DD MM AAAA HH MM  [Aplicar]    ] |
+ *          | y=542 [ Operador ativo (OP)            [ 03 ]    ] |
+ *          | y=578 [ Informacoes (so' leitura)                ] |
  *          +---------------------------------------------------+
  *   y=206  [ Teste de Vazamento 152x28 ]  [ < Voltar 152x28 ]  rodape fixo
  *
@@ -52,6 +53,8 @@ static lv_obj_t * s_btn_buzzer_toggle;
 static lv_obj_t * s_lbl_buzzer_toggle;
 static lv_obj_t * s_btn_click_toggle;
 static lv_obj_t * s_lbl_click_toggle;
+static lv_obj_t * s_btn_v3_toggle;
+static lv_obj_t * s_lbl_v3_toggle;
 
 static lv_obj_t * s_lbl_cal_reading;
 static lv_obj_t * s_lbl_cal_state;
@@ -115,6 +118,7 @@ static void ui_unit_changed_cb(lv_event_t * e);
 static void ui_buzzer_toggle_event_cb(lv_event_t * e);
 static void ui_buzzer_test_event_cb(lv_event_t * e);
 static void ui_click_toggle_event_cb(lv_event_t * e);
+static void ui_v3_toggle_event_cb(lv_event_t * e);
 static void ui_cal_zero_event_cb(lv_event_t * e);
 static void ui_cal_go_event_cb(lv_event_t * e);
 static void ui_cal_stop_event_cb(lv_event_t * e);
@@ -134,7 +138,7 @@ void UI_SettingsScreen_Init(UI_SettingsScreen_BackRequestCb_t back_cb)
 
 void UI_SettingsScreen_Show(void)
 {
-    static lv_obj_t * focusables[21];
+    static lv_obj_t * focusables[22];
     HMI_EncoderGroupConfig_t group_cfg;
     uint16_t i = 0U;
 
@@ -153,6 +157,7 @@ void UI_SettingsScreen_Show(void)
     focusables[i++] = s_btn_buzzer_test;
     focusables[i++] = s_btn_buzzer_toggle;
     focusables[i++] = s_btn_click_toggle;
+    focusables[i++] = s_btn_v3_toggle;
     focusables[i++] = s_spin_cal_target;
     focusables[i++] = s_btn_cal_go;
     focusables[i++] = s_spin_cal_ref;
@@ -218,6 +223,7 @@ static void ui_create_screen(void)
     lv_obj_t * box;
 
     s_lbl_click_toggle = NULL; /* o objeto da abertura anterior ja' nao existe */
+    s_lbl_v3_toggle = NULL;
     s_screen = lv_obj_create(NULL);
     UiTheme_StyleScreen(s_screen);
 
@@ -272,18 +278,25 @@ static void ui_create_screen(void)
     s_lbl_click_toggle = lv_obj_get_child(s_btn_click_toggle, 0);
     ui_set_buzzer_label();
 
-    ui_create_calibration(142);
-    ui_create_leak_panel(334);
-    ui_create_datetime(416);
+    /* TODO(RELEASE): opcao de desenvolvimento, sai com CONTROL_CORE_V3_FOLLOWS_TEST. */
+    box = ui_row_box(142, "V3 nos ensaios");
+    s_btn_v3_toggle = UiW_Button(box, 84, 22, "", ui_v3_toggle_event_cb);
+    lv_obj_align(s_btn_v3_toggle, LV_ALIGN_RIGHT_MID, -6, 0);
+    s_lbl_v3_toggle = lv_obj_get_child(s_btn_v3_toggle, 0);
+    ui_set_buzzer_label();
+
+    ui_create_calibration(176);
+    ui_create_leak_panel(368);
+    ui_create_datetime(450);
 
     /* --- Operador --- */
-    box = ui_row_box(508, "Operador ativo (OP)");
+    box = ui_row_box(542, "Operador ativo (OP)");
     s_spin_operator = UiW_Spinbox(box, 70, 24, 0, 99, 2u, 1, s_content);
     lv_obj_align(s_spin_operator, LV_ALIGN_RIGHT_MID, -4, 0);
     lv_spinbox_set_value(s_spin_operator, (int32_t)UiSession_Get()->operator_id);
     lv_obj_add_event_cb(s_spin_operator, ui_operator_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-    ui_create_info(544);
+    ui_create_info(578);
 
     /* --- Rodape fixo --- */
     s_btn_leak_test = UiW_Button(s_screen, 152, 28, "Teste de Vazamento", ui_leak_test_btn_event_cb);
@@ -433,6 +446,9 @@ static void ui_set_buzzer_label(void)
     if (s_lbl_click_toggle != NULL) {
         lv_label_set_text_static(s_lbl_click_toggle,
                                  (UiSession_Get()->click_enabled != 0u) ? "Ligado" : "Mudo");
+    }
+    if (s_lbl_v3_toggle != NULL) {
+        lv_label_set_text_static(s_lbl_v3_toggle, UiBackend_GetV3Follow() ? "Ligada" : "Desligada");
     }
 }
 
@@ -590,6 +606,13 @@ static void ui_click_toggle_event_cb(lv_event_t * e)
 {
     LV_UNUSED(e);
     UiSession_SetClickEnabled((uint8_t)((UiSession_Get()->click_enabled != 0u) ? 0u : 1u));
+    ui_set_buzzer_label();
+}
+
+static void ui_v3_toggle_event_cb(lv_event_t * e)
+{
+    LV_UNUSED(e);
+    UiBackend_SetV3Follow(!UiBackend_GetV3Follow());
     ui_set_buzzer_label();
 }
 

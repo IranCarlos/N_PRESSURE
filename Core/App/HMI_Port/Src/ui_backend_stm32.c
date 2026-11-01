@@ -483,6 +483,16 @@ void UiBackend_GetLeakStatus(UiLeakStatus_t * out)
     }
 }
 
+void UiBackend_SetV3Follow(bool enabled)
+{
+    ControlLoop_SetV3Follow(enabled ? 1u : 0u);
+}
+
+bool UiBackend_GetV3Follow(void)
+{
+    return (ControlLoop_GetV3Follow() != 0u);
+}
+
 void UiBackend_SetClickSound(bool enabled)
 {
     s_click_sound = enabled;

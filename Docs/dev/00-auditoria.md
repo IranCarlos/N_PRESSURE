@@ -1828,3 +1828,6 @@ nao esta' no tour do simulador.
 
 Limite de descompressao: 2 s -> 3,5 s, so' o maximo, decisao do usuario (2026-10-31). Vale para a fase piloto.
 O documento-fonte da Trilha ainda diz 1 a 2 s. Ensaios ja' gravados mantem o NC da epoca.
+
+Ajustes: opcao "V3 nos ensaios" (usuario). Ligada e' o padrao; desligada mantem a V3 fechada em todo o ensaio,
+inclusive na descida. So' RAM: volta ligada no boot. Sai no release com `CONTROL_CORE_V3_FOLLOWS_TEST`.

@@ -124,6 +124,7 @@ static struct {
     uint32_t last_update_cycles;
     uint32_t max_jitter_cycles; /**< maior |delta - periodo esperado| ja' visto */
     uint32_t v3_linger_ms;      /**< ver ControlCore_V3Follow() */
+    uint8_t  v3_follow_off;     /**< 1 = V3 nao acompanha o ensaio */
     uint32_t max_jitter_tick;   /**< HAL_GetTick() do pior caso */
     uint32_t max_jitter_state;  /**< SystemState_t no pior caso */
     uint32_t max_exec_cycles;   /**< maior duracao de ControlLoop_Update() */
@@ -468,7 +469,9 @@ static void control_loop_step(void) {
 
         set_pump_power(out.pump_power);
 #if CONTROL_CORE_V3_FOLLOWS_TEST
-        if (ControlCore_V3Follow(s_control.runtime_data->state, in.dt_ms, &s_control.v3_linger_ms) != 0u) {
+        if (s_control.v3_follow_off != 0U) {
+            out.valve3_open = 0u; /* opcao dos Ajustes: fechada no ensaio e na descida */
+        } else if (ControlCore_V3Follow(s_control.runtime_data->state, in.dt_ms, &s_control.v3_linger_ms) != 0u) {
             out.valve3_open = 1u;
         }
 #endif
@@ -589,6 +592,17 @@ void ControlLoop_StartLeakTest(void) {
         PressureTarget_Start(&s_control.service, target);
         s_control.runtime_data->state = SYSTEM_STATE_LEAK_TEST;
     }
+}
+
+void ControlLoop_SetV3Follow(uint8_t enabled) {
+    s_control.v3_follow_off = (uint8_t)((enabled != 0U) ? 0U : 1U);
+    if (enabled == 0U) {
+        s_control.v3_linger_ms = 0U;
+    }
+}
+
+uint8_t ControlLoop_GetV3Follow(void) {
+    return (uint8_t)((s_control.v3_follow_off != 0U) ? 0U : 1U);
 }
 
 void ControlLoop_GetLeakStatus(ControlLoop_LeakStatus_t *out) {

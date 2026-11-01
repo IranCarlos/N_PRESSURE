@@ -130,6 +130,8 @@ void UiBackend_SetUnit(UiUnit_t unit);
 bool UiBackend_SetDateTime(const UiDateTime_t * dt);
 void UiBackend_BuzzerBeep(uint16_t freq_hz, uint16_t duration_ms);
 void UiBackend_SetClickSound(bool enabled); /* clique do encoder */
+void UiBackend_SetV3Follow(bool enabled);   /* V3 aberta durante os ensaios */
+bool UiBackend_GetV3Follow(void);
 
 /* Grava o registro do ultimo ciclo devolvido por UiBackend_PollCycleResult()
  * (cartao SD / trilha de auditoria) com a identificacao da sessao. */

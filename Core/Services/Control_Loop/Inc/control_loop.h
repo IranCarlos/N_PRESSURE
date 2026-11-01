@@ -173,6 +173,10 @@ typedef struct {
 
 void ControlLoop_GetLeakStatus(ControlLoop_LeakStatus_t *out);
 
+/* TODO(RELEASE): sai junto com CONTROL_CORE_V3_FOLLOWS_TEST. So' RAM: volta ligada no boot. */
+void ControlLoop_SetV3Follow(uint8_t enabled);
+uint8_t ControlLoop_GetV3Follow(void);
+
 /** @brief Registra o ensaio em curso como cancelado (NC07). Nao desinfla sozinho:
  *         chamar antes de levantar bt_user_pressed. */
 void ControlLoop_RequestCancel(void);

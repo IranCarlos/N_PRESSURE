@@ -55,6 +55,7 @@ static bool s_leak_holding;
 /* calibracao */
 static uint8_t s_cal_pump_pct;
 static bool s_service_on;
+static bool s_v3_follow = true;
 static uint32_t s_service_tick;
 static bool s_leak_ran;
 static float s_cal_offset_mmhg;
@@ -457,6 +458,16 @@ void UiBackend_GetLeakStatus(UiLeakStatus_t * out)
         out->phase = s_leak_ran ? UI_LEAK_PASSED : UI_LEAK_NONE;
         out->remaining_ms = 0u;
     }
+}
+
+void UiBackend_SetV3Follow(bool enabled)
+{
+    s_v3_follow = enabled;
+}
+
+bool UiBackend_GetV3Follow(void)
+{
+    return s_v3_follow;
 }
 
 void UiBackend_SetClickSound(bool enabled)
