@@ -299,6 +299,9 @@ static void plateau_track_band(ControlCore_t *cc, float pressure_mmhg, uint32_t 
         if (mean_mmhg > cc->cycle.plateau_max_mmhg) {
             cc->cycle.plateau_max_mmhg = mean_mmhg;
         }
+        if (mean_mmhg > cc->cycle.peak_mmhg) {
+            cc->cycle.peak_mmhg = mean_mmhg;
+        }
     }
 }
 
@@ -1142,7 +1145,10 @@ void ControlCore_Step(ControlCore_t *cc, const ControlCore_Inputs_t *in,
         if (rt->state != SYSTEM_STATE_IDLE) {
             cc->cycle.total_elapsed_ms += in->dt_ms;
 
-            if (rt->pressure_display > cc->cycle.peak_mmhg) {
+            /* No plato o pico vem da media (plateau_stats_feed): o pulso arterial nao
+             * reprova o ciclo, decisao do usuario. P_MAX_ABS segue na leitura bruta. */
+            if (((rt->state != SYSTEM_STATE_STABILIZED) || (cc->tuning.rate_ctrl_enable == 0u)) &&
+                (rt->pressure_display > cc->cycle.peak_mmhg)) {
                 cc->cycle.peak_mmhg = rt->pressure_display;
             }
 

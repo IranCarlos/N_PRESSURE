@@ -1799,3 +1799,8 @@ Calibracao refeita (21:27): escala 0,97810, offset +0,82 mmHg, 5 pontos, residuo
 NC06 (residual 7-8) vem de `p_segura`=10. Com seg.p_segura=4,5 em RAM, 3 ciclos a 100 mmHg, plato 3 s: NC00 nos 3,
 descida 2,00/1,68/1,66 s, residual 3,7-3,9. Valor nao gravado. Margem pequena no 1o ciclo (1999 ms) e zero a'
 0,5-0,9 mmHg: deriva de zero acima de 4,5 impediria terminar a descida (E004). TODO(DECISAO).
+
+Bateria na perna (usuario confirmou o posicionamento), seg.p_segura=4,5 gravado, calibracao de 21:27:
+60 NC02, 80/100/120 NC00; insuflacao 3,1-3,8 s, descida 0,8-0,9 s, residual 2,2-3,4. Bem mais rapido que a
+bateria anterior na perna (ins 9-14 s): causa nao medida. Pico no plato passou a usar a media de 1,2 s.
+60 mmHg segue NC02 (3 de 3): pico 63,1-67,1 antes do plato.
