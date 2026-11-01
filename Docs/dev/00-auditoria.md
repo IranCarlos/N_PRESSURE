@@ -1794,3 +1794,8 @@ Vazao, de ~95 mmHg, tempo ate' 50 e 20 mmHg: V1 0,71/3,04 s; V2 0,73/3,23 s; V3 
 V1+V2+V3 0,21/0,99 s. A descida ja' abre as tres (telemetria valvulas=7). V3 aliviou sozinha aqui, ao contrario
 do teste com V3 aberta a 100 mmHg (0,54 mmHg/s): confirmar como estava a saida da V3 em cada montagem.
 Nao trocar V1/V2 por NF: sem energia a pressao ficaria presa; NA alivia. TODO(DECISAO).
+
+Calibracao refeita (21:27): escala 0,97810, offset +0,82 mmHg, 5 pontos, residuo 0,90; autoteste ok, descida 1,0 s.
+NC06 (residual 7-8) vem de `p_segura`=10. Com seg.p_segura=4,5 em RAM, 3 ciclos a 100 mmHg, plato 3 s: NC00 nos 3,
+descida 2,00/1,68/1,66 s, residual 3,7-3,9. Valor nao gravado. Margem pequena no 1o ciclo (1999 ms) e zero a'
+0,5-0,9 mmHg: deriva de zero acima de 4,5 impediria terminar a descida (E004). TODO(DECISAO).
