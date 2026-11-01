@@ -1849,3 +1849,8 @@ aumentar o alcance, e a corrente retomava da penultima linha em ~3 de 4 reboots.
 `StorageFormat_TailReadOffset`. Os elos antigos ficam no log: o app os mostra como "Retomada apos reinicio",
 nao verificaveis. Ressalva: esse padrao tambem aparece se a ultima linha for apagada antes de um boot com o firmware
 novo; nao ha' como distinguir. A aba Integridade lista cada ocorrencia.
+
+Instalador do app (2026-10-31): `pc/installer/build.py` gera `nPressure-Setup-0.9.0.exe` (46 MB, PyInstaller + Inno
+Setup), sem exigir administrador, Windows 10 1809 ou mais novo, 64 bits. Instalar, `--check` com ambiente reduzido e
+desinstalar passaram nesta maquina; chave DEV ausente nos 314 arquivos. TODO(BANCADA): testar em Windows limpo
+(Sandbox ativado, pendente de reinicio) e com o equipamento. Executavel sem assinatura digital: SmartScreen avisa.

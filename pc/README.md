@@ -35,3 +35,16 @@ A cópia local dos registros fica em `%APPDATA%\nPressure\<número de série>`.
 
 A corrente usa SHA-256 sem chave: detecta alteração acidental ou parcial, mas quem conhece o formato
 pode recalcular um arquivo inteiro.
+
+## Gerar o instalador
+
+Com o mesmo ambiente, e o Inno Setup 6 instalado nesta máquina (`winget install JRSoftware.InnoSetup`):
+
+```bash
+python installer/build.py
+```
+
+O resultado é `build/installer/nPressure-Setup-<versao>.exe`. A versão fica em `app/__init__.py`. O pacote traz
+Python, Qt e bibliotecas, e o PC de destino usa o driver USB do próprio Windows 10 ou 11. A chave DEV não entra
+no pacote. `nPressure.exe --check <arquivo>` testa o programa instalado. O desinstalador mantém os registros
+baixados em `%APPDATA%\nPressure`.
