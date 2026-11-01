@@ -56,7 +56,9 @@ typedef enum {
 #define CYCLE_PLATEAU_BAND_RATIO    (0.02f)  /* banda do plato: alvo * (1 +- 0.02) */
 #define CYCLE_INFLATE_TIME_MAX_S    (10.0f)
 #define CYCLE_PLATEAU_TIME_MAX_S    (10.0f)
-#define CYCLE_DEFLATE_TIME_MAX_S    (2.0f)
+/* 3,5 s (antes 2 s): decisao do usuario, 2026-10-31. Na coxa a descida levou 2,2 a
+ * 3,1 s; 2 s reprovava praticamente todo ensaio. */
+#define CYCLE_DEFLATE_TIME_MAX_S    (3.5f)
 #define CYCLE_RESIDUAL_MAX_MMHG     (5.0f)   /* residual < 5 mmHg passa */
 
 typedef struct {

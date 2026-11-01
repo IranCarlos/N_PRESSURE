@@ -197,7 +197,7 @@ static void test_rec_line_nc05(void)
     info.metrics.plateau_mean_mmhg = 99.8f; info.metrics.plateau_min_mmhg = 99.2f;
     info.metrics.plateau_max_mmhg = 100.4f;
     info.metrics.inflate_time_s = 3.2f; info.metrics.plateau_time_s = 7.0f;
-    info.metrics.deflate_time_s = 2.1f; info.metrics.residual_mmhg = 1.2f;
+    info.metrics.deflate_time_s = 3.6f; info.metrics.residual_mmhg = 1.2f;
 
     nc = StorageFormat_BuildRecLine(&info, line, sizeof(line));
     printf("  [rec_nc05] %s\n", line);

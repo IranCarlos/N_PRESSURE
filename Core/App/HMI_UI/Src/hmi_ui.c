@@ -205,13 +205,6 @@ static bool ui_cycle_active(void)
            (state == UI_STATE_STABILIZED);
 }
 
-/* Vale como medida o ensaio que chegou ao fim. Cancelado (NC07) ou com falha tecnica
- * (NC08) repete a mesma medida. Fora de faixa conta e fica registrado com seu NC. */
-static bool ui_measure_counts(const UiCycleResult_t * result)
-{
-    return (strcmp(result->nc_code, "NC07") != 0) && (strcmp(result->nc_code, "NC08") != 0);
-}
-
 static void ui_poll_popups(void)
 {
     uint16_t current_error = UiBackend_GetLastError();
@@ -247,7 +240,7 @@ static void ui_poll_popups(void)
         /* O ciclo do registro e' a medida do paciente (C1 a C3). */
         UiBackend_SubmitCycleRecord(session->operator_id, session->participant_id,
                                     (uint16_t)session->measure);
-        s_pending_step = UiSession_SeriesOnResult(ui_measure_counts(&result));
+        s_pending_step = UiSession_SeriesOnResult(result.conforme); /* so' NC00 conta */
         s_pending_result = result;
         s_result_pending = true;
     }

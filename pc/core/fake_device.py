@@ -377,7 +377,7 @@ class FakeDevice:
     def _finish(self) -> None:
         c = self._cycle
         c["t_def"] = c["phase_t"]
-        nc = "NC07" if c["aborted"] else ("NC05" if c["t_def"] > 2.0 else "NC00")
+        nc = "NC07" if c["aborted"] else ("NC05" if c["t_def"] > 3.5 else "NC00")
         self.card.store_test(datetime.now(), self.setpoint, c["peak"], self.setpoint, c["t_inf"], c["t_plat"],
                              c["t_def"], self.pressure, nc, self.operator, self.participant, c["curve"])
         self._event(p.EVT_TEST_DONE, struct.pack("<fffIII", self.setpoint, c["peak"], self.pressure,

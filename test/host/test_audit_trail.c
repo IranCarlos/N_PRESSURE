@@ -128,7 +128,7 @@ static void test_cycle_nc05_example(void)
     CycleRecord_Metrics_t m = {
         .setpoint_mmhg = 100.0f, .peak_mmhg = 100.4f,
         .plateau_mean_mmhg = 99.8f, .plateau_min_mmhg = 99.2f, .plateau_max_mmhg = 100.4f,
-        .inflate_time_s = 3.2f, .plateau_time_s = 7.0f, .deflate_time_s = 2.1f,
+        .inflate_time_s = 3.2f, .plateau_time_s = 7.0f, .deflate_time_s = 3.6f,
         .residual_mmhg = 1.2f, .aborted_by_operator = 0u, .technical_fault = 0u,
     };
     CHECK(CycleRecord_Evaluate(&m) == CYCLE_NC05_DESCOMPRESSAO_FORA_FAIXA);

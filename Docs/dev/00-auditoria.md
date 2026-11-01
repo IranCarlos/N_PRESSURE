@@ -1821,7 +1821,10 @@ Pedidos do usuario na bancada. `pressure_target.c` traz para o firmware a rotina
 - Vazamento: veredito no firmware. Sai APROVADO/REPROVADO so' com a medida; pedal ou falha = interrompido. O PID
   antigo foi removido. Padrao 100 mmHg, 10 s, 8 mmHg gravado na EEPROM.
 - Sons: status do ensaio e encoder independentes. Erro e inicio pelo PC tocam sempre.
-- Serie: `measure` vira o ciclo C1 a C3 do registro. NC07 e NC08 repetem a medida; demais NC contam. Na 3a, Refazer
+- Serie: `measure` vira o ciclo C1 a C3 do registro. So' NC00 conta (usuario); os demais repetem a medida. Na 3a, Refazer
   bateria ou Outro paciente. Pedal com a pergunta aberta refaz a bateria.
 Testado no host e no simulador. TODO(BANCADA): tudo isto no equipamento, sobretudo V3 e fim da serie, cuja tela
 nao esta' no tour do simulador.
+
+Limite de descompressao: 2 s -> 3,5 s, so' o maximo, decisao do usuario (2026-10-31). Vale para a fase piloto.
+O documento-fonte da Trilha ainda diz 1 a 2 s. Ensaios ja' gravados mantem o NC da epoca.
