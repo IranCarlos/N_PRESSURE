@@ -24,6 +24,7 @@ from core.device import DeviceError
 BAD, OK, WARN, MUTED = "#B3261E", "#1E7B4F", "#9A6700", "#5B6875"
 SCOPE_RATES = (50, 100, 200, 500, 1000)
 SCOPE_POINTS = 10000
+CAL_ZERO_MAX_MMHG = 3.0
 
 
 def stop_button(text: str = "Parar") -> QPushButton:
@@ -412,6 +413,7 @@ class DevPanel(QTabWidget):
         self.cal_log.setReadOnly(True)
         layout.addWidget(self.cal_log, 1)
         self._cal_link: d.ManualLink | None = None
+        self._cal_refs: list[float] = []
         self._cal_update(False)
         return tab
 
@@ -437,6 +439,7 @@ class DevPanel(QTabWidget):
 
         def started(_) -> None:
             self._cal_link = link
+            self._cal_refs = []
             self._cancel.clear()
             self.cal_log.setPlainText("Calibração iniciada. Válvulas abertas: o primeiro ponto pode ser o zero.")
             self._cal_update(True)
@@ -473,6 +476,7 @@ class DevPanel(QTabWidget):
         reference = self.cal_ref.value()
 
         def done(point: d.CalPoint) -> None:
+            self._cal_refs.append(reference)
             self.cal_log.appendPlainText(f"Ponto {point.count}: referência {reference:.1f}, sensor {point.reading:.1f} mmHg, "
                                          f"erro atual {point.error:+.2f} mmHg")
 
@@ -482,6 +486,12 @@ class DevPanel(QTabWidget):
         self.window_.run(lambda: self.session.cal_point(reference), done, failed)
 
     def _cal_apply(self) -> None:
+        # Sem ponto em zero a reta so' vale na faixa medida: a primeira calibracao real
+        # ficou boa de 50 a 150 mmHg e gravou +5,2 mmHg com o circuito vazio.
+        if not any(reference <= CAL_ZERO_MAX_MMHG for reference in self._cal_refs):
+            self.cal_log.appendPlainText("Falta o ponto em zero: com as válvulas abertas, capture a leitura 0. Nada foi gravado.")
+            return
+
         def done(result: d.CalResult) -> None:
             text = (f"{result.count} pontos, faixa {result.span:.0f} mmHg: escala {result.scale:.5f}, "
                     f"offset {result.offset:+.2f} mmHg, resíduo máximo {result.residual:.2f} mmHg.")

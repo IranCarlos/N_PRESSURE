@@ -225,3 +225,15 @@ def test_disconnect_with_manual_on_leaves_device_safe(qapp, dev_window, monkeypa
     assert pump(qapp, lambda: fake.pump == 30)
     w._disconnect()
     assert pump(qapp, lambda: fake.state == p.ST_IDLE and fake.pump == 0)
+
+
+def test_calibration_needs_zero_point(qapp, dev_window):
+    w = dev_window
+    w._login(KEY.hex())
+    assert pump(qapp, lambda: w.dev_panel is not None)
+    panel = w.dev_panel
+    panel._cal_refs = [50.0, 100.0, 150.0]
+    panel._cal_apply()
+    pump(qapp, lambda: False, 0.3)
+    assert 'Falta o ponto em zero' in panel.cal_log.toPlainText()
+    assert w.fake.cal_offset == 0.0

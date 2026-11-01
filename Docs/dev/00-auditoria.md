@@ -1786,3 +1786,11 @@ Manometro: resolucao 2 mmHg, escala 300 mmHg; classe de exatidao nao informada.
 Ciclo 80 mmHg: V3 ok (10,00 s apos a descida), mas NC05 (2,38 s) e plato instavel: 80 -> 73,6 em 3,2 s,
 reentrada em INFLATING e pulsos de V2 de 30 ms tirando ~7 mmHg. Um ciclo so', montagem nova: repetir antes
 de concluir. TODO(BANCADA).
+
+Calibracao real (2026-10-31 21:04): escala 0,94241, offset +5,23 mmHg, 4 pontos, residuo 0,52. Linear na faixa,
+mas o circuito vazio passou a ler 5,2 mmHg: autoteste reprova ZERO, residual nao fica abaixo de 5 e a descida
+termina mais tarde (100 mmHg: 2,8 -> 3,8 s, dois ciclos). O app agora exige ponto em zero. Coeficientes nao alterados.
+Vazao, de ~95 mmHg, tempo ate' 50 e 20 mmHg: V1 0,71/3,04 s; V2 0,73/3,23 s; V3 1,11/4,27 s; V1+V2 0,33/1,46 s;
+V1+V2+V3 0,21/0,99 s. A descida ja' abre as tres (telemetria valvulas=7). V3 aliviou sozinha aqui, ao contrario
+do teste com V3 aberta a 100 mmHg (0,54 mmHg/s): confirmar como estava a saida da V3 em cada montagem.
+Nao trocar V1/V2 por NF: sem energia a pressao ficaria presa; NA alivia. TODO(DECISAO).
