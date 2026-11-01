@@ -28,6 +28,7 @@
 #include "stm32h7xx_hal.h"
 #include "system_types.h"
 #include "control_core.h" /* ControlCore_Error_t (ver ControlLoop_GetLastError) */
+#include "pressure_target.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -146,6 +147,31 @@ ControlCore_TuningConfig_t* ControlLoop_GetTuningConfig(void);
  * Muda o estado do sistema para SYSTEM_STATE_INFLATING.
  */
 void ControlLoop_StartInflation(void);
+
+/* Modo de servico (so' em CONFIG): vai a' pressao com a V3 aberta para o manometro.
+ * 0 mmHg abre tudo. Parar deixa V3 aberta mais um pouco para esvaziar a linha. */
+void ControlLoop_ServiceGoTo(float target_mmhg);
+void ControlLoop_ServiceStop(void);
+PressureTarget_State_t ControlLoop_ServiceState(void);
+
+typedef enum {
+    CONTROL_LEAK_NONE = 0,
+    CONTROL_LEAK_RISING,
+    CONTROL_LEAK_OBSERVING,
+    CONTROL_LEAK_PASSED,
+    CONTROL_LEAK_FAILED,
+    CONTROL_LEAK_ABORTED
+} ControlLoop_LeakPhase_t;
+
+typedef struct {
+    ControlLoop_LeakPhase_t phase;
+    uint32_t remaining_ms;
+    float    start_mmhg;
+    float    end_mmhg;
+    uint8_t  held;
+} ControlLoop_LeakStatus_t;
+
+void ControlLoop_GetLeakStatus(ControlLoop_LeakStatus_t *out);
 
 /** @brief Registra o ensaio em curso como cancelado (NC07). Nao desinfla sozinho:
  *         chamar antes de levantar bt_user_pressed. */

@@ -190,9 +190,9 @@ void EEPROM_Storage_LoadDefaults(SystemConfig_t *cfg)
     cfg->stabilization.band_mmhg = 3.0f;
     cfg->stabilization.time_ms = 1000u;
 
-    cfg->leak_test.target_mmhg = 180.0f;
-    cfg->leak_test.hold_time_ms = 30000u;
-    cfg->leak_test.max_drop_mmhg = 5.0f;
+    cfg->leak_test.target_mmhg = 100.0f;
+    cfg->leak_test.hold_time_ms = 10000u;
+    cfg->leak_test.max_drop_mmhg = 8.0f;
     cfg->leak_test.reach_timeout_ms = 20000u;
 
     cfg->crc32 = eeprom_cfg_crc32(cfg);

@@ -54,6 +54,9 @@ static bool s_leak_holding;
 
 /* calibracao */
 static uint8_t s_cal_pump_pct;
+static bool s_service_on;
+static uint32_t s_service_tick;
+static bool s_leak_ran;
 static float s_cal_offset_mmhg;
 
 static void mock_set_state(UiState_t st)
@@ -427,14 +430,44 @@ void UiBackend_CalZero(void)
     s_cal_offset_mmhg = -(s_pressure * 1.04f);
 }
 
-void UiBackend_CalSetPumpPct(uint8_t pct)
+void UiBackend_ServiceGoTo(float mmhg)
 {
-    s_cal_pump_pct = (pct > 100u) ? 100u : pct;
+    s_cal_pump_pct = (uint8_t)(mmhg / 3.0f);
+    s_service_tick = SDL_GetTicks();
+    s_service_on = true;
+}
+
+UiServiceState_t UiBackend_ServiceState(void)
+{
+    if (!s_service_on) {
+        return UI_SERVICE_IDLE;
+    }
+    return ((SDL_GetTicks() - s_service_tick) < 3000u) ? UI_SERVICE_MOVING : UI_SERVICE_STABLE;
+}
+
+void UiBackend_GetLeakStatus(UiLeakStatus_t * out)
+{
+    out->held = true;
+    out->drop_mmhg = 1.5f;
+    out->remaining_ms = MOCK_LEAK_HOLD_MS / 2u;
+    if (s_state == UI_STATE_LEAK_TEST) {
+        out->phase = s_leak_holding ? UI_LEAK_OBSERVING : UI_LEAK_RISING;
+        s_leak_ran = true;
+    } else {
+        out->phase = s_leak_ran ? UI_LEAK_PASSED : UI_LEAK_NONE;
+        out->remaining_ms = 0u;
+    }
+}
+
+void UiBackend_SetClickSound(bool enabled)
+{
+    printf("[mock] clique do encoder: %s\n", enabled ? "ligado" : "mudo");
 }
 
 void UiBackend_CalAbort(void)
 {
     s_cal_pump_pct = 0u;
+    s_service_on = false;
 }
 
 bool UiBackend_CalCapture(uint8_t point, float ref_mmhg)

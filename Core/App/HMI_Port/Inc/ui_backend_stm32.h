@@ -36,6 +36,11 @@ void UiBackendStm32_PostRemoteSession(uint16_t operator_id, uint16_t participant
  * sonoro (UiBackend_PollRemoteStart). Nao bloqueia o USB. */
 void UiBackendStm32_PostRemoteStart(void);
 
+#include <stdbool.h>
+
+/* Clique do encoder: lido pela inputTask. */
+bool UiBackendStm32_ClickSoundEnabled(void);
+
 #ifdef __cplusplus
 }
 #endif

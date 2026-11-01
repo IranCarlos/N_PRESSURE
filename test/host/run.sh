@@ -7,7 +7,7 @@ cd "$(dirname "$0")/../.."
 OUT=build/host
 mkdir -p "$OUT"
 CFLAGS="-std=c11 -Wall -Wextra -Wconversion -Werror -O0 -g"
-INC="-ICore/Services/Pressure_Core/Inc -ICore/Bsp/Valve/Inc -ICore/Bsp/PwmMotor/Inc -ICore/App/Bench/Inc -ICore/Services/Rtc_Service/Inc -ICore/Services/Control_Core/Inc -ICore/Common/Inc -ICore/Services/Audit_Trail/Inc -ICore/Services/UsbProto/Inc -ICore/Services/Event_Watch/Inc -ICore/Services/Params/Inc -ICore/Services/Calibration/Inc"
+INC="-ICore/Services/Pressure_Core/Inc -ICore/Bsp/Valve/Inc -ICore/Bsp/PwmMotor/Inc -ICore/App/Bench/Inc -ICore/Services/Rtc_Service/Inc -ICore/Services/Control_Core/Inc -ICore/Common/Inc -ICore/Services/Audit_Trail/Inc -ICore/Services/UsbProto/Inc -ICore/Services/Event_Watch/Inc -ICore/Services/Params/Inc -ICore/Services/Calibration/Inc -ICore/App/HMI_UI/Inc"
 fail=0
 run() { # nome fontes...
     local name=$1; shift
@@ -24,6 +24,8 @@ run test_audit_trail test/host/test_audit_trail.c Core/Services/Audit_Trail/Src/
 run test_storage_format test/host/test_storage_format.c Core/Services/Audit_Trail/Src/sha256.c \
     Core/Services/Audit_Trail/Src/audit_chain.c Core/Services/Audit_Trail/Src/cycle_record.c \
     Core/Services/Audit_Trail/Src/storage_format.c
+run test_pressure_target test/host/test_pressure_target.c Core/Services/Control_Core/Src/pressure_target.c
+run test_ui_series test/host/test_ui_series.c Core/App/HMI_UI/Src/ui_session.c
 run test_cobs test/host/test_cobs.c Core/Services/UsbProto/Src/cobs.c
 run test_usb_crc32 test/host/test_usb_crc32.c Core/Services/UsbProto/Src/usb_crc32.c
 run test_usb_proto_frame test/host/test_usb_proto_frame.c \

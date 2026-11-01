@@ -244,12 +244,14 @@ void UI_HomeScreen_Update(void)
     }
 
     session = UiSession_Get();
-    session_key = ((uint32_t)session->operator_id << 16) | (uint32_t)session->participant_id;
+    session_key = ((uint32_t)session->measure << 24) | ((uint32_t)session->operator_id << 16) |
+                  (uint32_t)session->participant_id;
     if (session_key != s_shown_session) {
         s_shown_session = session_key;
-        lv_label_set_text_fmt(s_session_label, "Operador: OP%02u | Participante: P%03u",
+        lv_label_set_text_fmt(s_session_label, "OP%02u | P%03u | Medida %u de %u",
                               (unsigned int)session->operator_id,
-                              (unsigned int)session->participant_id);
+                              (unsigned int)session->participant_id,
+                              (unsigned int)session->measure, (unsigned int)UI_SERIES_LENGTH);
     }
 
     if (UiBackend_GetDateTime(&dt)) {

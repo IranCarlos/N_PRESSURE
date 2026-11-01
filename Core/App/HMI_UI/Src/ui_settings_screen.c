@@ -12,19 +12,22 @@
  *   y=32   +-- area rolavel 308x170 ---------------------------+
  *          | y=6   [ Setpoint                      [ 160 ] ]   |
  *          | y=40  [ Unidade                    [ mmHg  ] ]    |
- *          | y=74  [ Buzzer          [Testar] [ Ligado ]  ]    |
- *          | y=108 [ Verificar calibracao (manometro na V3) ]  |
- *          |       [ Leitura / Zerar / Pressao de teste       ] |
- *          |       [ P1 [spin][Capturar] OK / P2 ... / Verificar] |
- *          | y=326 [ Teste de vazamento: tempo, queda, result ] |
- *          | y=408 [ Data/Hora DD MM AAAA HH MM  [Aplicar]    ] |
- *          | y=500 [ Operador ativo (OP)            [ 03 ]    ] |
- *          | y=536 [ Informacoes (so' leitura)                ] |
+ *          | y=74  [ Som do ensaio   [Testar] [ Ligado ]  ]    |
+ *          | y=108 [ Som do encoder           [ Ligado ]  ]    |
+ *          | y=142 [ Verificar calibracao (manometro na V3) ]  |
+ *          |       [ Leitura, situacao                        ] |
+ *          |       [ Pressao de teste [spin] [Ir]             ] |
+ *          |       [ Manometro [spin] [Capturar P1]           ] |
+ *          |       [ [Zerar] [Parar] [Verificar]              ] |
+ *          | y=334 [ Teste de vazamento: situacao, queda      ] |
+ *          | y=416 [ Data/Hora DD MM AAAA HH MM  [Aplicar]    ] |
+ *          | y=508 [ Operador ativo (OP)            [ 03 ]    ] |
+ *          | y=544 [ Informacoes (so' leitura)                ] |
  *          +---------------------------------------------------+
  *   y=206  [ Teste de Vazamento 152x28 ]  [ < Voltar 152x28 ]  rodape fixo
  *
- * Unica excecao deliberada a "sem atuador manual": a calibracao abre V3 e
- * aplica uma pressao de teste (fluxo guiado, restrito a essa finalidade).
+ * Unica excecao deliberada a "sem atuador manual": a verificacao abre V3 e vai
+ * a uma pressao de teste (fluxo guiado, a calibracao completa e' no app DEV).
  */
 
 #include "ui_settings_screen.h"
@@ -34,7 +37,7 @@
 #include "ui_backend.h"
 #include "hmi_encoder_group.h"
 
-#define UI_CAL_PUMP_STEP_PCT (10)
+#define UI_CAL_TARGET_STEP   (10)
 #define UI_ROW_H             (30)
 
 static UI_SettingsScreen_BackRequestCb_t s_back_cb;
@@ -47,18 +50,23 @@ static lv_obj_t * s_roller_unit;
 static lv_obj_t * s_btn_buzzer_test;
 static lv_obj_t * s_btn_buzzer_toggle;
 static lv_obj_t * s_lbl_buzzer_toggle;
+static lv_obj_t * s_btn_click_toggle;
+static lv_obj_t * s_lbl_click_toggle;
 
 static lv_obj_t * s_lbl_cal_reading;
+static lv_obj_t * s_lbl_cal_state;
+static lv_obj_t * s_spin_cal_target;
+static lv_obj_t * s_btn_cal_go;
+static lv_obj_t * s_spin_cal_ref;
+static lv_obj_t * s_btn_cal_capture;
+static lv_obj_t * s_lbl_cal_capture;
 static lv_obj_t * s_btn_cal_zero;
-static lv_obj_t * s_spin_cal_pump_pct;
-static lv_obj_t * s_spin_cal_ref1;
-static lv_obj_t * s_btn_cal_capture1;
-static lv_obj_t * s_lbl_cal_point1;
-static lv_obj_t * s_spin_cal_ref2;
-static lv_obj_t * s_btn_cal_capture2;
-static lv_obj_t * s_lbl_cal_point2;
+static lv_obj_t * s_btn_cal_stop;
 static lv_obj_t * s_btn_cal_save;
 static lv_obj_t * s_lbl_cal_result;
+
+static uint8_t s_cal_next_point;
+static int32_t s_shown_service;
 
 static lv_obj_t * s_leak_box;
 static lv_obj_t * s_leak_remaining_label;
@@ -81,9 +89,7 @@ static lv_obj_t * s_info_cycle_label;
 static lv_obj_t * s_btn_leak_test;
 static lv_obj_t * s_btn_back;
 
-static bool s_leak_active;
-static uint32_t s_leak_start_tick;
-static float s_leak_start_pressure;
+static int32_t s_shown_leak_phase;
 
 static int32_t s_shown_cal_reading;
 static int32_t s_shown_leak_remaining_s;
@@ -108,11 +114,13 @@ static void ui_setpoint_changed_cb(lv_event_t * e);
 static void ui_unit_changed_cb(lv_event_t * e);
 static void ui_buzzer_toggle_event_cb(lv_event_t * e);
 static void ui_buzzer_test_event_cb(lv_event_t * e);
+static void ui_click_toggle_event_cb(lv_event_t * e);
 static void ui_cal_zero_event_cb(lv_event_t * e);
-static void ui_cal_pump_changed_cb(lv_event_t * e);
-static void ui_cal_capture1_event_cb(lv_event_t * e);
-static void ui_cal_capture2_event_cb(lv_event_t * e);
+static void ui_cal_go_event_cb(lv_event_t * e);
+static void ui_cal_stop_event_cb(lv_event_t * e);
+static void ui_cal_capture_event_cb(lv_event_t * e);
 static void ui_cal_save_event_cb(lv_event_t * e);
+static void ui_set_capture_label(void);
 static void ui_leak_test_btn_event_cb(lv_event_t * e);
 static void ui_leak_btn_focused_cb(lv_event_t * e);
 static void ui_apply_datetime_btn_event_cb(lv_event_t * e);
@@ -126,13 +134,13 @@ void UI_SettingsScreen_Init(UI_SettingsScreen_BackRequestCb_t back_cb)
 
 void UI_SettingsScreen_Show(void)
 {
-    static lv_obj_t * focusables[20];
+    static lv_obj_t * focusables[21];
     HMI_EncoderGroupConfig_t group_cfg;
     uint16_t i = 0U;
 
     /* Calibracao sempre comeca com a bomba desligada e V3 fechada. */
     UiBackend_CalAbort();
-    s_leak_active = false;
+    s_cal_next_point = 1u;
 
     ui_create_screen();
     ui_refresh_datetime_fields();
@@ -144,12 +152,13 @@ void UI_SettingsScreen_Show(void)
     focusables[i++] = s_roller_unit;
     focusables[i++] = s_btn_buzzer_test;
     focusables[i++] = s_btn_buzzer_toggle;
+    focusables[i++] = s_btn_click_toggle;
+    focusables[i++] = s_spin_cal_target;
+    focusables[i++] = s_btn_cal_go;
+    focusables[i++] = s_spin_cal_ref;
+    focusables[i++] = s_btn_cal_capture;
     focusables[i++] = s_btn_cal_zero;
-    focusables[i++] = s_spin_cal_pump_pct;
-    focusables[i++] = s_spin_cal_ref1;
-    focusables[i++] = s_btn_cal_capture1;
-    focusables[i++] = s_spin_cal_ref2;
-    focusables[i++] = s_btn_cal_capture2;
+    focusables[i++] = s_btn_cal_stop;
     focusables[i++] = s_btn_cal_save;
     focusables[i++] = s_spin_day;
     focusables[i++] = s_spin_month;
@@ -173,6 +182,8 @@ void UI_SettingsScreen_Show(void)
     s_shown_cal_reading = INT32_MIN;
     s_shown_leak_remaining_s = INT32_MIN;
     s_shown_leak_drop_tenths = INT32_MIN;
+    s_shown_leak_phase = INT32_MIN;
+    s_shown_service = INT32_MIN;
     s_shown_sd = INT32_MIN;
     s_shown_cycle = INT32_MIN;
     UI_SettingsScreen_Update();
@@ -206,6 +217,7 @@ static void ui_create_screen(void)
     lv_obj_t * lbl;
     lv_obj_t * box;
 
+    s_lbl_click_toggle = NULL; /* o objeto da abertura anterior ja' nao existe */
     s_screen = lv_obj_create(NULL);
     UiTheme_StyleScreen(s_screen);
 
@@ -244,8 +256,8 @@ static void ui_create_screen(void)
     lv_roller_set_selected(s_roller_unit, (uint32_t)UiBackend_GetUnit(), LV_ANIM_OFF);
     lv_obj_add_event_cb(s_roller_unit, ui_unit_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-    /* --- Buzzer --- */
-    box = ui_row_box(74, "Buzzer");
+    /* --- Sons: status do ensaio e clique do encoder sao independentes --- */
+    box = ui_row_box(74, "Som do ensaio");
     s_btn_buzzer_test = UiW_Button(box, 64, 22, "Testar", ui_buzzer_test_event_cb);
     lv_obj_align(s_btn_buzzer_test, LV_ALIGN_RIGHT_MID, -96, 0);
 
@@ -254,18 +266,24 @@ static void ui_create_screen(void)
     s_lbl_buzzer_toggle = lv_obj_get_child(s_btn_buzzer_toggle, 0);
     ui_set_buzzer_label();
 
-    ui_create_calibration(108);
-    ui_create_leak_panel(326);
-    ui_create_datetime(408);
+    box = ui_row_box(108, "Som do encoder");
+    s_btn_click_toggle = UiW_Button(box, 84, 22, "", ui_click_toggle_event_cb);
+    lv_obj_align(s_btn_click_toggle, LV_ALIGN_RIGHT_MID, -6, 0);
+    s_lbl_click_toggle = lv_obj_get_child(s_btn_click_toggle, 0);
+    ui_set_buzzer_label();
+
+    ui_create_calibration(142);
+    ui_create_leak_panel(334);
+    ui_create_datetime(416);
 
     /* --- Operador --- */
-    box = ui_row_box(500, "Operador ativo (OP)");
+    box = ui_row_box(508, "Operador ativo (OP)");
     s_spin_operator = UiW_Spinbox(box, 70, 24, 0, 99, 2u, 1, s_content);
     lv_obj_align(s_spin_operator, LV_ALIGN_RIGHT_MID, -4, 0);
     lv_spinbox_set_value(s_spin_operator, (int32_t)UiSession_Get()->operator_id);
     lv_obj_add_event_cb(s_spin_operator, ui_operator_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
 
-    ui_create_info(536);
+    ui_create_info(544);
 
     /* --- Rodape fixo --- */
     s_btn_leak_test = UiW_Button(s_screen, 152, 28, "Teste de Vazamento", ui_leak_test_btn_event_cb);
@@ -294,46 +312,43 @@ static lv_obj_t * ui_row_box(int32_t y, const char * title)
 
 static void ui_create_calibration(int32_t y)
 {
-    lv_obj_t * box = UiW_TitledBox(s_content, 6, y, LV_HOR_RES - 26, 212,
+    lv_obj_t * box = UiW_TitledBox(s_content, 6, y, LV_HOR_RES - 26, 184,
                                    "Verificar calibracao (manometro na V3)");
     lv_obj_t * lbl;
 
     s_lbl_cal_reading = UiW_LabelBody(box, "Leitura: -- mmHg");
     lv_obj_set_pos(s_lbl_cal_reading, 6, 22);
+    s_lbl_cal_state = UiW_LabelHint(box, "Parado");
+    lv_obj_align(s_lbl_cal_state, LV_ALIGN_TOP_RIGHT, -6, 22);
 
-    s_btn_cal_zero = UiW_Button(box, 110, 24, "Zerar (ar)", ui_cal_zero_event_cb);
-    lv_obj_set_pos(s_btn_cal_zero, 6, 44);
+    lbl = UiW_LabelHint(box, "Alvo (mmHg)");
+    lv_obj_set_pos(lbl, 6, 50);
+    s_spin_cal_target = UiW_Spinbox(box, 70, 24, 0, 170, 3u, UI_CAL_TARGET_STEP, s_content);
+    lv_obj_set_pos(s_spin_cal_target, 118, 46);
+    lv_spinbox_set_value(s_spin_cal_target, 50);
+    s_btn_cal_go = UiW_Button(box, 84, 24, "Ir", ui_cal_go_event_cb);
+    lv_obj_set_pos(s_btn_cal_go, 196, 46);
 
-    lbl = UiW_LabelHint(box, "Pressao de teste (%)");
-    lv_obj_set_pos(lbl, 6, 78);
-    s_spin_cal_pump_pct = UiW_Spinbox(box, 70, 24, 0, 100, 3u, UI_CAL_PUMP_STEP_PCT, s_content);
-    lv_obj_align(s_spin_cal_pump_pct, LV_ALIGN_TOP_RIGHT, -6, 74);
-    lv_obj_add_event_cb(s_spin_cal_pump_pct, ui_cal_pump_changed_cb, LV_EVENT_VALUE_CHANGED, NULL);
+    lbl = UiW_LabelHint(box, "Manometro");
+    lv_obj_set_pos(lbl, 6, 80);
+    s_spin_cal_ref = UiW_Spinbox(box, 70, 24, 0, 300, 3u, 1, s_content);
+    lv_obj_set_pos(s_spin_cal_ref, 118, 76);
+    s_btn_cal_capture = UiW_Button(box, 84, 24, "", ui_cal_capture_event_cb);
+    lv_obj_set_pos(s_btn_cal_capture, 196, 76);
+    s_lbl_cal_capture = lv_obj_get_child(s_btn_cal_capture, 0);
+    s_cal_next_point = 1u;
+    ui_set_capture_label();
 
-    lbl = UiW_LabelHint(box, "P1");
-    lv_obj_set_pos(lbl, 6, 108);
-    s_spin_cal_ref1 = UiW_Spinbox(box, 60, 24, 0, 300, 3u, 1, s_content);
-    lv_obj_set_pos(s_spin_cal_ref1, 28, 104);
-    s_btn_cal_capture1 = UiW_Button(box, 84, 24, "Capturar", ui_cal_capture1_event_cb);
-    lv_obj_set_pos(s_btn_cal_capture1, 96, 104);
-    s_lbl_cal_point1 = UiW_LabelHint(box, "--");
-    lv_obj_set_pos(s_lbl_cal_point1, 188, 108);
-
-    lbl = UiW_LabelHint(box, "P2");
-    lv_obj_set_pos(lbl, 6, 138);
-    s_spin_cal_ref2 = UiW_Spinbox(box, 60, 24, 0, 300, 3u, 1, s_content);
-    lv_obj_set_pos(s_spin_cal_ref2, 28, 134);
-    s_btn_cal_capture2 = UiW_Button(box, 84, 24, "Capturar", ui_cal_capture2_event_cb);
-    lv_obj_set_pos(s_btn_cal_capture2, 96, 134);
-    s_lbl_cal_point2 = UiW_LabelHint(box, "--");
-    lv_obj_set_pos(s_lbl_cal_point2, 188, 138);
-
-    s_btn_cal_save = UiW_Button(box, 150, 24, "Verificar", ui_cal_save_event_cb);
-    lv_obj_set_pos(s_btn_cal_save, 6, 164);
+    s_btn_cal_zero = UiW_Button(box, 84, 24, "Zerar (ar)", ui_cal_zero_event_cb);
+    lv_obj_set_pos(s_btn_cal_zero, 6, 106);
+    s_btn_cal_stop = UiW_Button(box, 84, 24, "Parar", ui_cal_stop_event_cb);
+    lv_obj_set_pos(s_btn_cal_stop, 96, 106);
+    s_btn_cal_save = UiW_Button(box, 94, 24, "Verificar", ui_cal_save_event_cb);
+    lv_obj_set_pos(s_btn_cal_save, 186, 106);
 
     /* Linha propria para o resultado (texto longo nao cabe ao lado). */
     s_lbl_cal_result = UiW_LabelHint(box, "");
-    lv_obj_set_pos(s_lbl_cal_result, 6, 192);
+    lv_obj_set_pos(s_lbl_cal_result, 6, 138);
 }
 
 static void ui_create_leak_panel(int32_t y)
@@ -415,44 +430,61 @@ static void ui_set_buzzer_label(void)
 {
     lv_label_set_text_static(s_lbl_buzzer_toggle,
                              (UiSession_Get()->buzzer_enabled != 0u) ? "Ligado" : "Mudo");
+    if (s_lbl_click_toggle != NULL) {
+        lv_label_set_text_static(s_lbl_click_toggle,
+                                 (UiSession_Get()->click_enabled != 0u) ? "Ligado" : "Mudo");
+    }
+}
+
+static void ui_set_capture_label(void)
+{
+    lv_label_set_text_fmt(s_lbl_cal_capture, "Capturar P%u", (unsigned int)s_cal_next_point);
 }
 
 static void ui_update_leak_panel(void)
 {
-    uint32_t hold_ms = UiBackend_GetLeakHoldTimeMs();
-    uint32_t remaining_ms = hold_ms;
-    float drop = 0.0f;
+    UiLeakStatus_t s;
     int32_t remaining_s;
     int32_t drop_tenths;
 
-    if (s_leak_active) {
-        float pressure = UiBackend_GetPressureMmHg();
-        uint32_t elapsed = UiBackend_GetTickMs() - s_leak_start_tick;
+    UiBackend_GetLeakStatus(&s);
 
-        remaining_ms = (elapsed >= hold_ms) ? 0u : (hold_ms - elapsed);
+    if ((int32_t)s.phase != s_shown_leak_phase) {
+        bool first_paint = (s_shown_leak_phase == INT32_MIN);
 
-        /* Referencia = maior pressao vista (a pressurizacao inicial ainda
-         * esta subindo nos primeiros instantes). */
-        if (pressure > s_leak_start_pressure) {
-            s_leak_start_pressure = pressure;
-        }
-        drop = s_leak_start_pressure - pressure;
-        if (drop < 0.0f) {
-            drop = 0.0f;
-        }
-
-        if (UiBackend_GetState() != UI_STATE_LEAK_TEST) {
-            bool approved = (drop <= UiBackend_GetLeakMaxDropMmHg());
-
-            s_leak_active = false;
-            lv_label_set_text_static(s_leak_result_label, approved ? "Resultado: APROVADO"
-                                                                   : "Resultado: REPROVADO");
-            lv_obj_set_style_text_color(s_leak_result_label,
-                                        approved ? UiTheme_ColorOk() : UiTheme_ColorDanger(), 0);
+        s_shown_leak_phase = (int32_t)s.phase;
+        switch (s.phase) {
+            case UI_LEAK_RISING:
+                lv_label_set_text_static(s_leak_result_label, "Resultado: subindo/estabilizando");
+                lv_obj_set_style_text_color(s_leak_result_label, UiTheme_ColorWarn(), 0);
+                lv_obj_scroll_to_view(s_leak_box, LV_ANIM_OFF);
+                break;
+            case UI_LEAK_OBSERVING:
+                lv_label_set_text_static(s_leak_result_label, "Resultado: observando a queda");
+                break;
+            case UI_LEAK_PASSED:
+                lv_label_set_text_static(s_leak_result_label, "Resultado: APROVADO");
+                lv_obj_set_style_text_color(s_leak_result_label, UiTheme_ColorOk(), 0);
+                if (!first_paint) { UiSession_Beep(1800u, 100u); UiSession_Beep(2400u, 150u); }
+                break;
+            case UI_LEAK_FAILED:
+                lv_label_set_text_static(s_leak_result_label, s.held ? "Resultado: REPROVADO"
+                                                                     : "REPROVADO: nao manteve a pressao");
+                lv_obj_set_style_text_color(s_leak_result_label, UiTheme_ColorDanger(), 0);
+                if (!first_paint) { UiSession_Beep(900u, 250u); }
+                break;
+            case UI_LEAK_ABORTED:
+                lv_label_set_text_static(s_leak_result_label, "Resultado: interrompido, sem veredito");
+                lv_obj_set_style_text_color(s_leak_result_label, UiTheme_ColorWarn(), 0);
+                break;
+            case UI_LEAK_NONE:
+            default:
+                lv_label_set_text_static(s_leak_result_label, "Resultado: aguardando");
+                break;
         }
     }
 
-    remaining_s = (int32_t)(remaining_ms / 1000u);
+    remaining_s = (int32_t)(s.remaining_ms / 1000u);
     if (remaining_s != s_shown_leak_remaining_s) {
         s_shown_leak_remaining_s = remaining_s;
         lv_label_set_text_fmt(s_leak_remaining_label, "Tempo: %d s", (int)remaining_s);
@@ -460,8 +492,8 @@ static void ui_update_leak_panel(void)
 
     /* Decimos inteiros: o sprintf embutido do LVGL nao formata float
      * (LV_SPRINTF_USE_FLOAT = 0), "%.1f" sairia como "f". */
-    drop_tenths = (int32_t)((drop * 10.0f) + 0.5f);
-    if (s_leak_active && (drop_tenths != s_shown_leak_drop_tenths)) {
+    drop_tenths = (s.drop_mmhg > 0.0f) ? (int32_t)((s.drop_mmhg * 10.0f) + 0.5f) : 0;
+    if ((s.phase != UI_LEAK_NONE) && (s.phase != UI_LEAK_RISING) && (drop_tenths != s_shown_leak_drop_tenths)) {
         s_shown_leak_drop_tenths = drop_tenths;
         lv_label_set_text_fmt(s_leak_drop_label, "Queda: %d.%d mmHg",
                               (int)(drop_tenths / 10), (int)(drop_tenths % 10));
@@ -487,10 +519,31 @@ static void ui_update_cal_reading(void)
 {
     /* Leitura CALIBRADA: e' ela que o operador compara com o manometro. */
     int32_t reading = (int32_t)UiBackend_GetPressureMmHg();
+    UiServiceState_t service = UiBackend_ServiceState();
 
     if (reading != s_shown_cal_reading) {
         s_shown_cal_reading = reading;
         lv_label_set_text_fmt(s_lbl_cal_reading, "Leitura: %d mmHg", (int)reading);
+    }
+    if ((int32_t)service != s_shown_service) {
+        s_shown_service = (int32_t)service;
+        switch (service) {
+            case UI_SERVICE_MOVING:
+                lv_label_set_text_static(s_lbl_cal_state, "Indo...");
+                break;
+            case UI_SERVICE_STABLE:
+                lv_label_set_text_static(s_lbl_cal_state, "Estavel: leia");
+                UiSession_Beep(2200u, 120u);
+                break;
+            case UI_SERVICE_FAILED:
+                lv_label_set_text_static(s_lbl_cal_state, "Nao estabilizou");
+                UiSession_Beep(900u, 250u);
+                break;
+            case UI_SERVICE_IDLE:
+            default:
+                lv_label_set_text_static(s_lbl_cal_state, "Parado");
+                break;
+        }
     }
 }
 
@@ -498,7 +551,6 @@ static void ui_request_back(void)
 {
     HMI_EncoderGroup_SetEditing(false);
     UiBackend_CalAbort();
-    s_leak_active = false;
 
     if (s_back_cb != NULL) {
         s_back_cb();
@@ -534,6 +586,13 @@ static void ui_buzzer_toggle_event_cb(lv_event_t * e)
     ui_set_buzzer_label();
 }
 
+static void ui_click_toggle_event_cb(lv_event_t * e)
+{
+    LV_UNUSED(e);
+    UiSession_SetClickEnabled((uint8_t)((UiSession_Get()->click_enabled != 0u) ? 0u : 1u));
+    ui_set_buzzer_label();
+}
+
 static void ui_buzzer_test_event_cb(lv_event_t * e)
 {
     LV_UNUSED(e);
@@ -545,29 +604,38 @@ static void ui_cal_zero_event_cb(lv_event_t * e)
 {
     LV_UNUSED(e);
     UiBackend_CalZero();
+    UiBackend_ServiceGoTo(0.0f); /* abre tudo antes de zerar */
     lv_label_set_text_static(s_lbl_cal_result, "Zerado.");
 }
 
-static void ui_cal_pump_changed_cb(lv_event_t * e)
+static void ui_cal_go_event_cb(lv_event_t * e)
 {
     LV_UNUSED(e);
-    UiBackend_CalSetPumpPct((uint8_t)lv_spinbox_get_value(s_spin_cal_pump_pct));
+    HMI_EncoderGroup_SetEditing(false);
+    lv_label_set_text_static(s_lbl_cal_result, "");
+    UiBackend_ServiceGoTo((float)lv_spinbox_get_value(s_spin_cal_target));
 }
 
-static void ui_cal_capture1_event_cb(lv_event_t * e)
+static void ui_cal_stop_event_cb(lv_event_t * e)
 {
     LV_UNUSED(e);
-    lv_label_set_text_static(s_lbl_cal_point1,
-                             UiBackend_CalCapture(1u, (float)lv_spinbox_get_value(s_spin_cal_ref1))
-                             ? "OK" : "Aguarde");
+    UiBackend_CalAbort();
+    s_cal_next_point = 1u;
+    ui_set_capture_label();
+    lv_label_set_text_static(s_lbl_cal_result, "Parado: linha esvaziando.");
 }
 
-static void ui_cal_capture2_event_cb(lv_event_t * e)
+static void ui_cal_capture_event_cb(lv_event_t * e)
 {
     LV_UNUSED(e);
-    lv_label_set_text_static(s_lbl_cal_point2,
-                             UiBackend_CalCapture(2u, (float)lv_spinbox_get_value(s_spin_cal_ref2))
-                             ? "OK" : "Aguarde");
+    HMI_EncoderGroup_SetEditing(false);
+    if (!UiBackend_CalCapture(s_cal_next_point, (float)lv_spinbox_get_value(s_spin_cal_ref))) {
+        lv_label_set_text_static(s_lbl_cal_result, "Pressao variando: aguarde.");
+        return;
+    }
+    lv_label_set_text_fmt(s_lbl_cal_result, "P%u capturado.", (unsigned int)s_cal_next_point);
+    s_cal_next_point = (uint8_t)((s_cal_next_point == 1u) ? 2u : 1u);
+    ui_set_capture_label();
 }
 
 static void ui_cal_save_event_cb(lv_event_t * e)
@@ -594,9 +662,8 @@ static void ui_cal_save_event_cb(lv_event_t * e)
             break;
     }
     /* Backend ja' desligou a bomba e devolveu as valvulas ao controle. */
-    lv_spinbox_set_value(s_spin_cal_pump_pct, 0);
-    lv_label_set_text_static(s_lbl_cal_point1, "--");
-    lv_label_set_text_static(s_lbl_cal_point2, "--");
+    s_cal_next_point = 1u;
+    ui_set_capture_label();
     lv_label_set_text(s_lbl_cal_result, msg);
 }
 
@@ -607,16 +674,6 @@ static void ui_leak_test_btn_event_cb(lv_event_t * e)
     HMI_EncoderGroup_SetEditing(false);
 
     UiBackend_CalAbort();
-    lv_spinbox_set_value(s_spin_cal_pump_pct, 0);
-
-    s_leak_active = true;
-    s_leak_start_tick = UiBackend_GetTickMs();
-    s_leak_start_pressure = UiBackend_GetPressureMmHg();
-    s_shown_leak_drop_tenths = INT32_MIN;
-
-    lv_label_set_text_static(s_leak_result_label, "Resultado: em execucao");
-    lv_obj_set_style_text_color(s_leak_result_label, UiTheme_ColorWarn(), 0);
-
     UiBackend_StartLeakTest();
 
     /* O foco esta' no rodape; traz o painel do teste para a vista. */

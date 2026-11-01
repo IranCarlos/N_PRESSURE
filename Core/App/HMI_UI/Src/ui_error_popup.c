@@ -75,10 +75,11 @@ void UI_ErrorPopup_Show(uint16_t error_code)
         s_dim_bg = NULL;
     }
 
-    /* 3 bipes graves — distinto do tom de conclusao. */
-    UiSession_Beep(600u, 120u);
-    UiSession_Beep(600u, 120u);
-    UiSession_Beep(600u, 120u);
+    /* 3 bipes graves — distinto do tom de conclusao. Erro toca mesmo com o som
+     * do ensaio desligado: um alarme nao pode ficar mudo por configuracao. */
+    UiBackend_BuzzerBeep(600u, 120u);
+    UiBackend_BuzzerBeep(600u, 120u);
+    UiBackend_BuzzerBeep(600u, 120u);
 
     s_dim_bg = lv_obj_create(lv_layer_top());
     UiTheme_StyleOverlay(s_dim_bg);

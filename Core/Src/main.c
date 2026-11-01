@@ -2142,7 +2142,12 @@ void StartInputTask(void *argument)
       // Bipe curto (tom de 2.5kHz por 15ms) a cada passo (detent) do encoder.
       if (enc_now->steps != s_last_steps_buzz) {
         s_last_steps_buzz = enc_now->steps;
-        Buzzer_Beep(2500u, 15u);
+#if BRINGUP_ENABLE_LVGL
+        if (UiBackendStm32_ClickSoundEnabled())
+#endif
+        {
+          Buzzer_Beep(2500u, 15u);
+        }
       }
     }
 #endif /* BRINGUP_ENABLE_BUZZER */

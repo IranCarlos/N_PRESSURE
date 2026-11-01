@@ -28,6 +28,7 @@
 #include "ui_settings_screen.h"
 #include "ui_result_popup.h"
 #include "ui_error_popup.h"
+#include <string.h>
 
 typedef enum {
     HMI_SCREEN_BOOT = 0,
@@ -40,6 +41,9 @@ typedef enum {
 static HmiScreen_t s_active_screen;
 static uint16_t s_last_error = UI_ERR_NONE;
 static bool s_result_pending;
+static UiSeriesStep_t s_pending_step;
+static UiState_t s_sound_state = UI_STATE_BOOT;
+static bool s_ready_announced;
 static bool s_cycle_active;
 static UiCycleResult_t s_pending_result;
 
@@ -53,6 +57,7 @@ static void ui_on_menu_cb(void);
 static void ui_on_settings_back_cb(void);
 static bool ui_cycle_active(void);
 static void ui_poll_popups(void);
+static void ui_status_sounds(bool remote_start);
 static void ui_on_popup_closed_cb(void);
 
 void HMI_Init(lv_indev_t * encoder_indev)
@@ -76,7 +81,7 @@ void HMI_Init(lv_indev_t * encoder_indev)
     UI_NewTestScreen_Init(ui_on_home_cb, ui_on_menu_cb);
     UI_SettingsScreen_Init(ui_on_settings_back_cb);
 
-    UI_ResultPopup_Init(ui_on_popup_closed_cb);
+    UI_ResultPopup_Init(ui_on_popup_closed_cb, ui_on_menu_new_test_cb);
     UI_ErrorPopup_Init(ui_on_popup_closed_cb);
 
     ui_show_screen(HMI_SCREEN_BOOT);
@@ -91,6 +96,7 @@ void HMI_Update(void)
 {
     uint16_t remote_operator;
     uint16_t remote_participant;
+    bool remote_start;
 
     if (UiBackend_PollRemoteSession(&remote_operator, &remote_participant)) {
         UiSession_SetOperator(remote_operator);
@@ -105,7 +111,8 @@ void HMI_Update(void)
      * manguito vai inflar sem ninguem ter tocado no equipamento), nao
      * feedback de interface. Bloqueia a uiTask ~400 ms (Buzzer_Beep e'
      * sincrono), mesmo criterio aceito no popup de resultado. */
-    if (UiBackend_PollRemoteStart()) {
+    remote_start = UiBackend_PollRemoteStart();
+    if (remote_start) {
         UiBackend_BuzzerBeep(2600u, 80u);
         UiBackend_BuzzerBeep(1800u, 80u);
         UiBackend_BuzzerBeep(2600u, 80u);
@@ -114,6 +121,7 @@ void HMI_Update(void)
     }
 
     UI_HomeScreen_TrackCycle();
+    ui_status_sounds(remote_start);
 
     switch (s_active_screen) {
         case HMI_SCREEN_BOOT:     UI_BootScreen_Update();     break;
@@ -164,6 +172,29 @@ static void ui_on_settings_back_cb(void)
     ui_show_screen(HMI_SCREEN_MENU);
 }
 
+/* --- Sons de status --- */
+
+/* Bipa nas bordas do ensaio, venha ele do pedal ou do PC. Bloqueia a uiTask por
+ * poucas centenas de ms, mesmo criterio do popup de resultado. */
+static void ui_status_sounds(bool remote_start)
+{
+    UiState_t state = UiBackend_GetState();
+
+    if ((s_sound_state == UI_STATE_IDLE) && (state == UI_STATE_INFLATING) && !remote_start) {
+        UiSession_Beep(1500u, 80u);
+        UiSession_Beep(2000u, 120u);
+    }
+    if ((state == UI_STATE_STABILIZED) && !s_ready_announced) {
+        s_ready_announced = true;
+        UiSession_Beep(2200u, 120u);
+        UiSession_Beep(2200u, 120u);
+    }
+    if (state == UI_STATE_IDLE) {
+        s_ready_announced = false;
+    }
+    s_sound_state = state;
+}
+
 /* --- Popups --- */
 
 static bool ui_cycle_active(void)
@@ -172,6 +203,13 @@ static bool ui_cycle_active(void)
 
     return (state == UI_STATE_INFLATING) || (state == UI_STATE_STABILIZING) ||
            (state == UI_STATE_STABILIZED);
+}
+
+/* Vale como medida o ensaio que chegou ao fim. Cancelado (NC07) ou com falha tecnica
+ * (NC08) repete a mesma medida. Fora de faixa conta e fica registrado com seu NC. */
+static bool ui_measure_counts(const UiCycleResult_t * result)
+{
+    return (strcmp(result->nc_code, "NC07") != 0) && (strcmp(result->nc_code, "NC08") != 0);
 }
 
 static void ui_poll_popups(void)
@@ -206,8 +244,10 @@ static void ui_poll_popups(void)
     if (UiBackend_PollCycleResult(&result) && (s_active_screen != HMI_SCREEN_SETTINGS)) {
         UiSession_t * session = UiSession_Get();
 
+        /* O ciclo do registro e' a medida do paciente (C1 a C3). */
         UiBackend_SubmitCycleRecord(session->operator_id, session->participant_id,
-                                    session->cycle_number);
+                                    (uint16_t)session->measure);
+        s_pending_step = UiSession_SeriesOnResult(ui_measure_counts(&result));
         s_pending_result = result;
         s_result_pending = true;
     }
@@ -218,7 +258,7 @@ static void ui_poll_popups(void)
 
     if (s_result_pending && !UI_ErrorPopup_IsActive()) {
         s_result_pending = false;
-        UI_ResultPopup_Show(&s_pending_result);
+        UI_ResultPopup_Show(&s_pending_result, s_pending_step);
     }
 
     UI_ResultPopup_Update();

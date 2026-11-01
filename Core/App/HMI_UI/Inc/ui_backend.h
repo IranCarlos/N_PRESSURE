@@ -129,6 +129,7 @@ void UiBackend_StartLeakTest(void);
 void UiBackend_SetUnit(UiUnit_t unit);
 bool UiBackend_SetDateTime(const UiDateTime_t * dt);
 void UiBackend_BuzzerBeep(uint16_t freq_hz, uint16_t duration_ms);
+void UiBackend_SetClickSound(bool enabled); /* clique do encoder */
 
 /* Grava o registro do ultimo ciclo devolvido por UiBackend_PollCycleResult()
  * (cartao SD / trilha de auditoria) com a identificacao da sessao. */
@@ -147,8 +148,37 @@ typedef enum {
 } UiCalVerify_t;
 
 void UiBackend_CalZero(void);
-void UiBackend_CalSetPumpPct(uint8_t pct);     /* abre V1+V2+V3 + bomba em pct */
 void UiBackend_CalAbort(void);                 /* bomba off, valvulas ao controle */
+
+/* Vai a' pressao de teste com a V3 aberta e espera assentar. 0 = abre tudo. */
+typedef enum {
+    UI_SERVICE_IDLE = 0,
+    UI_SERVICE_MOVING,
+    UI_SERVICE_STABLE,
+    UI_SERVICE_FAILED
+} UiServiceState_t;
+
+void UiBackend_ServiceGoTo(float mmhg);
+UiServiceState_t UiBackend_ServiceState(void);
+
+/* Teste de vazamento: o veredito vem do firmware. */
+typedef enum {
+    UI_LEAK_NONE = 0,
+    UI_LEAK_RISING,    /* subindo e assentando */
+    UI_LEAK_OBSERVING, /* bomba parada, medindo a queda */
+    UI_LEAK_PASSED,
+    UI_LEAK_FAILED,
+    UI_LEAK_ABORTED    /* pedal ou falha: sem veredito */
+} UiLeakPhase_t;
+
+typedef struct {
+    UiLeakPhase_t phase;
+    uint32_t remaining_ms;
+    float    drop_mmhg;
+    bool     held;          /* false: nao conseguiu manter a pressao */
+} UiLeakStatus_t;
+
+void UiBackend_GetLeakStatus(UiLeakStatus_t * out);
 /* point = 1 ou 2. false = leitura ainda variando (ou sensor invalido):
  * aguardar estabilizar e capturar de novo. */
 bool UiBackend_CalCapture(uint8_t point, float ref_mmhg);

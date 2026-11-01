@@ -432,22 +432,70 @@ void UiBackend_SubmitCycleRecord(uint16_t operator_id, uint16_t participant_id,
 
 /* --- Calibracao --------------------------------------------------------- */
 
+static volatile bool s_click_sound = true;
+static bool s_leak_logged = true; /* nada a registrar antes do primeiro teste */
+
 void UiBackend_CalZero(void)
 {
     ADC_Acq_ZeroNow();
 }
 
-void UiBackend_CalSetPumpPct(uint8_t pct)
+void UiBackend_ServiceGoTo(float mmhg)
 {
-    uint8_t p = (pct > 100u) ? 100u : pct;
+    ControlLoop_ServiceGoTo(mmhg);
+}
 
-    /* V1+V2+V3 abertas de proposito: V3 liga o manometro externo; V1/V2
-     * abertas evitam acumular pressao alem do que a pressao de teste pede. */
-    ControlLoop_SetManualActuators((float)p / 100.0f, 1u, 1u, 1u);
+UiServiceState_t UiBackend_ServiceState(void)
+{
+    switch (ControlLoop_ServiceState()) {
+        case PRESSURE_TARGET_RISING:
+        case PRESSURE_TARGET_SETTLING: return UI_SERVICE_MOVING;
+        case PRESSURE_TARGET_STABLE:   return UI_SERVICE_STABLE;
+        case PRESSURE_TARGET_FAILED:   return UI_SERVICE_FAILED;
+        case PRESSURE_TARGET_IDLE:
+        default:                       return UI_SERVICE_IDLE;
+    }
+}
+
+void UiBackend_GetLeakStatus(UiLeakStatus_t * out)
+{
+    ControlLoop_LeakStatus_t s;
+    char start_txt[FMT_FIXED_LEN];
+    char end_txt[FMT_FIXED_LEN];
+    char msg[80];
+
+    ControlLoop_GetLeakStatus(&s);
+    out->phase = (UiLeakPhase_t)s.phase; /* mesma ordem de ControlLoop_LeakPhase_t */
+    out->remaining_ms = s.remaining_ms;
+    out->drop_mmhg = s.start_mmhg - s.end_mmhg;
+    out->held = (s.held != 0u);
+
+    if ((s.phase == CONTROL_LEAK_RISING) || (s.phase == CONTROL_LEAK_OBSERVING)) {
+        s_leak_logged = false;
+    } else if ((s.phase != CONTROL_LEAK_NONE) && !s_leak_logged) {
+        s_leak_logged = true;
+        Fmt_Fixed(start_txt, sizeof(start_txt), s.start_mmhg, 1u, 0u);
+        Fmt_Fixed(end_txt, sizeof(end_txt), s.end_mmhg, 1u, 0u);
+        (void)snprintf(msg, sizeof(msg), "Vazamento IHM: %s, %s -> %s mmHg",
+                       (s.phase == CONTROL_LEAK_PASSED) ? "aprovado" :
+                       (s.phase == CONTROL_LEAK_FAILED) ? "reprovado" : "interrompido", start_txt, end_txt);
+        CalManager_Log(0u, "", msg);
+    }
+}
+
+void UiBackend_SetClickSound(bool enabled)
+{
+    s_click_sound = enabled;
+}
+
+bool UiBackendStm32_ClickSoundEnabled(void)
+{
+    return s_click_sound;
 }
 
 void UiBackend_CalAbort(void)
 {
+    ControlLoop_ServiceStop();
     ControlLoop_DisableManualActuators();
     s_cal_point1_ok = 0u;
     s_cal_point2_ok = 0u;

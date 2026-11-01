@@ -88,7 +88,7 @@ static const ScriptStep_t k_script[] = {
     {  600u, ACT_SHOT,  0, "08_settings_top" },
     {  100u, ACT_ROT,   5, NULL },                 /* -> pressao de teste */
     {  600u, ACT_SHOT,  0, "09_settings_calibration" },
-    {  100u, ACT_ROT,   6, NULL },                 /* -> dia */
+    {  100u, ACT_ROT,   7, NULL },                 /* -> dia */
     {  600u, ACT_SHOT,  0, "10_settings_datetime" },
     {  100u, ACT_ROT,   7, NULL },                 /* -> Teste de Vazamento */
     {  600u, ACT_SHOT,  0, "11_settings_bottom" },

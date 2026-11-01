@@ -1812,3 +1812,16 @@ descida 0,8 s); a de referencia e' coxa, manguito mais folgado.
 Coxa, 3 x 60, 2 x 80/100/120, plato 8 s, firmware atual: ins 4,6-7,3 s, pico <= 101,3% do alvo, residual 3,6-4,2.
 Todos NC05: descida 2,2-3,1 s. Ate' <10 mmHg 1,5-1,9 s; ate' <5 mmHg 2,2-2,7 s; a medida soma os 200 ms de
 `t_seguro`. Limite fisico de vazao com esse volume. TODO(DECISAO): valvulas NA maiores ou rever o limite.
+
+## IHM: servico, vazamento, sons e serie de 3 medidas (2026-10-31)
+
+Pedidos do usuario na bancada. `pressure_target.c` traz para o firmware a rotina de ir a' pressao do app.
+- Verificacao de calibracao: alvo em mmHg com V3 aberta; bomba para ao assentar; P1 e P2 em sequencia. Antes a
+  tela ligava a bomba por % com V1, V2 e V3 abertas. A calibracao completa segue so' no app DEV.
+- Vazamento: veredito no firmware. Sai APROVADO/REPROVADO so' com a medida; pedal ou falha = interrompido. O PID
+  antigo foi removido. Padrao 100 mmHg, 10 s, 8 mmHg gravado na EEPROM.
+- Sons: status do ensaio e encoder independentes. Erro e inicio pelo PC tocam sempre.
+- Serie: `measure` vira o ciclo C1 a C3 do registro. NC07 e NC08 repetem a medida; demais NC contam. Na 3a, Refazer
+  bateria ou Outro paciente. Pedal com a pergunta aberta refaz a bateria.
+Testado no host e no simulador. TODO(BANCADA): tudo isto no equipamento, sobretudo V3 e fim da serie, cuja tela
+nao esta' no tour do simulador.

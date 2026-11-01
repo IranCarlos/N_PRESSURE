@@ -78,20 +78,9 @@ static const ControlCore_SafetyConfig_t s_control_safety = {
     .t_seguro_ms = 200u,
 };
 
-typedef enum {
-    LEAK_PHASE_INFLATE = 0,
-    LEAK_PHASE_HOLD
-} LeakPhase_t;
-
-/**
- * @brief Estrutura interna do estado do PID (usada SO' pelo teste de
- *        vazamento manual/calibracao — ver handle_state_leak_test). O
- *        caminho automatico do ensaio usa o Control_Core (ControlCore_t).
- */
-typedef struct {
-    float integral;
-    float prev_error;
-} PID_State_t;
+#define LEAK_TARGET_MAX_MMHG (170.0f)
+#define LEAK_MEAN_TAU_S      (0.6f)
+#define SERVICE_ZERO_VENT_MS (5000U)
 
 /**
  * @brief Estrutura interna do estado do módulo de controle.
@@ -108,15 +97,15 @@ static struct {
     // ensaio — ver sim-report.md, item 10).
     ControlCore_t cc;
 
-    // Estado do PID "manual", usado so' pelo teste de vazamento (DEV/cal).
-    PID_State_t pid_state;
-    float leak_test_start_pressure;
-    uint32_t leak_test_start_tick;
-    uint32_t leak_test_hold_start_tick;
-    LeakPhase_t leak_phase;
+    // Rotina de ir a' pressao: servico da IHM e subida do teste de vazamento.
+    PressureTarget_t service;
+    uint8_t  service_active;
+    uint8_t  service_zero;     // 0 mmHg: abre tudo, sem bomba
+    uint32_t service_zero_ms;
+    ControlLoop_LeakStatus_t leak;
+    float leak_mean_mmhg;
     float leak_prev_setpoint_mmhg;
-    uint32_t relief_pulse_until_tick;
-    uint32_t relief_recheck_tick;
+    SystemState_t leak_prev_state;
 
     uint8_t manual_test_enabled;
     uint8_t manual_v1_on;
@@ -158,114 +147,48 @@ static void set_pump_power(float power) {
     (void)PwmMotor_SetPower(power); // satura em [0, limite]; CCR = potencia*(ARR+1)
 }
 
-/** @brief Executa uma iteração do algoritmo PID "manual" — usado SO' pela
- *         fase de inflar do teste de vazamento (handle_state_leak_test).
- *         Mesma formula historica deste modulo; o caminho automatico do
- *         ensaio usa o PID do Control_Core (ver control_core.c), que
- *         corrigiu dois bugs aqui presentes (ver sim-report.md itens 2-3) —
- *         nao replicados aqui porque o teste de vazamento e' uma rotina de
- *         bancada/calibracao, nao o ensaio em si; revisar se for reaproveitar
- *         tambem. */
-static void run_pid_iteration(void) {
-    const PID_Config_t* pid_cfg = &s_control.sys_cfg->pid;
-    float error_mmhg;
-    float output;
-    float pump_power;
-    float over_mmhg;
-    uint8_t relief_on;
-    uint8_t valve2_on;
-    uint32_t now_tick;
-    uint32_t pulse_ms;
+/* --- Handlers fora do ensaio automatico (CONFIG e LEAK_TEST) --- */
 
-    float setpoint_kpa = s_control.runtime_data->setpoint_mmhg / MMHG_PER_KPA;
-    float current_kpa = s_control.runtime_data->pressure_kpa;
-
-    float error = setpoint_kpa - current_kpa;
-
-    float p_term = pid_cfg->kp * error;
-
-    s_control.pid_state.integral += pid_cfg->ki * error * (pid_cfg->sample_time_ms / 1000.0f);
-    if (s_control.pid_state.integral > pid_cfg->i_max) s_control.pid_state.integral = pid_cfg->i_max;
-    if (s_control.pid_state.integral < pid_cfg->i_min) s_control.pid_state.integral = pid_cfg->i_min;
-
-    float derivative = (error - s_control.pid_state.prev_error) / (pid_cfg->sample_time_ms / 1000.0f);
-    float d_term = pid_cfg->kd * derivative / 10.f;
-    s_control.pid_state.prev_error = error;
-
-    float ff_term = pid_cfg->ff * setpoint_kpa;
-
-    output = ff_term + p_term + s_control.pid_state.integral + d_term;
-
-    if (pid_cfg->out_max > 0.0f) {
-        pump_power = output / pid_cfg->out_max;
-    } else {
-        pump_power = output;
-    }
-
-    if (pump_power < 0.0f) {
-        pump_power = 0.0f;
-    }
-    if (pump_power > 1.0f) {
-        pump_power = 1.0f;
-    }
-
-    error_mmhg = (setpoint_kpa - current_kpa) * MMHG_PER_KPA;
-    if ((fabsf(error_mmhg) <= 5.0f) && (s_control.runtime_data->setpoint_mmhg > 10.0f) &&
-        (pump_power < 0.2f)) {
-        pump_power = 0.2f;
-    }
-
-    relief_on = 0U;
-    valve2_on = 0U;
-    now_tick = HAL_GetTick();
-
-    if ((s_control.relief_pulse_until_tick != 0U) && (now_tick < s_control.relief_pulse_until_tick)) {
-        relief_on = 1U;
-        pump_power *= 0.1f;
-    }
-
-    if (error_mmhg < -10.0f) {
-        over_mmhg = -error_mmhg;
-
-        if (over_mmhg >= 50.0f) {
-            if (now_tick >= s_control.relief_recheck_tick) {
-                pulse_ms = 1u;
-                s_control.relief_pulse_until_tick = now_tick + pulse_ms;
-                s_control.relief_recheck_tick = now_tick + pulse_ms + 10u;
-                relief_on = 1U;
-            }
-            pump_power *= 0.8f;
-        } else {
-            if (now_tick >= s_control.relief_recheck_tick) {
-                pulse_ms = 1u;
-                s_control.relief_pulse_until_tick = now_tick + pulse_ms;
-                s_control.relief_recheck_tick = now_tick + pulse_ms + 10u;
-                relief_on = 1U;
-            }
-
-            if (pump_power < 0.2f) {
-                pump_power = 0.2f;
-            }
-            pump_power *= 0.6f;
-        }
-    } else {
-        s_control.relief_pulse_until_tick = 0U;
-        s_control.relief_recheck_tick = now_tick;
-    }
-
-    set_pump_power(pump_power);
-    set_valves(relief_on, valve2_on, 0);
+static float current_mmhg(void) {
+    return s_control.runtime_data->pressure_kpa * MMHG_PER_KPA;
 }
 
-/* --- Handlers fora do ensaio automatico (CONFIG e LEAK_TEST) --- */
+/* Servico (IHM): V3 aberta para o manometro; so' a rotina decide bomba e V2. */
+static void handle_service(void) {
+    PressureTarget_Output_t out;
+
+    if (s_control.service_zero != 0U) {
+        s_control.service_zero_ms += CONTROL_LOOP_PERIOD_MS;
+        set_pump_power(0.0f);
+        set_valves(1, 1, 1);
+        return;
+    }
+
+    PressureTarget_Step(&s_control.service, current_mmhg(), CONTROL_LOOP_PERIOD_MS, &out);
+    set_pump_power(out.pump_power);
+    if (s_control.service.state == PRESSURE_TARGET_FAILED) {
+        set_valves(1, 1, 1);
+    } else {
+        set_valves(0, out.vent_open, 1);
+    }
+}
 
 static void handle_state_config(void) {
     if (s_control.manual_test_enabled != 0U) {
         set_pump_power(s_control.manual_pump_power);
         set_valves(s_control.manual_v1_on, s_control.manual_v2_on, s_control.manual_v3_on);
+    } else if (s_control.service_active != 0U) {
+        handle_service();
     } else {
+        uint8_t v3_open = (s_control.v3_linger_ms > 0U) ? 1U : 0U;
+
+        if (s_control.v3_linger_ms > CONTROL_LOOP_PERIOD_MS) {
+            s_control.v3_linger_ms -= CONTROL_LOOP_PERIOD_MS;
+        } else {
+            s_control.v3_linger_ms = 0U;
+        }
         set_pump_power(0.0f);
-        set_valves(1, 1, 0);
+        set_valves(1, 1, v3_open);
     }
 }
 
@@ -318,45 +241,63 @@ static void handle_state_manual(void) {
     }
 }
 
-/* TODO(BUG): falso APROVADO - o veredito so' existe na IHM e qualquer saida deste
- * estado (E001, timeout) vira APROVADO. Refazer conforme o requisito de
- * Docs/dev/00-auditoria.md: subir, estabilizar, desligar a bomba e comparar a
- * queda com o limite, com veredito no firmware. Adiado pelo usuario (2026-10-31). */
+static void leak_finish(ControlLoop_LeakPhase_t phase) {
+    s_control.leak.phase = phase;
+    s_control.leak.remaining_ms = 0U;
+    set_pump_power(0.0f);
+    s_control.runtime_data->setpoint_mmhg = s_control.leak_prev_setpoint_mmhg;
+    s_control.runtime_data->state = s_control.leak_prev_state;
+}
+
+/* Sobe, espera assentar, para a bomba e compara a queda com o limite. So' um teste
+ * que chegou ao fim tem veredito; pedal e falha terminam em ABORTED. */
 static void handle_state_leak_test(void) {
-    uint32_t now = HAL_GetTick();
-    float current_mmhg = s_control.runtime_data->pressure_kpa * MMHG_PER_KPA;
-    float target_mmhg = s_control.sys_cfg->leak_test.target_mmhg;
+    float pressure = current_mmhg();
+    const uint32_t dt_ms = CONTROL_LOOP_PERIOD_MS;
+    const SystemConfig_t* cfg = s_control.sys_cfg;
 
-    if (s_control.leak_phase == LEAK_PHASE_INFLATE) {
-        float err_mmhg = target_mmhg - current_mmhg;
+    /* Media de ~1 batimento: no membro o pulso arterial nao entra na queda. */
+    s_control.leak_mean_mmhg += (pressure - s_control.leak_mean_mmhg) *
+        ((float)dt_ms / ((1000.0f * LEAK_MEAN_TAU_S) + (float)dt_ms));
 
-        if (err_mmhg <= LEAK_TEST_TARGET_HYST_MMHG) {
-            s_control.leak_phase = LEAK_PHASE_HOLD;
-            s_control.leak_test_hold_start_tick = now;
-            s_control.leak_test_start_pressure = current_mmhg;
-            set_pump_power(0.0f);
-            set_valves(0, 0, 0);
-            return;
+    if (s_control.runtime_data->bt_user_pressed != 0U) {
+        s_control.runtime_data->bt_user_pressed = 0U;
+        leak_finish(CONTROL_LEAK_ABORTED);
+        return;
+    }
+
+    if (s_control.leak.phase == CONTROL_LEAK_RISING) {
+        PressureTarget_Output_t out;
+
+        PressureTarget_Step(&s_control.service, pressure, dt_ms, &out);
+        set_pump_power(out.pump_power);
+        set_valves(0, out.vent_open, 0);
+        if (s_control.service.state == PRESSURE_TARGET_STABLE) {
+            s_control.leak.phase = CONTROL_LEAK_OBSERVING;
+            s_control.leak.start_mmhg = s_control.leak_mean_mmhg;
+            s_control.leak.end_mmhg = s_control.leak_mean_mmhg;
+            s_control.leak.remaining_ms = cfg->leak_test.hold_time_ms;
+        } else if (s_control.service.state == PRESSURE_TARGET_FAILED) {
+            if (s_control.service.fail == PRESSURE_TARGET_FAIL_OVER) {
+                leak_finish(CONTROL_LEAK_ABORTED);
+            } else { /* nao manter a pressao e' reprovacao, nao falta de resultado */
+                s_control.leak.held = 0U;
+                s_control.leak.start_mmhg = s_control.service.target_mmhg;
+                s_control.leak.end_mmhg = s_control.leak_mean_mmhg;
+                leak_finish(CONTROL_LEAK_FAILED);
+            }
         }
-
-        if ((now - s_control.leak_test_start_tick) >= s_control.sys_cfg->leak_test.reach_timeout_ms) {
-            set_pump_power(0.0f);
-            set_valves(0, 0, 0);
-            s_control.runtime_data->setpoint_mmhg = s_control.leak_prev_setpoint_mmhg;
-            s_control.runtime_data->state = SYSTEM_STATE_IDLE;
-            return;
-        }
-
-        run_pid_iteration();
         return;
     }
 
     set_pump_power(0.0f);
     set_valves(0, 0, 0);
-
-    if ((now - s_control.leak_test_hold_start_tick) >= s_control.sys_cfg->leak_test.hold_time_ms) {
-        s_control.runtime_data->setpoint_mmhg = s_control.leak_prev_setpoint_mmhg;
-        s_control.runtime_data->state = SYSTEM_STATE_IDLE;
+    s_control.leak.end_mmhg = s_control.leak_mean_mmhg;
+    if (s_control.leak.remaining_ms > dt_ms) {
+        s_control.leak.remaining_ms -= dt_ms;
+    } else {
+        leak_finish(((s_control.leak.start_mmhg - s_control.leak.end_mmhg) <= cfg->leak_test.max_drop_mmhg)
+                    ? CONTROL_LEAK_PASSED : CONTROL_LEAK_FAILED);
     }
 }
 
@@ -614,6 +555,10 @@ void ControlLoop_ExitConfigMode(void) {
 void ControlLoop_EnterFaultState(void) {
     ControlCore_Actuators_t out;
 
+    if ((s_control.leak.phase == CONTROL_LEAK_RISING) || (s_control.leak.phase == CONTROL_LEAK_OBSERVING)) {
+        s_control.leak.phase = CONTROL_LEAK_ABORTED;
+    }
+    s_control.service_active = 0U;
     s_control.manual_test_enabled = 0U;
     // Aplica o estado seguro imediatamente, sem esperar o proximo
     // ControlLoop_Update().
@@ -623,18 +568,65 @@ void ControlLoop_EnterFaultState(void) {
 }
 
 void ControlLoop_StartLeakTest(void) {
-    if (s_control.runtime_data->state == SYSTEM_STATE_CONFIG || s_control.runtime_data->state == SYSTEM_STATE_IDLE) {
+    SystemState_t state = s_control.runtime_data->state;
+    float target = s_control.sys_cfg->leak_test.target_mmhg;
+
+    if ((state == SYSTEM_STATE_CONFIG) || (state == SYSTEM_STATE_IDLE)) {
         s_control.manual_test_enabled = 0U;
+        s_control.service_active = 0U;
         set_pump_power(0.0f);
         set_valves(0, 0, 0);
+        if (target > LEAK_TARGET_MAX_MMHG) {
+            target = LEAK_TARGET_MAX_MMHG; /* longe de P_MAX_ABS, mesmo com inercia */
+        }
+        s_control.leak_prev_state = state;
         s_control.leak_prev_setpoint_mmhg = s_control.runtime_data->setpoint_mmhg;
-        s_control.runtime_data->setpoint_mmhg = s_control.sys_cfg->leak_test.target_mmhg;
+        s_control.runtime_data->setpoint_mmhg = target;
+        s_control.leak_mean_mmhg = current_mmhg();
+        memset(&s_control.leak, 0, sizeof(s_control.leak));
+        s_control.leak.phase = CONTROL_LEAK_RISING;
+        s_control.leak.held = 1U;
+        PressureTarget_Start(&s_control.service, target);
         s_control.runtime_data->state = SYSTEM_STATE_LEAK_TEST;
-        s_control.leak_test_start_tick = HAL_GetTick();
-        s_control.leak_test_hold_start_tick = s_control.leak_test_start_tick;
-        s_control.leak_phase = LEAK_PHASE_INFLATE;
-        s_control.leak_test_start_pressure = s_control.runtime_data->pressure_kpa * MMHG_PER_KPA;
     }
+}
+
+void ControlLoop_GetLeakStatus(ControlLoop_LeakStatus_t *out) {
+    *out = s_control.leak;
+}
+
+void ControlLoop_ServiceGoTo(float target_mmhg) {
+    if (s_control.runtime_data->state != SYSTEM_STATE_CONFIG) {
+        return;
+    }
+    s_control.manual_test_enabled = 0U;
+    s_control.service_zero = (target_mmhg < 1.0f) ? 1U : 0U;
+    s_control.service_zero_ms = 0U;
+    if (s_control.service_zero == 0U) {
+        if (target_mmhg > LEAK_TARGET_MAX_MMHG) {
+            target_mmhg = LEAK_TARGET_MAX_MMHG;
+        }
+        PressureTarget_Start(&s_control.service, target_mmhg);
+    }
+    s_control.service_active = 1U;
+}
+
+void ControlLoop_ServiceStop(void) {
+    if (s_control.service_active != 0U) {
+        s_control.service_active = 0U;
+        s_control.v3_linger_ms = CONTROL_CORE_V3_LINGER_MS; // esvazia a linha do manometro
+    }
+}
+
+PressureTarget_State_t ControlLoop_ServiceState(void) {
+    if (s_control.service_active == 0U) {
+        return PRESSURE_TARGET_IDLE;
+    }
+    if (s_control.service_zero != 0U) {
+        return (s_control.service_zero_ms >= SERVICE_ZERO_VENT_MS) ? PRESSURE_TARGET_STABLE
+                                                                  : PRESSURE_TARGET_SETTLING;
+    }
+    return s_control.service.state;
 }
 
 void ControlLoop_SetManualActuators(float pump_power, uint8_t valve1_on, uint8_t valve2_on, uint8_t valve3_on) {

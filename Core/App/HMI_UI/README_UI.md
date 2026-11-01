@@ -53,6 +53,8 @@ BOOT --(1,5 s ou clique)--> HOME <--> MENU --> NOVO ENSAIO --(Confirmar)--> HOME
 Popups (lv_layer_top): RESULTADO DO ENSAIO, ERRO
 ```
 
+- Cada paciente faz 3 medidas (`UI_SERIES_LENGTH`). Cancelado (NC07) ou falha técnica (NC08) repete a
+  mesma medida; os demais contam. Ao fim, o popup pergunta: refazer a bateria ou outro paciente.
 - O erro tem prioridade: se chegar com o resultado aberto, o resultado é fechado. Um resultado que
   chegar com o erro aberto espera o erro ser fechado.
 - O início de um ensaio fecha os popups do ciclo anterior (só na borda de início: um erro surgido
