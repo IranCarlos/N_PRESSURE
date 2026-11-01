@@ -81,7 +81,7 @@ void HMI_Init(lv_indev_t * encoder_indev)
     UI_NewTestScreen_Init(ui_on_home_cb, ui_on_menu_cb);
     UI_SettingsScreen_Init(ui_on_settings_back_cb);
 
-    UI_ResultPopup_Init(ui_on_popup_closed_cb, ui_on_menu_new_test_cb);
+    UI_ResultPopup_Init(ui_on_popup_closed_cb);
     UI_ErrorPopup_Init(ui_on_popup_closed_cb);
 
     ui_show_screen(HMI_SCREEN_BOOT);

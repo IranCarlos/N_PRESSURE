@@ -1831,3 +1831,7 @@ O documento-fonte da Trilha ainda diz 1 a 2 s. Ensaios ja' gravados mantem o NC 
 
 Ajustes: opcao "V3 nos ensaios" (usuario). Ligada e' o padrao; desligada mantem a V3 fechada em todo o ensaio,
 inclusive na descida. So' RAM: volta ligada no boot. Sai no release com `CONTROL_CORE_V3_FOLLOWS_TEST`.
+
+Pedido do usuario: V3 desligada por padrao nos ensaios (fechada tambem na descida) e, ao fim da bateria, "Outro
+paciente" abre o numero do paciente ja' em edicao, sem a tela de Novo Ensaio, que segue igual no menu.
+TODO(BANCADA): sem a V3 a descida conta com V1+V2; repetir a bateria e rever o limite de 3,5 s.

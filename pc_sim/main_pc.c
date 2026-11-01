@@ -1,3 +1,4 @@
+#include <stdlib.h>
 /**
  * @file main_pc.c
  * @brief Simulador de PC (SDL2) rodando o MESMO codigo de Core/App/HMI_UI
@@ -23,6 +24,7 @@
 #include <string.h>
 #include "lvgl.h"
 #include "hmi_ui.h"
+#include "ui_session.h"
 #include "ui_backend_mock.h"
 
 #define SIM_HOR_RES   (320)
@@ -68,6 +70,7 @@ static const ScriptStep_t k_script[] = {
     {  100u, ACT_PEDAL, 0, NULL },
     { 4800u, ACT_SHOT,  0, "04_result_popup" },
     {  200u, ACT_PRESS, 0, NULL },                 /* Fechar */
+    {  300u, ACT_SHOT,  0, "04b_after_result" },
     {  500u, ACT_PRESS, 0, NULL },                 /* botao de menu */
     {  500u, ACT_SHOT,  0, "05_menu" },
     {  100u, ACT_PRESS, 0, NULL },                 /* Novo Ensaio */
@@ -285,6 +288,7 @@ int main(int argc, char * argv[])
 
     UiMock_Init();
     HMI_Init(wheel);
+    if (getenv("SIM_ULTIMA_MEDIDA") != NULL) { UiSession_Get()->measure = UI_SERIES_LENGTH; } /* para ver o fim da bateria */
     HMI_BindIndev(kb_encoder);
 
     printf("Setas: girar | Enter: botao (segurar = long-press) | Espaco: pedal\n"

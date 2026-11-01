@@ -16,6 +16,9 @@
  *     y=104  Overshoot: N mmHg
  *     y=124  proxima medida ou fim da bateria
  *     base   [ Fechar ] ou [ Refazer bateria ] [ Outro paciente ]
+ *
+ * "Outro paciente" troca o popup pelo numero do paciente ja' em edicao: operador
+ * e setpoint nao mudam entre pacientes, entao nao passa pela tela de Novo Ensaio.
  */
 
 #include "ui_result_popup.h"
@@ -26,9 +29,10 @@
 #include <string.h>
 
 #define UI_RESULT_AUTO_CLOSE_MS (8000u)
+#define UI_PATIENT_MAX          (999)
 
 static UI_ResultPopup_ClosedCb_t s_closed_cb;
-static UI_ResultPopup_ClosedCb_t s_next_patient_cb;
+static lv_obj_t * s_patient_spin; /* != NULL: editando o proximo paciente */
 static bool s_needs_choice; /* fim da bateria: espera a escolha, sem fechar sozinho */
 static lv_obj_t * s_dim_bg;
 static uint32_t s_shown_tick;
@@ -36,13 +40,13 @@ static uint32_t s_shown_tick;
 static void ui_close_event_cb(lv_event_t * e);
 static void ui_redo_event_cb(lv_event_t * e);
 static void ui_next_patient_event_cb(lv_event_t * e);
+static void ui_commit_patient(void);
 static void ui_close(void);
 static lv_obj_t * ui_metric_line(lv_obj_t * card, int32_t y);
 
-void UI_ResultPopup_Init(UI_ResultPopup_ClosedCb_t closed_cb, UI_ResultPopup_ClosedCb_t next_patient_cb)
+void UI_ResultPopup_Init(UI_ResultPopup_ClosedCb_t closed_cb)
 {
     s_closed_cb = closed_cb;
-    s_next_patient_cb = next_patient_cb;
 }
 
 void UI_ResultPopup_Show(const UiCycleResult_t * result, UiSeriesStep_t step)
@@ -137,7 +141,7 @@ void UI_ResultPopup_Show(const UiCycleResult_t * result, UiSeriesStep_t step)
         group_cfg.count = 1U;
     }
     group_cfg.focus_objs = focusables;
-    group_cfg.initial_focus_idx = 0U;
+    group_cfg.initial_focus_idx = s_needs_choice ? 1U : 0U; /* normalmente segue o proximo paciente */
     group_cfg.wrap = true;
     (void)HMI_EncoderGroup_Load(&group_cfg);
 
@@ -159,6 +163,8 @@ bool UI_ResultPopup_IsActive(void)
 
 void UI_ResultPopup_Dismiss(void)
 {
+    /* Ensaio iniciado pelo pedal durante a edicao: vale o numero que estava na tela. */
+    ui_commit_patient();
     if (s_dim_bg != NULL) {
         lv_obj_delete(s_dim_bg);
         s_dim_bg = NULL;
@@ -187,18 +193,65 @@ static void ui_redo_event_cb(lv_event_t * e)
     ui_close();
 }
 
-/* O proximo paciente ja' vem sugerido; a tela de Novo Ensaio confirma o numero. */
+static void ui_commit_patient(void)
+{
+    if (s_patient_spin != NULL) {
+        UiSession_SetParticipant((uint16_t)lv_spinbox_get_value(s_patient_spin));
+        s_patient_spin = NULL;
+    }
+}
+
+static void ui_patient_confirm_event_cb(lv_event_t * e)
+{
+    LV_UNUSED(e);
+    ui_commit_patient();
+    ui_close();
+}
+
+/* Numero ja' sugerido e em edicao: girar ajusta, pressionar confirma. */
 static void ui_next_patient_event_cb(lv_event_t * e)
 {
-    UiSession_t * session = UiSession_Get();
+    static lv_obj_t * focusables[1];
+    HMI_EncoderGroupConfig_t group_cfg;
+    uint32_t next = (uint32_t)UiSession_Get()->participant_id + 1u;
+    lv_obj_t * card;
+    lv_obj_t * lbl;
 
     LV_UNUSED(e);
-    UiSession_SetParticipant((uint16_t)(session->participant_id + 1u));
+
+    /* Assincrono: estamos dentro do callback de um filho de s_dim_bg. */
     lv_obj_delete_async(s_dim_bg);
-    s_dim_bg = NULL;
-    if (s_next_patient_cb != NULL) {
-        s_next_patient_cb();
-    }
+
+    s_dim_bg = lv_obj_create(lv_layer_top());
+    UiTheme_StyleOverlay(s_dim_bg);
+    lv_obj_set_size(s_dim_bg, LV_HOR_RES, LV_VER_RES);
+
+    card = lv_obj_create(s_dim_bg);
+    lv_obj_set_size(card, LV_HOR_RES - 40, 130);
+    lv_obj_center(card);
+    UiTheme_StyleBox(card);
+    lv_obj_remove_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    lbl = lv_label_create(card);
+    lv_label_set_text_static(lbl, "Proximo paciente");
+    UiTheme_LabelTitle(lbl);
+    lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 6);
+
+    s_patient_spin = UiW_Spinbox(card, 96, 30, 0, UI_PATIENT_MAX, 3u, 1, NULL);
+    lv_spinbox_set_value(s_patient_spin, (next > (uint32_t)UI_PATIENT_MAX) ? UI_PATIENT_MAX : (int32_t)next);
+    lv_obj_align(s_patient_spin, LV_ALIGN_TOP_MID, 0, 42);
+    lv_obj_add_event_cb(s_patient_spin, ui_patient_confirm_event_cb, LV_EVENT_CLICKED, NULL);
+
+    lbl = UiW_LabelHint(card, "Gire e pressione para confirmar");
+    lv_obj_align(lbl, LV_ALIGN_TOP_MID, 0, 84);
+
+    focusables[0] = s_patient_spin;
+    group_cfg.focus_objs = focusables;
+    group_cfg.count = 1U;
+    group_cfg.initial_focus_idx = 0U;
+    group_cfg.wrap = true;
+    (void)HMI_EncoderGroup_Load(&group_cfg);
+    HMI_EncoderGroup_SetEditing(true);
 }
 
 static void ui_close(void)

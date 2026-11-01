@@ -55,7 +55,7 @@ static bool s_leak_holding;
 /* calibracao */
 static uint8_t s_cal_pump_pct;
 static bool s_service_on;
-static bool s_v3_follow = true;
+static bool s_v3_follow;
 static uint32_t s_service_tick;
 static bool s_leak_ran;
 static float s_cal_offset_mmhg;

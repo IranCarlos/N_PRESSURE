@@ -26,7 +26,7 @@ extern "C" {
 
 typedef void (*UI_ResultPopup_ClosedCb_t)(void);
 
-void UI_ResultPopup_Init(UI_ResultPopup_ClosedCb_t closed_cb, UI_ResultPopup_ClosedCb_t next_patient_cb);
+void UI_ResultPopup_Init(UI_ResultPopup_ClosedCb_t closed_cb);
 void UI_ResultPopup_Show(const UiCycleResult_t * result, UiSeriesStep_t step);
 void UI_ResultPopup_Update(void);
 bool UI_ResultPopup_IsActive(void);

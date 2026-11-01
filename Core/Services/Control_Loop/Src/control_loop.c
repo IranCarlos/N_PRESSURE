@@ -307,6 +307,7 @@ static void handle_state_leak_test(void) {
 void ControlLoop_Init(SystemConfig_t* p_sys_cfg, TIM_HandleTypeDef* p_htim_pwm,
                        SystemRuntime_t* p_runtime_data, const ControlLoop_ValvePins_t* p_valve_pins) {
     memset(&s_control, 0, sizeof(s_control));
+    s_control.v3_follow_off = 1U; // decisao do usuario: V3 so' acompanha se pedido nos Ajustes
 
     s_control.sys_cfg = p_sys_cfg;
     s_control.runtime_data = p_runtime_data;

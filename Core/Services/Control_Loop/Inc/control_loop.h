@@ -173,7 +173,7 @@ typedef struct {
 
 void ControlLoop_GetLeakStatus(ControlLoop_LeakStatus_t *out);
 
-/* TODO(RELEASE): sai junto com CONTROL_CORE_V3_FOLLOWS_TEST. So' RAM: volta ligada no boot. */
+/* TODO(RELEASE): sai junto com CONTROL_CORE_V3_FOLLOWS_TEST. So' RAM: volta desligada no boot. */
 void ControlLoop_SetV3Follow(uint8_t enabled);
 uint8_t ControlLoop_GetV3Follow(void);
 
