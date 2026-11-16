@@ -706,6 +706,7 @@ int main(void)
   // no-ops enquanto ela continuar desligada.
   SCB_InvalidateDCache();
 
+  //TODO: DEU RUIM, AQUI
   /* Forca UNALIGN_TRP=0 (tolerar acesso desalinhado em LDR/LDRH/LDRB, valor
    * padrao da arquitetura ARMv7-M). Diagnostico: LVGL v9 usa lv_color_t como
    * struct de 3 bytes {blue,green,red} incondicionalmente (nao depende de
