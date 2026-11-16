@@ -5,6 +5,7 @@
  * Created: 2026-10-22
  */
 #include "params.h"
+#include "pressure_sensor_model.h"
 #include <string.h>
 
 /* Onde cada parametro mora: qual struct (base) e em que posicao (offsetof). */
@@ -16,12 +17,11 @@ typedef struct {
     uint16_t     offset; /* offsetof() dentro da struct base */
 } Entry_t;
 
-/* Fundo de escala do sensor DESTE hardware: MPXV7025DP, 25 kPa = 187,5 mmHg.
- * Limite absoluto, setpoint e alvo do teste de vazamento nao podem passar
- * daqui (o sensor satura e nada acima e' medido). Trocar junto com o sensor
- * de 300 mmHg do proximo hardware. */
-#define PARAMS_SENSOR_FULL_SCALE_MMHG (187.0f)
-#define PARAMS_SETPOINT_MAX_MMHG      (180.0f)
+/* Teto do limite absoluto e da faixa de setpoint/alvo do teste de vazamento:
+ * dependem do sensor montado (MPXV7025DP satura em 187,5 mmHg; MPXV5100GP
+ * vai a 300 mmHg de setpoint). Ver pressure_sensor_model.h. */
+#define PARAMS_SENSOR_FULL_SCALE_MMHG PRESSURE_P_MAX_ABS_LIMIT_MMHG
+#define PARAMS_SETPOINT_MAX_MMHG      PRESSURE_SETPOINT_LIMIT_MMHG
 
 #define F32 ((uint8_t)PARAM_TYPE_F32)
 #define U32 ((uint8_t)PARAM_TYPE_U32)

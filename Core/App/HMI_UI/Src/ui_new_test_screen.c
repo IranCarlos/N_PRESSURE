@@ -90,7 +90,8 @@ void UI_NewTestScreen_Show(void)
 
     /* Alerta (2026-10-22, decisao do usuario): o setpoint vai ate' o limite,
      * mas acima do limiar a protecao de sobrepressao fica com pouca margem
-     * (sensor deste hardware satura em ~187 mmHg). Atualizado a cada giro. */
+     * (limiar e teto vem do backend; dependem do sensor montado). Atualizado
+     * a cada giro. */
     s_warn_label = UiW_LabelHint(s_screen, LV_SYMBOL_WARNING " Acima do limite recomendado:\n"
                                             "margem de sobrepressao reduzida.");
     lv_obj_set_style_text_color(s_warn_label, UiTheme_ColorWarn(), 0);

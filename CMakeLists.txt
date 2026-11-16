@@ -183,9 +183,23 @@ target_link_libraries(n_pressure_analyze PRIVATE stm32cubemx)
 target_compile_options(n_pressure_analyze PRIVATE -fanalyzer)
 add_custom_target(check DEPENDS n_pressure_analyze)
 
+# Sensor de pressao montado (Core/Common/Inc/pressure_sensor_model.h):
+#   cmake --preset Debug -DPRESSURE_SENSOR=MPXV5100GP
+# Fica no cache do build: trocar exige reconfigurar com o novo valor.
+set(PRESSURE_SENSOR "MPXV7025DP" CACHE STRING "Sensor de pressao: MPXV7025DP ou MPXV5100GP")
+set_property(CACHE PRESSURE_SENSOR PROPERTY STRINGS MPXV7025DP MPXV5100GP)
+if(NOT PRESSURE_SENSOR MATCHES "^(MPXV7025DP|MPXV5100GP)$")
+    message(FATAL_ERROR "PRESSURE_SENSOR invalido: ${PRESSURE_SENSOR} (use MPXV7025DP ou MPXV5100GP)")
+endif()
+message(STATUS "Sensor de pressao: ${PRESSURE_SENSOR}")
+
 # Add project symbols (macros)
 target_compile_definitions(${CMAKE_PROJECT_NAME} PRIVATE
     # Add user defined symbols
+    PRESSURE_SENSOR_MODEL=PRESSURE_SENSOR_${PRESSURE_SENSOR}
+)
+target_compile_definitions(n_pressure_analyze PRIVATE
+    PRESSURE_SENSOR_MODEL=PRESSURE_SENSOR_${PRESSURE_SENSOR}
 )
 
 # Remove wrong libob.a library dependency when using cpp files

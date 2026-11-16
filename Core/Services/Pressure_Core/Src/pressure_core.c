@@ -18,10 +18,13 @@ static float counts_to_sensor_volts(float counts)
     return counts * (PRESSURE_SENSOR_VSS_V / PRESSURE_ADC_MAX_COUNTS);
 }
 
+/* Reta pelos pontos (MIN_V, MIN_KPA)-(MAX_V, MAX_KPA). Abaixo de MIN_V ela
+ * e' extrapolada ate' CLAMP_MIN_V (sensor manometrico: o zero atmosferico
+ * mora no pe' da curva - ver pressure_sensor_model.h). */
 static float volts_to_kpa(float v)
 {
-    if (v < PRESSURE_SENSOR_MIN_V) {
-        v = PRESSURE_SENSOR_MIN_V;
+    if (v < PRESSURE_SENSOR_CLAMP_MIN_V) {
+        v = PRESSURE_SENSOR_CLAMP_MIN_V;
     } else if (v > PRESSURE_SENSOR_MAX_V) {
         v = PRESSURE_SENSOR_MAX_V;
     }

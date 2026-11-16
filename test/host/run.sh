@@ -15,6 +15,9 @@ run() { # nome fontes...
     "$OUT/$name.exe" || fail=1
 }
 run test_pressure_core test/host/test_pressure_core.c Core/Services/Pressure_Core/Src/pressure_core.c
+# Mesmo teste com o sensor alternativo (pressure_sensor_model.h).
+run test_pressure_core_5100 -DPRESSURE_SENSOR_MODEL=PRESSURE_SENSOR_MPXV5100GP \
+    test/host/test_pressure_core.c Core/Services/Pressure_Core/Src/pressure_core.c
 run test_actuators test/host/test_actuators.c Core/Bsp/Valve/Src/valve.c \
     Core/Bsp/PwmMotor/Src/pwm_motor.c Core/App/Bench/Src/actuator_bench.c
 run test_rtc_validity test/host/test_rtc_validity.c Core/Services/Rtc_Service/Src/rtc_validity.c
@@ -39,6 +42,9 @@ run test_usb_telemetry test/host/test_usb_telemetry.c Core/Services/UsbProto/Src
 run test_event_watch test/host/test_event_watch.c Core/Services/Event_Watch/Src/event_watch.c
 run test_calibration test/host/test_calibration.c Core/Services/Calibration/Src/calibration.c
 run test_params test/host/test_params.c Core/Services/Params/Src/params.c \
+    Core/Services/Control_Core/Src/control_core.c
+run test_params_5100 -DPRESSURE_SENSOR_MODEL=PRESSURE_SENSOR_MPXV5100GP \
+    test/host/test_params.c Core/Services/Params/Src/params.c \
     Core/Services/Control_Core/Src/control_core.c
 run test_usb_proto_policy test/host/test_usb_proto_policy.c Core/Services/UsbProto/Src/usb_proto_policy.c
 run test_usb_rx_ring test/host/test_usb_rx_ring.c Core/Services/UsbProto/Src/usb_rx_ring.c

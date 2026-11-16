@@ -22,6 +22,11 @@ cmake --preset Debug          # or Release; configures build/<preset>/
 cmake --build --preset Debug
 ```
 
+Pressure sensor selection: `-DPRESSURE_SENSOR=MPXV7025DP` (default, 187 mmHg full scale) or
+`MPXV5100GP` (setpoint up to 300 mmHg) at configure time. Every sensor-dependent number (curve,
+valid range, setpoint/E001 limits and defaults, calibration reference range) lives only in
+`Core/Common/Inc/pressure_sensor_model.h`; `test/host/run.sh` runs the pressure/params tests for both.
+
 Output: `build/Debug/N_PRESSURE.elf` (and `.map`). Re-run the configure step whenever a `.c` file is
 added/removed/moved — sources are picked up via `file(GLOB_RECURSE ...)` in the root
 `CMakeLists.txt`, which is only re-evaluated at configure time.

@@ -19,6 +19,7 @@
 #include "pwm_motor.h"
 #include "cycle_record.h"
 #include "adc_acq.h"
+#include "pressure_sensor_model.h"
 #include "fault_manager.h"
 #include "FreeRTOS.h"
 #include "task.h"
@@ -623,9 +624,9 @@ void UsbActionsStm32_EnforceManualSession(uint8_t dev_session_active)
 /* Mesmo criterio de estabilidade da verificacao da IHM. */
 #define USB_CAL_MAX_DEVIATION_MMHG (1.0f)
 /* Referencia plausivel: um pouco abaixo de zero (ruido do manometro) ate' o
- * fundo de escala do sensor deste hardware (MPXV7025DP, 187,5 mmHg). */
-#define USB_CAL_REF_MIN_MMHG (-5.0f)
-#define USB_CAL_REF_MAX_MMHG (187.0f)
+ * limite absoluto do sensor montado (pressure_sensor_model.h). */
+#define USB_CAL_REF_MIN_MMHG PRESSURE_CAL_REF_MIN_MMHG
+#define USB_CAL_REF_MAX_MMHG PRESSURE_CAL_REF_MAX_MMHG
 
 static uint8_t s_cal_n;
 static Cal_Point_t s_cal_pts[CAL_MAX_POINTS];

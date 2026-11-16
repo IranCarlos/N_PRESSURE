@@ -13,6 +13,7 @@
 #include "eeprom.h"
 #include "eeprom_port_stm32_hal.h"
 #include "params.h"
+#include "pressure_sensor_model.h"
 
 static EEPROM_Handle_t s_eeprom;
 static uint8_t s_ready = 0u;
@@ -170,12 +171,11 @@ void EEPROM_Storage_LoadDefaults(SystemConfig_t *cfg)
     cfg->sensor_cal.scale = 1.0f;
     cfg->unit = SYS_PRESSURE_UNIT_MMHG;
 
-    /* 180/170 (antes 300): o MPXV7025DP satura em ~187,5 mmHg (25 kPa) -
-     * acima disso nem o setpoint e' alcancavel nem a sobrepressao (E001)
-     * detectavel. Decisao do usuario (2026-10-22): permitir ate' 180 com
-     * alerta acima de 170; voltar a 300 com o sensor do proximo hardware. */
-    cfg->max_setpoint_mmhg = 180.0f;
-    cfg->setpoint_warn_mmhg = 170.0f;
+    /* Dependem do sensor (pressure_sensor_model.h): MPXV7025DP satura em
+     * ~187,5 mmHg -> 180 com alerta acima de 170 (decisao do usuario,
+     * 2026-10-22); MPXV5100GP -> 300, sem alerta (decisao 2026-11-16). */
+    cfg->max_setpoint_mmhg = PRESSURE_SETPOINT_MAX_DEFAULT_MMHG;
+    cfg->setpoint_warn_mmhg = PRESSURE_SETPOINT_WARN_DEFAULT_MMHG;
 
     /* Fase 7.8 - valores iniciais, a confirmar em bancada com o manometro
      * de referencia (ver Docs/dev/00-auditoria.md). */

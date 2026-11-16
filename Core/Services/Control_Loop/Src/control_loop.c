@@ -11,6 +11,7 @@
 #include "valve_gpio.h"
 #include "pwm_motor_tim.h"
 #include "control_core.h"
+#include "pressure_sensor_model.h"
 #include "port_dwt.h"
 #include <string.h>
 #include <math.h> // Para fabsf
@@ -41,10 +42,10 @@ extern void Error_Handler(void);
  * verdade (decisao do usuario, 00-auditoria.md).
  */
 static const ControlCore_SafetyConfig_t s_control_safety = {
-    /* 185 (antes 320): ABAIXO da saturacao do sensor (~187,5 mmHg) - com 320
-     * o E001 nunca disparava, o sensor nao le acima de ~187. Acima do
-     * setpoint maximo (180). Ver PARAMS_SENSOR_FULL_SCALE_MMHG em params.c. */
-    .p_max_abs_mmhg = 185.0f,
+    /* Depende do sensor (pressure_sensor_model.h): sempre ABAIXO da
+     * saturacao e ACIMA do setpoint maximo. MPXV7025DP: 185 (satura em
+     * ~187,5 - com 320 o E001 nunca disparava); MPXV5100GP: 320. */
+    .p_max_abs_mmhg = PRESSURE_P_MAX_ABS_DEFAULT_MMHG,
     /* 300 (nao mais 50): achado de bancada (2026-10) — 50 ms e' menor que o
      * transiente normal de start-up do ADC (ADC_Acq_Init zera o buffer do
      * DMA antes de armar; os primeiros blocos processados por

@@ -103,7 +103,8 @@ extern "C" {
 /* EEPROM map (bytes) - behavior and safety limits                             */
 /* ========================================================================== */
 
-/** @brief float: user setpoint upper limit in mmHg (hard cap = 300 mmHg). */
+/** @brief float: user setpoint upper limit in mmHg (hard cap per sensor:
+ *  PRESSURE_SETPOINT_LIMIT_MMHG in pressure_sensor_model.h, max 300 mmHg). */
 #define EEPROM_ADDR_MAX_SETPOINT_MMHG              (0x0300U)
 
 /** @brief float: stabilization band around setpoint in mmHg. */

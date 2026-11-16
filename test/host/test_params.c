@@ -1,5 +1,6 @@
 /* Teste de host de params (Fase 7.6, sem HAL). Ver test/host/run.sh. */
 #include "params.h"
+#include "pressure_sensor_model.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -21,8 +22,8 @@ static void load_factory(void)
     s_cfg.pid.out_max = 40.0f;
     s_cfg.pid.i_min = -8.0f;
     s_cfg.pid.i_max = 8.0f;
-    s_cfg.max_setpoint_mmhg = 180.0f;
-    s_cfg.setpoint_warn_mmhg = 170.0f;
+    s_cfg.max_setpoint_mmhg = PRESSURE_SETPOINT_MAX_DEFAULT_MMHG;
+    s_cfg.setpoint_warn_mmhg = PRESSURE_SETPOINT_WARN_DEFAULT_MMHG;
     s_cfg.cal_linearity_max_mmhg = 2.0f;
     s_cfg.cal_verify_ok_mmhg = 1.0f;
     s_cfg.cal_verify_fix_max_mmhg = 5.0f;
@@ -33,7 +34,7 @@ static void load_factory(void)
     s_cfg.leak_test.max_drop_mmhg = 5.0f;
     s_cfg.leak_test.reach_timeout_ms = 20000U;
 
-    s_safety.p_max_abs_mmhg = 185.0f;
+    s_safety.p_max_abs_mmhg = PRESSURE_P_MAX_ABS_DEFAULT_MMHG;
     s_safety.sensor_fault_debounce_ms = 300U;
     s_safety.t_inflar_max_ms = 180000U;
     s_safety.t_desinflar_max_ms = 15000U;
@@ -121,14 +122,16 @@ static void test_consistency_rules(void)
     /* pulso_min > pulso_max (150) */
     CHECK(Params_Set(idx_of(0x0303U), 400.0f) == PARAMS_ERR_CONSISTENCY);
     CHECK(s_tuning.relief_pulse_min_ms == 20U); /* desfeito */
-    /* setpoint maximo nao pode alcancar o limite absoluto (185) */
-    CHECK(Params_Set(idx_of(0x0501U), 175.0f) == PARAMS_ERR_CONSISTENCY); /* abaixo do setpoint max 180 */
-    CHECK(Params_Set(idx_of(0x0701U), 160.0f) == PARAMS_OK);
-    CHECK(Params_Set(idx_of(0x0501U), 175.0f) == PARAMS_OK);
-    CHECK(Params_Set(idx_of(0x0701U), 175.0f) == PARAMS_ERR_CONSISTENCY);
-    /* limites do sensor deste hardware (187,5 mmHg) */
-    CHECK(Params_Set(idx_of(0x0501U), 190.0f) == PARAMS_ERR_RANGE);
-    CHECK(Params_Set(idx_of(0x0701U), 181.0f) == PARAMS_ERR_RANGE);
+    /* setpoint maximo nao pode alcancar o limite absoluto */
+    CHECK(Params_Set(idx_of(0x0501U), PRESSURE_SETPOINT_MAX_DEFAULT_MMHG - 5.0f)
+          == PARAMS_ERR_CONSISTENCY); /* abaixo do setpoint max padrao */
+    CHECK(Params_Set(idx_of(0x0701U), PRESSURE_SETPOINT_MAX_DEFAULT_MMHG - 20.0f) == PARAMS_OK);
+    CHECK(Params_Set(idx_of(0x0501U), PRESSURE_SETPOINT_MAX_DEFAULT_MMHG - 5.0f) == PARAMS_OK);
+    CHECK(Params_Set(idx_of(0x0701U), PRESSURE_SETPOINT_MAX_DEFAULT_MMHG - 5.0f)
+          == PARAMS_ERR_CONSISTENCY);
+    /* limites do sensor montado (pressure_sensor_model.h) */
+    CHECK(Params_Set(idx_of(0x0501U), PRESSURE_P_MAX_ABS_LIMIT_MMHG + 3.0f) == PARAMS_ERR_RANGE);
+    CHECK(Params_Set(idx_of(0x0701U), PRESSURE_SETPOINT_LIMIT_MMHG + 1.0f) == PARAMS_ERR_RANGE);
     /* verificacao: faixa OK tem que ser menor que a que corrige */
     CHECK(Params_Set(idx_of(0x0802U), 6.0f) == PARAMS_ERR_CONSISTENCY);
     CHECK(Params_Set(idx_of(0x0803U), 0.8f) == PARAMS_ERR_CONSISTENCY);
@@ -140,10 +143,10 @@ static void test_bind_clamps_out_of_range_default(void)
 {
     const Params_Targets_t t = { &s_cfg, &s_safety, &s_tuning };
     load_factory();
-    s_cfg.max_setpoint_mmhg = 300.0f; /* bloco legado antigo */
+    s_cfg.max_setpoint_mmhg = PRESSURE_SETPOINT_LIMIT_MMHG + 120.0f; /* bloco legado/outro sensor */
     Params_Bind(&t);
-    CHECK(s_cfg.max_setpoint_mmhg == 180.0f);
-    CHECK(Params_GetDefault(idx_of(0x0701U)) == 180.0f);
+    CHECK(s_cfg.max_setpoint_mmhg == PRESSURE_SETPOINT_LIMIT_MMHG);
+    CHECK(Params_GetDefault(idx_of(0x0701U)) == PRESSURE_SETPOINT_LIMIT_MMHG);
 }
 
 static void test_revert_and_defaults(void)
@@ -245,8 +248,28 @@ static void test_blob_forward_compatible(void)
     CHECK(s_cfg.pid.ki == 0.015f); /* 2o par (ki) virou id desconhecido -> default */
 }
 
+/* Os padroes de fabrica do sensor selecionado sao coerentes entre si e
+ * com a tabela (substitui uma checagem em tempo de compilacao, que o
+ * pre-processador nao faz com float). */
+static void test_sensor_model_limits(void)
+{
+    CHECK(PRESSURE_SETPOINT_WARN_DEFAULT_MMHG <= PRESSURE_SETPOINT_MAX_DEFAULT_MMHG);
+    CHECK(PRESSURE_SETPOINT_MAX_DEFAULT_MMHG <= PRESSURE_SETPOINT_LIMIT_MMHG);
+    CHECK(PRESSURE_SETPOINT_MAX_DEFAULT_MMHG < PRESSURE_P_MAX_ABS_DEFAULT_MMHG);
+    CHECK(PRESSURE_P_MAX_ABS_DEFAULT_MMHG <= PRESSURE_P_MAX_ABS_LIMIT_MMHG);
+    CHECK(PRESSURE_SETPOINT_LIMIT_MMHG <= 300.0f); /* teto do sistema */
+    /* limite absoluto abaixo da saturacao do sensor */
+    CHECK(PRESSURE_P_MAX_ABS_LIMIT_MMHG <= (PRESSURE_SENSOR_MAX_KPA * 7.50062f));
+    bind();
+    CHECK(s_cfg.max_setpoint_mmhg == PRESSURE_SETPOINT_MAX_DEFAULT_MMHG); /* sem clamp */
+    CHECK(s_safety.p_max_abs_mmhg == PRESSURE_P_MAX_ABS_DEFAULT_MMHG);
+    CHECK(s_cfg.setpoint_warn_mmhg == PRESSURE_SETPOINT_WARN_DEFAULT_MMHG);
+}
+
 int main(void)
 {
+    printf("params: sensor %s\n", PRESSURE_SENSOR_NAME);
+    test_sensor_model_limits();
     test_table_sane();
     test_set_writes_target_live();
     test_range_and_type_rejected();

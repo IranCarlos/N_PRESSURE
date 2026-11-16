@@ -4,7 +4,8 @@
  * Contact: dynamindelectronics@gmail.com
  * Created: 2026-09-20
  *
- * Logica pura do sensor de pressao (MPXV7025DP): contagens do ADC -> kPa,
+ * Logica pura do sensor de pressao (modelo em pressure_sensor_model.h:
+ * MPXV7025DP ou MPXV5100GP): contagens do ADC -> kPa,
  * baseline atmosferico, calibracao e deteccao de sensor invalido.
  * SEM dependencia de HAL/CMSIS: compila no host (test/host/) e no alvo.
  * O acesso ao ADC/DMA fica em ADC_Acq, que apenas alimenta este modulo.
@@ -15,16 +16,13 @@
 
 #include <stdint.h>
 #include <stddef.h>
+/* Curva, clamp e faixa valida (PRESSURE_SENSOR_*, PRESSURE_VALID_*) do
+ * sensor selecionado. */
+#include "pressure_sensor_model.h"
 
 #ifdef __cplusplus
 extern "C" {
 #endif
-
-/* Curva do sensor diferencial: 0.2 V = -25 kPa ... 4.7 V = +25 kPa (5 V). */
-#define PRESSURE_SENSOR_MIN_V        (0.2f)
-#define PRESSURE_SENSOR_MAX_V        (4.7f)
-#define PRESSURE_SENSOR_MIN_KPA      (-25.0f)
-#define PRESSURE_SENSOR_MAX_KPA      (25.0f)
 
 /* Tensao vista pelo sensor = tensao no ADC * (VSS / VREF): divisor
  * bufferizado 5 V -> 3.3 V. Valor nominal; o erro real e' absorvido pela
@@ -32,10 +30,6 @@ extern "C" {
 #define PRESSURE_ADC_FULL_SCALE_V    (3.3f)
 #define PRESSURE_SENSOR_VSS_V        (5.0f)
 #define PRESSURE_ADC_MAX_COUNTS      (65535.0f)
-
-/* Fora desta faixa (V no sensor) o sinal e' considerado cabo aberto/curto. */
-#define PRESSURE_VALID_MIN_V         (0.10f)
-#define PRESSURE_VALID_MAX_V         (4.90f)
 
 /* Amostras consecutivas com pico-a-pico == 0 para acusar sensor travado.
  * Com ADC de 16 bits + oversampling o ruido real nunca e' zero. */
